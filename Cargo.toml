@@ -1,0 +1,21 @@
+[package]
+name = "srflow"
+# T01 中为暂定版本：它不代表 crates.io 发布版本；发布范围与版本由 T11 决定。
+version = "0.0.0"
+edition = "2024"
+# MSRV 由 edition 2024 决定（该 edition 至少需要 1.85）。
+# 核心接口本身只要求 RPITIT（trait 中的 `impl Future`）与 `+ Send`，即 Rust 1.75；
+# 真正抬高的下限来自 edition，而不是执行协议。
+# 注意：尚未用 1.85 工具链实测（开发机只有 1.97.1），需在发布验收（T11）前补测。
+rust-version = "1.85"
+description = "SRFlow: a strongly-typed execution framework centered on sequential flows"
+license = "MIT"
+
+# 核心保持零普通依赖：执行协议只使用标准库的 `Future`，
+# 不绑定任何具体 executor（见 docs/SRFlow_Design_v2.0.md §12.3）。
+[dependencies]
+
+[dev-dependencies]
+# 仅用于测试与示例中驱动异步代码。选择 `futures` 是因为它不提供全局运行时，
+# 与“核心不强制绑定某个 executor”的约束一致，也比引入完整异步运行时更小。
+futures = { version = "0.3", default-features = false, features = ["executor"] }

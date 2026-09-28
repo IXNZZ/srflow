@@ -1,6 +1,6 @@
 # T01 — 单 crate 工程与异步统一执行基础
 
-> 状态：**READY；已获用户审定并授权执行，待实现与复审**。
+> 状态：**COMPLETED；实现与复审通过**。
 > 前置：任务总览 G0 已通过。
 > 实施仓库：SRFlow 独立 Git 仓库根目录。
 > 本任务关闭范围：T01；**不关闭 G1**，也不自动开始 T02。
@@ -107,3 +107,19 @@ RUSTDOCFLAGS="-D warnings" cargo doc --no-deps
 ## 6. 审查与完成规则
 
 本任务书已获用户审定，可以交给 OMP、Claude 或其他执行者实现。实现完成后由审查者对照 §4 独立复核；若不通过，继续修订 T01。全部验收通过后，审查者更新本任务与任务总览的状态和证据，再编写 T02 详细任务书。
+
+## 7. 验收记录（2026-09-28）
+
+**结论：T01 PASS。** 对照规范性设计 §3.1～3.3、§3.7～3.10、§4.1～4.5、§4.7、§5.1～5.5、§6.1～6.4、§10.2、§10.4、§10.11、§11.1～11.2、§11.7、§12.3 与 §13.6 复核；本次没有发现需要修改上位设计的偏差。
+
+| 验收项 | 复审证据 |
+| --- | --- |
+| A01 | `cargo metadata --no-deps` 确认为单个 `srflow` library crate；`src/core/` 职责分层清楚，常用契约由 crate 根部重导出。 |
+| A02～A03 | 独立集成测试、入门示例及编译失败文档测试证明 Node 自动接入、组合型 Executable 的强类型 Input／Output 与错误输入拒绝。 |
+| A04～A06 | 源码与集成测试证明组合型及嵌套组合型 child 经 `Runtime::execute` 顺序执行；业务否定仍为 Output，技术错误保持来源、默认 fail-fast；同一 Runtime 和 Executable 可重复调用。 |
+| A07 | `cargo test --doc`、Rustdoc 严格警告检查与两个离线示例通过；生产依赖为空，不绑定 executor。 |
+| A08 | 改动范围未引入 Flow、Ref、Binding、控制型 Executable、LLM、日志、Trace 或持久化。 |
+
+独立复跑：`cargo fmt --all -- --check`、`cargo check --all-targets`、`cargo clippy --all-targets --all-features -- -D warnings`、`cargo test --all-targets`（13 项通过）、`cargo test --doc`（7 项通过、1 项预期编译失败）、`RUSTDOCFLAGS=-Dwarnings cargo doc --no-deps`，以及 `cargo run --example node_only`／`composite_executable`，全部通过。额外的 `Send` 回归测试覆盖普通 Node、非 `Sync` 但不捕获 `self` 的 Node、组合型 Executable，防止 Runtime 的转发 Future 额外引入 `Sync` 要求。
+
+保留的实现取舍：`Input`／`Output` 与执行 Future 当前要求 `Send`；`Executable` 使用 RPITIT，不是 object-safe，T02 异构 Flow 需在内部适配层处理类型擦除；`ExecutionError` 当前只包装可追溯来源，外部错误需显式 `map_err`，后续出现框架不变量错误时再复核错误形状；值存储所有权策略未在 T01 冻结。`rust-version = 1.85` 尚未在 1.85 工具链实测，最迟 T11 发布验收前补测。`Cargo.lock` 已选择入库以固定开发依赖。T01 通过**不关闭 G1**，也不授权开始 T02 实现。

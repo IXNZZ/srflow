@@ -21,7 +21,7 @@ SRFlow 以独立 crate 对外提供，因此使用文档与可运行示例是交
 
 | 任务 | 内容与交付 | 主要验收条件 | 前置 | 状态 |
 | --- | --- | --- | --- | --- |
-| [T01 工程与异步执行基础](T01_Async_Execution_Foundation.md) | 建立单 crate 结构；实现 Executable、Runtime、Node 的最小公共边界、Node 自动适配和基本错误传播 | 异步 Node 与测试用组合型 Executable 均经 Runtime 执行；普通 Node 使用者无需手写 Executable，Node 不接收用于编排的 Runtime；正常业务否定结果保留在 Output，执行错误沿调用链传播；crate 首页与上述公共契约有入门说明 | G0 | READY · 已授权执行，待复审 |
+| [T01 工程与异步执行基础](T01_Async_Execution_Foundation.md) | 建立单 crate 结构；实现 Executable、Runtime、Node 的最小公共边界、Node 自动适配和基本错误传播 | 异步 Node 与测试用组合型 Executable 均经 Runtime 执行；普通 Node 使用者无需手写 Executable，Node 不接收用于编排的 Runtime；正常业务否定结果保留在 Output，执行错误沿调用链传播；crate 首页与上述公共契约有入门说明 | G0 | COMPLETED · 2026-09-28 复审通过；G1 未关闭 |
 | T02 最小 Flow 与值存储 | 实现 Flow Input、强类型 `Ref<T>`、异构步骤、顺序 `then`、显式 `output`、SubFlow 和每次调用独立的值存储；选择并记录初始所有权策略 | 不同 Input/Output 类型可连接；Ref 只读可复用且归属特定 Flow，外来 Ref 在 `then`／`output` 中被拒绝；可直接输出 Flow Input；子执行经 Runtime；重复调用不串数据 | T01 | 待开始 |
 | T03 Binding 与 Input 装配 | 实现整值读取、字段投影、多值组合和命名结构装配；复核 T02 的值存储策略能否支持这些用法 | 错误类型接线编译失败；跨 Flow Ref 经投影或组合后仍被拒绝；公开接口不提供任意业务函数映射；记录大值复用的所有权与复制代价 | T02 | 待开始 |
 | T04 Retry | 实现同一业务 Input 的有限重做语义；Condition 只消费正常 Output 中已有的控制信息 | Body 至少执行一次；`limit = 0` 被拒绝，默认最多执行 8 次；正常停止返回本轮 Output，上限耗尽返回最后正常 Output；执行错误立即传播、不触发技术重试；每轮经 Runtime | T03 | 待开始 |
