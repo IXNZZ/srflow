@@ -1,9 +1,9 @@
 //! SRFlow —— 以强类型 Flow 为中心的系统执行框架。
 //!
-//! 本 crate 当前处于 T04：提供统一异步执行基础（[`Runtime`]、[`Executable`]、[`Node`]）、最小 Flow
+//! 本 crate 当前处于 T05：提供统一异步执行基础（[`Runtime`]、[`Executable`]、[`Node`]）、最小 Flow
 //! （[`FlowBuilder`]、[`Flow`]、[`Ref`]）、Binding（整值读取、字段投影、多值组合与命名结构装配），
-//! 以及第一个控制型 Executable [`Retry`]（正常业务 Output 驱动的有限重做）。Match／Each／Iter
-//! 尚未实现。
+//! 以及两个控制型 Executable：[`Retry`]（正常业务 Output 驱动的有限重做）与 [`Match`]（依据已有
+//! 路由值执行唯一分支）。Each／Iter 尚未实现。
 //!
 //! # 四个角色
 //!
@@ -213,6 +213,69 @@
 //!
 //! 另见 `examples/retry`。
 //!
+//! # 控制：Match
+//!
+//! [`Match<K, I, O>`](Match) 依据一个**已经形成**的路由值 `K` 执行唯一分支：`Input = (K, I)`，
+//! `Output = O`。路由值由上游产生（例如一个判断 Node），Match 不参与业务判断；不同分支可以是
+//! 不同具体类型，但共享同一个 `I`／`O`。它和 Node、SubFlow 一样经 `flow.then(matcher, binding)`
+//! 连接，被选分支的实际执行重新经过同一个 [`Runtime`]。
+//!
+//! ```
+//! use srflow::{ExecutionError, Match, Node, Runtime};
+//!
+//! #[derive(Debug, PartialEq, Eq)]
+//! enum Route {
+//!     Short,
+//!     Long,
+//! }
+//!
+//! struct Shorten;
+//! impl Node for Shorten {
+//!     type Input = String;
+//!     type Output = String;
+//!     async fn run(&self, input: String) -> Result<String, ExecutionError> {
+//!         Ok(input.chars().take(3).collect())
+//!     }
+//! }
+//!
+//! struct Keep;
+//! impl Node for Keep {
+//!     type Input = String;
+//!     type Output = String;
+//!     async fn run(&self, input: String) -> Result<String, ExecutionError> {
+//!         Ok(input)
+//!     }
+//! }
+//!
+//! let mut builder = Match::<Route, String, String>::builder();
+//! builder.case(Route::Short, Shorten).unwrap();
+//! builder.case(Route::Long, Keep).unwrap();
+//! let matcher = builder.build();
+//!
+//! let runtime = Runtime::new();
+//! let output = futures::executor::block_on(
+//!     runtime.execute(&matcher, (Route::Short, String::from("abcdef"))),
+//! )
+//! .unwrap();
+//! assert_eq!(output, "abc");
+//! ```
+//!
+//! 要点：
+//!
+//! - **判断与路由分离**：`K` 由上游 Node、Flow Input 或其他已明确的位置提供；Match 不从 `I` 计算
+//!   路由，也不接受隐藏的业务判断。
+//! - **唯一执行路径**：一次执行最多调用一个分支，不按顺序试错；未选分支与 default 都不执行。
+//! - **default 只表示未命中**：命中分支失败时错误原样传播，不改走 default。
+//! - **未命中无 default**：返回以 [`NoMatch`] 为来源的 [`ExecutionError`]；外部可以
+//!   `error.source()?.downcast_ref::<NoMatch>()` 按类型识别。空 case 集合同样成立。
+//! - **三类错误分阶段**：重复 case 键、重复 default 在构建期以 [`MatchBuildError`] 拒绝（不静默
+//!   覆盖、不留下部分登记），未命中是执行期 `NoMatch`，分支自身失败是分支的 [`ExecutionError`]。
+//! - **bounds**：`K` 需要 `Eq + Send + Sync`（case 键直接存在 Match 中），`I`／`O` 只需既有
+//!   `Send`；`K`、`I`、`O` 都不要求 `Clone`。作为 Flow child 时另受 `then` 的既有 `Send + Sync +
+//!   'static` 约束。
+//!
+//! 另见 `examples/match`。
+//!
 //! # 扩展：实现组合型 Executable
 //!
 //! 需要新增执行语义（而不是新增业务操作）时直接实现 [`Executable`]。组合型实现通过父级传入的
@@ -305,7 +368,8 @@ pub mod core;
 
 pub use crate::core::{
     Assemble, Binding, Consume, Executable, ExecutionError, Field, Flow, FlowBuildError,
-    FlowBuilder, InvariantError, Node, Ref, Retry, RetryDecision, Runtime, consume,
+    FlowBuilder, InvariantError, Match, MatchBuildError, MatchBuilder, NoMatch, Node, Ref, Retry,
+    RetryDecision, Runtime, consume,
 };
 
 // 供 `field!`／`bind!` 宏展开调用；不是公开契约，请勿直接使用。

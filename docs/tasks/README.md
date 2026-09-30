@@ -25,7 +25,7 @@ SRFlow 以独立 crate 对外提供，因此使用文档与可运行示例是交
 | [T02 最小 Flow 与值存储](T02_Minimal_Flow_And_Value_Store.md) | 实现 Flow Input、强类型 `Ref<T>`、异构步骤、顺序 `then`、显式 `output`、SubFlow 和每次调用独立的值存储；选择并记录初始所有权策略 | 不同 Input/Output 类型可连接；Ref 只读可复用且归属特定 Flow，外来 Ref 在 `then`／`output` 中被拒绝；可直接输出 Flow Input；子执行经 Runtime；重复调用不串数据 | T01 | COMPLETED · 2026-09-29 复审通过；G1 于 2026-09-30 单独通过 |
 | [T03 Binding 与 Input 装配](T03_Binding_And_Input_Assembly.md) | 实现整值读取、字段投影、多值组合和命名结构装配；复核 T02 的值存储策略能否支持这些用法 | 错误类型接线编译失败；跨 Flow Ref 经投影或组合后仍被拒绝；常规 Binding 接口封闭且隐藏构造入口的剩余漏洞如实记录；明确大值复用的所有权与复制代价 | T02 | COMPLETED · 2026-09-30 复审通过；G1 于同日单独通过 |
 | [T04 Retry](T04_Retry.md) | 实现同一业务 Input 的有限重做语义；Condition 只读取正常 Output 中已有的控制信息 | Body 至少执行一次；`limit = 0` 被拒绝，默认最多执行 8 次；正常停止返回本轮 Output，上限耗尽返回最后正常 Output；执行错误立即传播、不触发技术重试；每轮经 Runtime | T03、G1 | COMPLETED · 2026-09-30 复审通过；G2 未关闭 |
-| [T05 Match](T05_Match.md) | 实现依据已有匹配值的单一路由，允许不同具体类型但相同 Input/Output 契约的分支 | Match 不生成业务判断；只执行被选分支；未命中时有 default 则执行 default、否则返回 Error；已选分支出错不改走 default；被选分支经 Runtime | T04、G1 | DRAFT · 待用户审定，尚未授权实现 |
+| [T05 Match](T05_Match.md) | 实现依据已有匹配值的单一路由，允许不同具体类型但相同 Input/Output 契约的分支 | Match 不生成业务判断；只执行被选分支；未命中时有 default 则执行 default、否则返回 Error；已选分支出错不改走 default；被选分支经 Runtime | T04、G1 | COMPLETED · 2026-09-30 复审通过；G2 未关闭 |
 | T06 Each | 实现顺序逐项处理并收集结果 | 空输入返回空集合且不执行 Body；输入与输出顺序对应；中途错误停止后续项、不返回部分正常 Output；每项经 Runtime，且不隐式传递上一项 Output | T03 | 待开始 |
 | T07 Iter | 实现以前一轮累积值组成下一轮 Input 的顺序推进 | 空输入返回初始值；跨轮结果正确传递；中途错误停止后续项、不返回部分正常 Output；每轮经 Runtime；核心 Output 是最终累积值 | T03 | 待开始 |
 | T08 核心端到端与公共边界收口 | 在本仓库内用 Fake Node 表达真实 SES 决策流程，组合 Flow、Binding、SubFlow 和四种控制型 Executable；从外部使用者视角审查公开接口；整理按学习顺序排列的 examples | 嵌套组合可自然表达；外部保持强类型；内部存储与类型擦除不泄漏；业务示例不依赖 SES 仓库或真实服务；完整测试、文档测试、README 快速入门及公开示例通过 | T04～T07 | 待开始 |
