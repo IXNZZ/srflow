@@ -24,11 +24,11 @@ SRFlow 以独立 crate 对外提供，因此使用文档与可运行示例是交
 | [T01 工程与异步执行基础](T01_Async_Execution_Foundation.md) | 建立单 crate 结构；实现 Executable、Runtime、Node 的最小公共边界、Node 自动适配和基本错误传播 | 异步 Node 与测试用组合型 Executable 均经 Runtime 执行；普通 Node 使用者无需手写 Executable，Node 不接收用于编排的 Runtime；正常业务否定结果保留在 Output，执行错误沿调用链传播；crate 首页与上述公共契约有入门说明 | G0 | COMPLETED · 2026-09-28 复审通过；G1 于 2026-09-30 单独通过 |
 | [T02 最小 Flow 与值存储](T02_Minimal_Flow_And_Value_Store.md) | 实现 Flow Input、强类型 `Ref<T>`、异构步骤、顺序 `then`、显式 `output`、SubFlow 和每次调用独立的值存储；选择并记录初始所有权策略 | 不同 Input/Output 类型可连接；Ref 只读可复用且归属特定 Flow，外来 Ref 在 `then`／`output` 中被拒绝；可直接输出 Flow Input；子执行经 Runtime；重复调用不串数据 | T01 | COMPLETED · 2026-09-29 复审通过；G1 于 2026-09-30 单独通过 |
 | [T03 Binding 与 Input 装配](T03_Binding_And_Input_Assembly.md) | 实现整值读取、字段投影、多值组合和命名结构装配；复核 T02 的值存储策略能否支持这些用法 | 错误类型接线编译失败；跨 Flow Ref 经投影或组合后仍被拒绝；常规 Binding 接口封闭且隐藏构造入口的剩余漏洞如实记录；明确大值复用的所有权与复制代价 | T02 | COMPLETED · 2026-09-30 复审通过；G1 于同日单独通过 |
-| [T04 Retry](T04_Retry.md) | 实现同一业务 Input 的有限重做语义；Condition 只读取正常 Output 中已有的控制信息 | Body 至少执行一次；`limit = 0` 被拒绝，默认最多执行 8 次；正常停止返回本轮 Output，上限耗尽返回最后正常 Output；执行错误立即传播、不触发技术重试；每轮经 Runtime | T03、G1 | COMPLETED · 2026-09-30 复审通过；G2 未关闭 |
-| [T05 Match](T05_Match.md) | 实现依据已有匹配值的单一路由，允许不同具体类型但相同 Input/Output 契约的分支 | Match 不生成业务判断；只执行被选分支；未命中时有 default 则执行 default、否则返回 Error；已选分支出错不改走 default；被选分支经 Runtime | T04、G1 | COMPLETED · 2026-09-30 复审通过；G2 未关闭 |
-| [T06 Each](T06_Each.md) | 实现顺序逐项处理并收集结果 | 空输入返回空集合且不执行 Body；输入与输出顺序对应；中途错误停止后续项、不返回部分正常 Output；每项经 Runtime，且不隐式传递上一项 Output | T03 | COMPLETED · 2026-09-30 复审通过；G2 未关闭 |
-| [T07 Iter](T07_Iter.md) | 实现以前一轮累积值组成下一轮 Input 的顺序推进 | 空输入返回初始值；跨轮结果正确传递；中途错误停止后续项、不返回部分正常 Output；每轮经 Runtime；核心 Output 是最终累积值 | T03 | COMPLETED · 2026-09-30 复审通过；G2 未关闭 |
-| T08 核心端到端与公共边界收口 | 在本仓库内用 Fake Node 表达真实 SES 决策流程，组合 Flow、Binding、SubFlow 和四种控制型 Executable；从外部使用者视角审查公开接口；整理按学习顺序排列的 examples | 嵌套组合可自然表达；外部保持强类型；内部存储与类型擦除不泄漏；业务示例不依赖 SES 仓库或真实服务；完整测试、文档测试、README 快速入门及公开示例通过 | T04～T07 | 待开始 |
+| [T04 Retry](T04_Retry.md) | 实现同一业务 Input 的有限重做语义；Condition 只读取正常 Output 中已有的控制信息 | Body 至少执行一次；`limit = 0` 被拒绝，默认最多执行 8 次；正常停止返回本轮 Output，上限耗尽返回最后正常 Output；执行错误立即传播、不触发技术重试；每轮经 Runtime | T03、G1 | COMPLETED · 2026-09-30 复审通过；G2 于同日单独通过 |
+| [T05 Match](T05_Match.md) | 实现依据已有匹配值的单一路由，允许不同具体类型但相同 Input/Output 契约的分支 | Match 不生成业务判断；只执行被选分支；未命中时有 default 则执行 default、否则返回 Error；已选分支出错不改走 default；被选分支经 Runtime | T04、G1 | COMPLETED · 2026-09-30 复审通过；G2 于同日单独通过 |
+| [T06 Each](T06_Each.md) | 实现顺序逐项处理并收集结果 | 空输入返回空集合且不执行 Body；输入与输出顺序对应；中途错误停止后续项、不返回部分正常 Output；每项经 Runtime，且不隐式传递上一项 Output | T03 | COMPLETED · 2026-09-30 复审通过；G2 于同日单独通过 |
+| [T07 Iter](T07_Iter.md) | 实现以前一轮累积值组成下一轮 Input 的顺序推进 | 空输入返回初始值；跨轮结果正确传递；中途错误停止后续项、不返回部分正常 Output；每轮经 Runtime；核心 Output 是最终累积值 | T03 | COMPLETED · 2026-09-30 复审通过；G2 于同日单独通过 |
+| [T08 核心端到端与公共边界收口](T08_Core_End_to_End_And_Public_Boundary.md) | 在本仓库内用 Fake Node 表达真实 SES 决策流程，组合 Flow、Binding、SubFlow 和四种控制型 Executable；从外部使用者视角审查公开接口；整理按学习顺序排列的 examples | 嵌套组合可自然表达；外部保持强类型；内部存储与类型擦除不泄漏；业务示例不依赖 SES 仓库或真实服务；完整测试、文档测试、README 快速入门及公开示例通过 | T04～T07、G2 | COMPLETED · 2026-09-30 复审通过；G3 未关闭 |
 | T09 LLM 扩展方案 | 单独确定 `llm` feature 的能力边界、所需外部服务适配方式、公开配置和错误语义 | 方案经评审；明确哪些内容属于可选扩展而非核心，以及如何用本地替身验收；不预设具体服务商为核心依赖 | T08 | 待开始 |
 | T10 LLM 扩展实现 | 按 T09 方案实现可直接使用的 LLM Node 与可选 `llm` feature，并补充 feature 文档和示例 | 不启用 feature 时不引入 LLM 依赖；启用后可在 Flow 中使用；自动测试不访问真实服务；外部调用错误不被框架暗中重试；示例不要求真实凭据即可验证基本用法 | T09 | 待开始 |
 | T11 发布准备 | 选择本次发布范围与 crate 版本；整理包元数据、许可证、README、示例和 feature 文档，检查打包内容及 Rustdoc | 明确是核心单独发布还是包含 `llm`；相应 feature 组合、公开示例、本地文档构建与打包／发布预检通过；公开项文档、站内链接及 feature 可见性适合 docs.rs 展示；实际发布另行确认 | T08；若包含 `llm` 则还需 T10 | 待开始 |
@@ -66,6 +66,17 @@ T04～T07 须在 T03 通过、G1 单独审查通过后，才可按各自已审�
 - Binding 能在统一 `then(executable, binding)` 入口下完成整值复用／消费、字段投影、2～8 元 tuple、命名及嵌套装配；类型错接在编译期拒绝，多来源读取登记失败保持原子性，投影不强迫复制整个根。
 
 依据 T01～T03 的验收记录、公开 API／执行路径审查及最近一次独立复跑：61 项目标测试、25 项文档测试、六个离线示例、格式／Clippy／文档构建均通过。**保留边界：**T03 的两个 `#[doc(hidden)]` 公开构造入口仍可绕过结构性约定，已作为已知漏洞写入 Rustdoc 与 T03 验收记录；G1 通过不等于该风险被类型系统封死。Rust 1.85 的 MSRV 实测留给发布前验收。G1 只解锁控制型 Executable 的任务书审定与后续逐项实现；不自动授权 T04，也不关闭 G2。
+
+### G2 独立验收记录（2026-09-30）
+
+**结论：G2 PASS。** T04～T07 已分别完成独立复审；本次另行核对四种控制语义的执行入口，而非仅将任务状态相加：
+
+- `Retry` 每轮以同一个业务 Input 调用 `Runtime::execute(&body, …)`；正常 Output 决定停止或继续，技术错误不被重试。
+- `Match` 只选择一个已登记的分支；其内部类型擦除适配层最终调用 `Runtime::execute`，被选分支出错不改走 default。
+- `Each` 顺序逐项调用 `Runtime::execute(&body, item)`，不把前一项 Output 传给下一项；`Iter` 顺序调用 `Runtime::execute(&body, (state, item))`，明确把上一轮 `T` 带入下一轮。
+- 父 `Flow` 的每个异构步骤在解析 Binding 后重新调用 `Runtime::execute(&child, input)`；因此控制器作为 Flow child、其 Body／branch 为 SubFlow 时，递归调用链仍经过同一 Runtime。Runtime 本身不含四种控制规则。
+
+独立复跑 `cargo fmt --all -- --check`、`cargo clippy --all-targets --all-features -- -D warnings`、`cargo test --all-targets`（125 项通过）和 `cargo test --doc`（33 项运行、17 项预期编译失败），全部通过。**验收边界：**G2 证明四种控制语义及递归入口已在正式 crate 中成立；它不声称完整 SES 决策流程或公共 API 使用体验已经通过。后者属于 T08。G2 通过允许起草、评审并单独授权 T08，不自动授权实施或关闭 G3。
 
 ## 5. 执行与仓库约束
 

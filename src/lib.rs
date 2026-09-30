@@ -1,9 +1,12 @@
 //! SRFlow —— 以强类型 Flow 为中心的系统执行框架。
 //!
-//! 本 crate 当前处于 T07：提供统一异步执行基础（[`Runtime`]、[`Executable`]、[`Node`]）、最小 Flow
+//! 本 crate 提供统一异步执行基础（[`Runtime`]、[`Executable`]、[`Node`]）、最小 Flow
 //! （[`FlowBuilder`]、[`Flow`]、[`Ref`]）、Binding（整值读取、字段投影、多值组合与命名结构装配），
 //! 以及四种控制型 Executable：[`Retry`]（正常业务 Output 驱动的有限重做）、[`Match`]（依据已有
 //! 路由值执行唯一分支）、[`Each`]（按顺序逐项执行并收集结果）与 [`Iter`]（携带上一轮状态的顺序推进）。
+//!
+//! 四者可以在同一条流程里组合使用；完整的端到端示例见 `examples/story_workflow`（计划 → 路由 →
+//! 逐项加工 → 逐轮推进 → 最终结果），按学习顺序排列的示例索引见仓库 README。
 //!
 //! # 四个角色
 //!
