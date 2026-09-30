@@ -23,7 +23,7 @@ SRFlow 以独立 crate 对外提供，因此使用文档与可运行示例是交
 | --- | --- | --- | --- | --- |
 | [T01 工程与异步执行基础](T01_Async_Execution_Foundation.md) | 建立单 crate 结构；实现 Executable、Runtime、Node 的最小公共边界、Node 自动适配和基本错误传播 | 异步 Node 与测试用组合型 Executable 均经 Runtime 执行；普通 Node 使用者无需手写 Executable，Node 不接收用于编排的 Runtime；正常业务否定结果保留在 Output，执行错误沿调用链传播；crate 首页与上述公共契约有入门说明 | G0 | COMPLETED · 2026-09-28 复审通过；G1 未关闭 |
 | [T02 最小 Flow 与值存储](T02_Minimal_Flow_And_Value_Store.md) | 实现 Flow Input、强类型 `Ref<T>`、异构步骤、顺序 `then`、显式 `output`、SubFlow 和每次调用独立的值存储；选择并记录初始所有权策略 | 不同 Input/Output 类型可连接；Ref 只读可复用且归属特定 Flow，外来 Ref 在 `then`／`output` 中被拒绝；可直接输出 Flow Input；子执行经 Runtime；重复调用不串数据 | T01 | COMPLETED · 2026-09-29 复审通过；G1 未关闭 |
-| T03 Binding 与 Input 装配 | 实现整值读取、字段投影、多值组合和命名结构装配；复核 T02 的值存储策略能否支持这些用法 | 错误类型接线编译失败；跨 Flow Ref 经投影或组合后仍被拒绝；公开接口不提供任意业务函数映射；记录大值复用的所有权与复制代价 | T02 | 待开始 |
+| [T03 Binding 与 Input 装配](T03_Binding_And_Input_Assembly.md) | 实现整值读取、字段投影、多值组合和命名结构装配；复核 T02 的值存储策略能否支持这些用法 | 错误类型接线编译失败；跨 Flow Ref 经投影或组合后仍被拒绝；常规 Binding 接口封闭且隐藏构造入口的剩余漏洞如实记录；明确大值复用的所有权与复制代价 | T02 | COMPLETED · 2026-09-30 复审通过；G1 待单独审查 |
 | T04 Retry | 实现同一业务 Input 的有限重做语义；Condition 只消费正常 Output 中已有的控制信息 | Body 至少执行一次；`limit = 0` 被拒绝，默认最多执行 8 次；正常停止返回本轮 Output，上限耗尽返回最后正常 Output；执行错误立即传播、不触发技术重试；每轮经 Runtime | T03 | 待开始 |
 | T05 Match | 实现依据已有匹配值的单一路由，允许不同具体类型但相同 Input/Output 契约的分支 | Match 不生成业务判断；只执行被选分支；未命中时有 default 则执行 default、否则返回 Error；已选分支出错不改走 default；被选分支经 Runtime | T03 | 待开始 |
 | T06 Each | 实现顺序逐项处理并收集结果 | 空输入返回空集合且不执行 Body；输入与输出顺序对应；中途错误停止后续项、不返回部分正常 Output；每项经 Runtime，且不隐式传递上一项 Output | T03 | 待开始 |
@@ -33,7 +33,7 @@ SRFlow 以独立 crate 对外提供，因此使用文档与可运行示例是交
 | T10 LLM 扩展实现 | 按 T09 方案实现可直接使用的 LLM Node 与可选 `llm` feature，并补充 feature 文档和示例 | 不启用 feature 时不引入 LLM 依赖；启用后可在 Flow 中使用；自动测试不访问真实服务；外部调用错误不被框架暗中重试；示例不要求真实凭据即可验证基本用法 | T09 | 待开始 |
 | T11 发布准备 | 选择本次发布范围与 crate 版本；整理包元数据、许可证、README、示例和 feature 文档，检查打包内容及 Rustdoc | 明确是核心单独发布还是包含 `llm`；相应 feature 组合、公开示例、本地文档构建与打包／发布预检通过；公开项文档、站内链接及 feature 可见性适合 docs.rs 展示；实际发布另行确认 | T08；若包含 `llm` 则还需 T10 | 待开始 |
 
-T04～T07 在 T03 通过后可以分别实现，但 T08 必须验证它们的组合，而不只验证孤立行为。T09～T10 是核心验收之后的独立扩展线，不阻塞 T08 或核心单独发布。每项任务开始前再细化实现步骤与测试用例；总览不预先冻结具体 Rust trait 签名、Binding 宏语法、值存储容器或第三方依赖。
+T04～T07 须在 T03 通过、G1 单独审查通过后，才可按各自已审定的任务书开始；T08 必须验证它们的组合，而不只验证孤立行为。T09～T10 是核心验收之后的独立扩展线，不阻塞 T08 或核心单独发布。每项任务开始前再细化实现步骤与测试用例；总览不预先冻结具体 Rust trait 签名、Binding 宏语法、值存储容器或第三方依赖。
 
 ## 3. 共通验收原则
 

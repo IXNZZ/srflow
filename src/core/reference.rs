@@ -11,13 +11,17 @@ use std::sync::atomic::{AtomicU64, Ordering};
 /// # 归属
 ///
 /// 每个 `Ref` 在内部记住自己属于哪个 Flow。把 Flow A 的 `Ref` 用在 Flow B 的
-/// `then`／`then_move`／`output` 中会在**构建阶段**被拒绝，即使两边内部位置编号相同、
-/// Rust 类型也相同。
+/// [`then`](crate::core::FlowBuilder::then)／[`then_move`](crate::core::FlowBuilder::then_move)／
+/// [`output`](crate::core::FlowBuilder::output) 中会在**构建阶段**被拒绝，即使两边内部位置编号
+/// 相同、Rust 类型也相同。把外来 `Ref` 藏在字段投影、tuple 或 [`bind!`](crate::bind) 装配中
+/// 同样会被拒绝。
 ///
 /// # 复用
 ///
 /// `Ref` 本身可以自由复制（复制的是句柄，不是业务数据）。同一个位置能否被多个步骤使用，
-/// 取决于建立连接时选择的读取方式：`then` 允许后续继续读取，`then_move` 表示把值交给这一步。
+/// 取决于建立连接时选择的读取方式：裸 `Ref` 作为 Binding 表示复用，之后仍可继续读取；
+/// [`consume`](crate::consume) 表示把值交给这一步，之后不能再读取；[`field!`](crate::field)
+/// 只借用根、复制字段，也不消费该位置。
 pub struct Ref<T> {
     flow: FlowId,
     slot: SlotId,

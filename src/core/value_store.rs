@@ -85,6 +85,30 @@ impl ValueStore {
         }
     }
 
+    /// 投影读取：借用根值并复制其中字段，不消费、不复制整个根。
+    ///
+    /// 用于字段投影：根可以是非 `Clone` 结构，只有被投影出的字段需要 `Clone`。与其余读取一样
+    /// 计入读取次数，但无论是否为最后一次读取都只复制字段、保留根值。
+    pub(crate) fn read_projected<Root, F>(
+        &mut self,
+        slot: SlotId,
+        project: fn(&Root) -> &F,
+    ) -> Result<F, ExecutionError>
+    where
+        Root: Send + 'static,
+        F: Clone + Send + 'static,
+    {
+        let (state, _) = self.begin_read(slot)?;
+        let value = state
+            .value
+            .as_ref()
+            .ok_or_else(|| ExecutionError::invariant("已声明位置没有值，但仍有读取操作"))?;
+        let root = value
+            .downcast_ref::<Root>()
+            .ok_or_else(|| ExecutionError::invariant("存储的值与强类型连接不一致"))?;
+        Ok(project(root).clone())
+    }
+
     /// 记一次读取，并返回读取后的状态。
     fn begin_read(&mut self, slot: SlotId) -> Result<(&mut Slot, bool), ExecutionError> {
         let state = self

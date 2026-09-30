@@ -1,8 +1,8 @@
 //! SRFlow —— 以强类型 Flow 为中心的系统执行框架。
 //!
-//! 本 crate 当前处于 T02：提供统一异步执行基础（[`Runtime`]、[`Executable`]、[`Node`]）与
-//! 最小 Flow（[`FlowBuilder`]、[`Flow`]、[`Ref`]，整值数据连接）。字段投影、多值组合、命名
-//! 结构装配（Binding 的其余形态）与控制型 Executable（Retry／Match／Each／Iter）尚未实现。
+//! 本 crate 当前处于 T03：提供统一异步执行基础（[`Runtime`]、[`Executable`]、[`Node`]）、
+//! 最小 Flow（[`FlowBuilder`]、[`Flow`]、[`Ref`]）以及 Binding（整值读取、字段投影、多值
+//! 组合与命名结构装配）。控制型 Executable（Retry／Match／Each／Iter）尚未实现。
 //!
 //! # 四个角色
 //!
@@ -11,6 +11,9 @@
 //! - [`Node`]：叶子业务实现；业务开发者只实现 `Node`，框架自动把它接入 `Executable`。
 //! - [`Flow`]：按声明顺序编排 Executable，并连接数据；它本身也是 `Executable`，因此可以
 //!   直接作为另一个 Flow 的 child（SubFlow）。
+//!
+//! [`Binding`] 是 Flow 的数据连接机制，不是第五个角色：它在 child 启动前把已有数据装配成
+//! child 的 Input，不进入 [`Runtime`]，也不产生执行记录。
 //!
 //! # 快速上手：只实现 Node
 //!
@@ -75,8 +78,88 @@
 //! ```
 //!
 //! 同一个位置要被多个步骤使用，用 [`FlowBuilder::then`]（复用读取，要求该 Input 实现
-//! [`Clone`]）；把值交给某一步之后不再读取，用 [`FlowBuilder::then_move`]（消费读取，不要求
-//! [`Clone`]）。`then` 的执行顺序就是执行顺序，与谁读取谁无关。
+//! [`Clone`]）；把值交给某一步之后不再读取，用 [`consume`] 或 [`FlowBuilder::then_move`]
+//! （消费读取，不要求 [`Clone`]）。`then` 的执行顺序就是执行顺序，与谁读取谁无关。
+//!
+//! # 装配 Input：Binding
+//!
+//! `then(executable, binding)` 的第二个参数描述 child 的 Input 如何从当前 Flow 已有数据中
+//! 形成。除整值 [`Ref`] 外，还可以用 [`field!`] 投影字段、用 tuple 组合多个来源、用
+//! [`bind!`] 命名装配业务结构（也可嵌套）：
+//!
+//! ```
+//! use srflow::{bind, field, ExecutionError, FlowBuilder, Node, Runtime};
+//!
+//! // 根结构没有实现 Clone：字段投影仍然可以读取它。
+//! struct Story {
+//!     plan: String,
+//!     background: String,
+//! }
+//!
+//! struct ProgressionInput {
+//!     plan: String,
+//!     key: u32,
+//!     background: String,
+//! }
+//!
+//! struct MakeKey;
+//! impl Node for MakeKey {
+//!     type Input = String;
+//!     type Output = u32;
+//!     async fn run(&self, input: String) -> Result<u32, ExecutionError> {
+//!         Ok(input.len() as u32)
+//!     }
+//! }
+//!
+//! struct Progression;
+//! impl Node for Progression {
+//!     type Input = ProgressionInput;
+//!     type Output = String;
+//!     async fn run(&self, input: ProgressionInput) -> Result<String, ExecutionError> {
+//!         Ok(format!("{}/{}/{}", input.plan, input.key, input.background))
+//!     }
+//! }
+//!
+//! let mut flow = FlowBuilder::<Story>::new();
+//! let story = flow.input();
+//! let key = flow.then(MakeKey, field!(story.plan)).unwrap();
+//! let input = bind!(ProgressionInput {
+//!     plan: field!(story.plan),
+//!     key: key,
+//!     background: field!(story.background),
+//! });
+//! let result = flow.then(Progression, input).unwrap();
+//! let flow = flow.output(result).unwrap();
+//!
+//! let runtime = Runtime::new();
+//! let story = Story {
+//!     plan: String::from("plan"),
+//!     background: String::from("bg"),
+//! };
+//! let output = futures::executor::block_on(runtime.execute(&flow, story)).unwrap();
+//! assert_eq!(output, "plan/4/bg");
+//! ```
+//!
+//! Binding 只能读取、投影、组合与构造当前 Flow 已有的值，不承担业务计算；判断与计算属于
+//! [`Node`]。形状、封闭性与 Flow 归属见 [`Binding`]、[`field!`]、[`bind!`]、[`consume`]。
+//!
+//! # Binding 的结构性边界
+//!
+//! [`Binding`] 是封闭 trait：它继承一个不可命名的私有 supertrait，业务侧无法为自定义类型实现
+//! 它，因此不存在把任意计算实现成 Binding 的入口。字段投影与命名装配只通过 [`field!`]、
+//! [`bind!`] 表达。
+//!
+//! 为让宏在业务 crate 中可用，框架保留了两个 `#[doc(hidden)]` 的最小构造入口
+//! （[`__project_field`]、[`__assemble`]）。它们是**唯一的开放面**，而且都不封闭：
+//!
+//! - `__project_field` 的回调签名是 `fn(&Root) -> &F`。Rust 不能要求返回值**来自**根：忽略根、
+//!   返回 `&'static F` 的回调同样满足该签名，因此直接调用这个入口可以**把当前 Flow 之外的
+//!   数据注入下游**（已用外部探针验证：`String` 根的 Flow，回调返回静态 `u32`，下游收到该值）；
+//! - `__assemble` 的回调是 `Fn(已解析字段) -> 结构`，直接调用它可以在回调里写任意计算。
+//!
+//! 两者都是本阶段**已知的剩余漏洞**：由本文档与代码评审承担，类型系统没有封死它们。`field!`／
+//! `bind!` 宏本身只生成字段路径与字段装配，不会注入；但宏参数里写出满足 Binding 约束的表达式
+//! 仍可能绕过约定，同样属于评审红线。因此不要直接调用这两个入口，请使用 [`field!`]、[`bind!`]。
 //!
 //! # 扩展：实现组合型 Executable
 //!
@@ -120,8 +203,8 @@
 //! [`ExecutionError::Invariant`]。错误按 fail-fast 规则向调用方传播并保留来源，Runtime 不自动
 //! 重试、跳过、回滚或切换备用路径。
 //!
-//! 接线本身不合法（跨 Flow 的 `Ref`、重复取走同一个位置）不会等到执行期才失败：它在构建期以
-//! [`FlowBuildError`] 拒绝，也不会产出一个可执行的 Flow。
+//! 接线本身不合法（跨 Flow 的 `Ref`、重复取走同一个位置、同一 Binding 内既消费又复用同一位置）
+//! 不会等到执行期才失败：它在构建期以 [`FlowBuildError`] 拒绝，也不会产出一个可执行的 Flow。
 //!
 //! # 执行不变量
 //!
@@ -146,8 +229,14 @@
 //! - **`Input` 按值传入**：语义上仍然只读，避免把实现绑死在某个生命周期上；Flow 的数据复用由
 //!   构建期选择的读取方式决定（见 [`FlowBuilder`]）。
 //! - **Flow 的数据所有权**：每个位置的值在产生时以类型擦除的形式存入本次执行的值存储；
-//!   复用读取按需要克隆，最后一次读取直接移动原值。因此单消费者链路不复制业务值，
-//!   复用链路只复制真正需要多份的那几次；非 `Clone` 值可以经 `then_move`／`output` 直通。
+//!   复用读取按需要克隆，最后一次复用/消费读取直接移动原值；字段投影借用根、只复制目标字段，
+//!   因此根不必实现 `Clone`（字段需要）。单消费者链路不复制业务值，复用链路只复制真正需要
+//!   多份的那几次；非 `Clone` 值可以经 [`consume`]／[`FlowBuilder::then_move`]／`output` 直通。
+//! - **Binding 的结构性边界**：[`Binding`] 是封闭 trait，只由框架定义的结构类型实现，公开 API
+//!   不提供 `map(any_function)`；投影与装配经 [`field!`]、[`bind!`] 表达。但为让宏可用，底层
+//!   保留了两个 `#[doc(hidden)]` 的公开构造入口，二者**都不封闭**：`__project_field` 可注入
+//!   根外数据，`__assemble` 可在回调里写任意计算。这是本阶段已知、需由评审约束的剩余漏洞，
+//!   详见“Binding 的结构性边界”一节。
 //! - **Flow 能容纳的 Executable**：为了保存在同一个 Flow 里，child 需要 `Send + Sync +
 //!   'static`，Input／Output 需要 `'static`。这比 T01 的 `Executable` 契约更严，但没有修改
 //!   T01 的公共 trait：不属于这一范围的 Executable 仍可单独经 Runtime 执行。
@@ -163,6 +252,10 @@
 pub mod core;
 
 pub use crate::core::{
-    Executable, ExecutionError, Flow, FlowBuildError, FlowBuilder, InvariantError, Node, Ref,
-    Runtime,
+    Assemble, Binding, Consume, Executable, ExecutionError, Field, Flow, FlowBuildError,
+    FlowBuilder, InvariantError, Node, Ref, Runtime, consume,
 };
+
+// 供 `field!`／`bind!` 宏展开调用；不是公开契约，请勿直接使用。
+#[doc(hidden)]
+pub use crate::core::binding::{__assemble, __project_field};

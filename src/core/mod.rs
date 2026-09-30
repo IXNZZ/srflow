@@ -4,9 +4,10 @@
 //! [`FlowBuilder`]、[`Flow`]、[`Ref`] 与 [`ExecutionError`]；需要直接实现新的执行语义
 //! （组合型 `Executable`）时再进入本模块。
 //!
-//! T02 阶段本层包含执行协议与最小 Flow（整值 `Ref<T>` 连接）。字段投影、多值组合与命名结构
-//! 装配，以及控制型 Executable，仍属于后续任务。
+//! T03 阶段本层包含执行协议、最小 Flow 与 Binding（整值读取、字段投影、多值组合与命名结构
+//! 装配）。控制型 Executable 仍属于后续任务。
 
+pub mod binding;
 pub mod error;
 pub mod executable;
 pub mod flow;
@@ -15,6 +16,7 @@ pub mod reference;
 pub mod runtime;
 mod value_store;
 
+pub use binding::{Assemble, Binding, Consume, Field, consume};
 pub use error::{ExecutionError, InvariantError};
 pub use executable::Executable;
 pub use flow::{Flow, FlowBuildError, FlowBuilder};

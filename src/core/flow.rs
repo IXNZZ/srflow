@@ -1,14 +1,17 @@
 //! Flow：按声明顺序编排 Executable，并把已有数据连接成各个 child 的 Input。
 //!
 //! Flow 只负责顺序与数据连接，不承担业务计算。构建期由 [`FlowBuilder`] 完成
-//! （取得 Input 的 [`Ref`] → 用 `then`／`then_move` 连接 child → 用 `output` 声明最终
-//! Output），构建结果 [`Flow`] 才是可被 [`Runtime`] 执行的 Executable。
+//! （取得 Input 的 [`Ref`] → 用 [`then`](FlowBuilder::then) 按 Binding 连接 child →
+//! 用 [`output`](FlowBuilder::output) 声明最终 Output），构建结果 [`Flow`] 才是可被
+//! [`Runtime`] 执行的 Executable。数据连接的形状（整值、投影、组合、命名装配）由
+//! [`Binding`] 描述。
 
 use std::fmt;
 use std::future::Future;
 use std::marker::PhantomData;
 use std::pin::Pin;
 
+use crate::core::binding::{Binding, BindingPlan, ReadMode, ResolveCtx, consume};
 use crate::core::error::InvariantError;
 use crate::core::reference::{FlowId, Ref, SlotId};
 use crate::core::value_store::ValueStore;
@@ -38,6 +41,12 @@ pub enum FlowBuildError {
     /// [`FlowBuilder::then_move`] 或 [`FlowBuilder::output`] 会消费一个位置；之后任何读取都会
     /// 得到这个错误。需要让多个 child 共用同一个位置时，用 [`FlowBuilder::then`]。
     SourceAlreadyConsumed,
+    /// 同一个 Binding 内对同一位置既消费又复用（或重复消费）。
+    ///
+    /// 消费读取会把整个位置的值移走，同一 Binding 内再读取同一个位置会产生隐式的求值顺序
+    /// 依赖。[`then_move`](FlowBuilder::then_move)／[`output`](FlowBuilder::output) 的消费应
+    /// 与复用读取分属不同步骤，或统一改用一种读取方式。
+    ReadModeConflict,
     /// 框架不变量被破坏（例如 `Ref` 指向当前 Flow 中不存在的位置）。
     Invariant(InvariantError),
 }
@@ -50,6 +59,9 @@ impl fmt::Display for FlowBuildError {
             }
             Self::SourceAlreadyConsumed => f.write_str(
                 "该数据位置的值已被取走：复用同一位置请用 then，最后一个消费者用 then_move",
+            ),
+            Self::ReadModeConflict => f.write_str(
+                "同一个 Binding 内不能既消费又复用同一位置：请拆成不同步骤或统一读取方式",
             ),
             Self::Invariant(error) => fmt::Display::fmt(error, f),
         }
@@ -93,33 +105,46 @@ impl std::error::Error for FlowBuildError {
 ///
 /// # 顺序与数据依赖
 ///
-/// `then`／`then_move` 的调用顺序就是执行顺序，与谁读取谁无关：即使某个 child 完全不使用前一步
-/// 的 Output，它也不会被跳过、重排或并行。
+/// [`then`](Self::then)（含 [`then_move`](Self::then_move)）的调用顺序就是执行顺序，与谁读取
+/// 谁无关：即使某个 child 完全不使用前一步的 Output，它也不会被跳过、重排或并行。
 ///
 /// # 读取方式
 ///
-/// 同一个数据位置可以被多个 child 使用，但要显式选择读取方式：
+/// 同一个数据位置可以被多个 child 使用，但要显式选择读取方式（通过交给 [`then`](Self::then)
+/// 的 Binding 表达）：
 ///
-/// - [`then`](Self::then)：复用读取。该位置之后仍可继续读取；本次执行按需要取副本，
-///   最后一次读取直接拿走原值。要求该 Input 实现 [`Clone`]，因为复用意味着要复制出多份值。
-/// - [`then_move`](Self::then_move)：消费读取。把该位置的值交给这一步，之后不能再读取它；
-///   不要求 [`Clone`]，用于非 `Clone` 值或明确的一次性直通。
+/// - 裸 [`Ref`]：复用读取。该位置之后仍可继续读取；本次执行按需要取副本，最后一次读取直接
+///   拿走原值。要求该 Input 实现 [`Clone`]，因为复用意味着要复制出多份值。
+/// - [`consume`]／[`then_move`](Self::then_move)：消费读取。把该位置的
+///   值交给这一步，之后不能再读取它；不要求 [`Clone`]，用于非 `Clone` 值或一次性直通。
+/// - [`field!`](crate::field)：字段投影。借用根、复制字段，根不必实现 `Clone`，该位置之后
+///   仍可继续读取。
 ///
-/// 位置是“先声明后使用”的：`Ref` 只能由 [`input`](Self::input) 与 `then`／`then_move` 的返回
-/// 值产生，因此不存在指向尚未声明位置的 `Ref`。
+/// 位置是“先声明后使用”的：`Ref` 只能由 [`input`](Self::input) 与 [`then`](Self::then) 的
+/// 返回值产生，因此不存在指向尚未声明位置的 `Ref`。
 ///
 /// # 数据所有权策略与代价
 ///
-/// 每个位置的值在产生时存入本次执行的值存储。读取方式决定它怎么被交给 child：`then` 复用
-/// 读取时按需复制、最后一次读取直接移动，`then_move`／`output` 直接移动。因此：
+/// 每个位置的值在产生时存入本次执行的值存储。读取方式决定它怎么被交给 child：
 ///
-/// - 单消费者链路不复制业务值；
-/// - 一个位置在本次执行中被读取 R 次就发生 R−1 次复制：`then` 的每次复用、以及最多一次由
-///   `then_move` 或 `output` 发起的消费读取都计入 R；除最后一次读取直接移动原值外，其余每次
-///   都要复制一份。注意 `output` 若也选中该位置，它同样算一次读取，会再多出一次复制。
+/// - 复用读取（裸 [`Ref`]）：只有当它是该位置的**最后一次读取**时才直接
+///   移动原值，否则克隆整值；
+/// - 消费读取（[`consume`]／[`then_move`](Self::then_move)／[`output`](Self::output)）：
+///   把值移出，且必为该位置的最后一次读取；
+/// - 字段投影（[`field!`](crate::field)）：借用根、只克隆目标字段，永远不移动根，也不消费
+///   该位置。
 ///
-/// 例如一个位置被两个 child 用 `then` 复用、再由 `output` 取出：共读取 3 次、复制 2 次；
-/// 若 `output` 转而选中别的位置，则同两个 child 只读取 2 次、复制 1 次。
+/// 因此复制代价取决于**该位置所有读取的实际顺序**（顺序即 `then` 的声明顺序），不能只看整值
+/// 读取次数：设某位置依次发生 r₁…rₙ 次读取，则整值克隆次数＝复用读取次数 − [rₙ 是复用读取]，
+/// 投影读取额外各克隆一次字段。例如：
+///
+/// - 两个 child 用裸 `Ref` 复用、再由 `output` 取出：顺序 [复用, 复用, 消费]，前两次各克隆
+///   整值、最后一次移动 → 整值复制 2 次；
+/// - 先裸 `Ref` 复用一次、随后投影字段：顺序 [复用, 投影]，此时最后一次读取是投影，复用不是
+///   最后一次 → **整值复制 1 次**（整值读取只有 1 次也照样复制）；
+/// - 先投影、最后裸 `Ref` 复用一次：顺序 [投影, 复用]，复用是最后一次 → 直接移动，整值复制
+///   0 次；
+/// - 只投影一个字段：不复制根，只复制该字段。
 ///
 /// 与其他候选方案的比较：
 ///
@@ -129,10 +154,11 @@ impl std::error::Error for FlowBuildError {
 /// | 值以 `Arc<T>` 保存 | 读取只递增引用计数 | child 的 Input 是 owned 的 `T`，共享后仍要交出一个 `T`，无法避免复制；除非把 `Arc<T>` 泄漏进业务侧 Input |
 /// | 借用（把 Input 改成 `&T`） | 零复制 | 会改变 T01 的 Input 契约，并把生命周期传播到每个 Node 与组合型 Executable |
 /// | 全部按所有权转移 | 零复制 | 值被取走后第二个 child 无法使用，破坏 Ref 可复用的设计语义 |
+/// | 为投影复制整个根 | 结构简单 | 取一个小字段却要复制根上的大字段，失去投影的意义 |
 ///
 /// 这套策略保持 T01 的 owned Input 与 `Send` Future：`Flow` 与它的值存储仍然只保存
-/// `Send` 的业务值。T03 的结构性装配同样只需要读取已有 `Ref`，届时按投影／组合复制所需的部分
-/// 即可，类型擦除继续留在框架内部。
+/// `Send` 的业务值；字段投影只借用根、复制字段，不把根复制进业务侧，类型擦除继续留在框架
+/// 内部。
 ///
 /// # 未完成的 Flow
 ///
@@ -158,9 +184,10 @@ pub struct FlowBuilder<I> {
 
 #[derive(Debug, Default, Clone, Copy)]
 struct SlotMeta {
-    /// 构建期登记的读取次数，执行期用于判断某次读取是否为最后一次。
+    /// 构建期登记的读取次数；整值复用、字段投影与消费读取都计入。执行期用于判断某次读取
+    /// 是否为最后一次（只有最后一次复用/消费才把值移出存储）。
     reads: u32,
-    /// 值是否已经被 `then_move`／`output` 取走。
+    /// 值是否已经被消费读取（`consume`／`then_move`／`output`）取走。
     consumed: bool,
 }
 
@@ -180,19 +207,28 @@ impl<I> FlowBuilder<I> {
         Ref::new(self.id, INPUT_SLOT)
     }
 
-    /// 加入一个 child，并声明它读取哪个位置（复用读取）。
+    /// 加入一个 child，并声明它的 Input 如何从当前 Flow 已有数据中形成（Binding）。
     ///
-    /// 该位置之后仍可继续读取（包括被 [`output`](Self::output) 选中）：执行时除最后一次读取外
-    /// 都会克隆一份值给 child。
+    /// `binding` 可以是：
     ///
-    /// # 错误
+    /// - 一个 [`Ref<T>`](Ref)：复用整值，要求 `T: Clone`，之后仍可继续读取该位置；
+    /// - [`consume(ref)`](crate::core::consume)：显式消费整值，不要求 `Clone`，之后不能再读取；
+    /// - [`field!`](crate::field) 的字段投影：借用根、复制字段，根不需要 `Clone`；
+    /// - 1～8 元 tuple：元素是任意 Binding（可混用 `Ref`、`field!`、`consume`、`bind!`）；
+    /// - [`bind!`](crate::bind) 的命名结构装配，并支持嵌套。
     ///
-    /// - [`FlowBuildError::ForeignRef`]：`source` 属于另一个 Flow。
-    /// - [`FlowBuildError::SourceAlreadyConsumed`]：该位置的值已被 `then_move`／`output` 取走。
+    /// Binding 的输出类型必须与 child 的 Input 一致，类型不一致无法编译。
+    ///
+    /// # 构建期校验（原子）
+    ///
+    /// Binding 依赖的每个根 `Ref` 都必须属于当前 Flow。外来 Ref 无论藏在字段投影、tuple 还是
+    /// 嵌套装配中，都会在构建阶段被拒绝；失败时不登记 child，也不修改 builder：
+    ///
+    /// - [`FlowBuildError::ForeignRef`]：某个根 `Ref` 属于另一个 Flow。
+    /// - [`FlowBuildError::SourceAlreadyConsumed`]：某个位置已被消费读取取走。
+    /// - [`FlowBuildError::ReadModeConflict`]：同一 Binding 内对同一位置既消费又复用（或重复消费）。
     ///
     /// # 类型连接
-    ///
-    /// `source` 的类型必须与该 child 的 Input 一致；不一致无法编译。
     ///
     /// ```compile_fail
     /// use srflow::{ExecutionError, FlowBuilder, Node};
@@ -207,12 +243,12 @@ impl<I> FlowBuilder<I> {
     /// }
     ///
     /// let mut flow = FlowBuilder::<u32>::new();
-    /// let input = flow.input();          // Ref<u32>
-    /// // Length 需要 Ref<String>，类型不匹配，无法编译。
+    /// let input = flow.input();          // Ref<u32> 的 Output 是 u32
+    /// // Length 的 Input 是 String，绑定输出不匹配，无法编译。
     /// let _ = flow.then(Length, input);
     /// ```
     ///
-    /// 复用读取意味着要复制出多份值，因此 Input 必须实现 [`Clone`]；非 `Clone` 值请用
+    /// 复用整值要求 `T: Clone`；非 `Clone` 值请用 [`consume`] 或
     /// [`then_move`](Self::then_move)。
     ///
     /// ```compile_fail
@@ -220,8 +256,8 @@ impl<I> FlowBuilder<I> {
     ///
     /// struct Payload(String);            // 没有实现 Clone
     ///
-    /// struct Consume;
-    /// impl Node for Consume {
+    /// struct Describe;
+    /// impl Node for Describe {
     ///     type Input = Payload;
     ///     type Output = usize;
     ///     async fn run(&self, input: Payload) -> Result<usize, ExecutionError> {
@@ -231,39 +267,65 @@ impl<I> FlowBuilder<I> {
     ///
     /// let mut flow = FlowBuilder::<Payload>::new();
     /// let input = flow.input();
-    /// // Payload 没有实现 Clone，`then` 无法编译；这里应该用 `then_move`。
-    /// let _ = flow.then(Consume, input);
+    /// // 裸 Ref<Payload> 要求 Payload: Clone；这里应该用 consume(input) 或 then_move。
+    /// let _ = flow.then(Describe, input);
     /// ```
-    pub fn then<E>(
+    ///
+    /// # 示例：字段投影
+    ///
+    /// ```
+    /// use srflow::{field, ExecutionError, FlowBuilder, Node, Runtime};
+    ///
+    /// // 根结构没有实现 Clone。
+    /// struct Story { plan: String }
+    ///
+    /// struct Length;
+    /// impl Node for Length {
+    ///     type Input = String;
+    ///     type Output = usize;
+    ///     async fn run(&self, input: String) -> Result<usize, ExecutionError> {
+    ///         Ok(input.chars().count())
+    ///     }
+    /// }
+    ///
+    /// let mut flow = FlowBuilder::<Story>::new();
+    /// let story = flow.input();
+    /// let length = flow.then(Length, field!(story.plan)).unwrap();
+    /// let flow = flow.output(length).unwrap();
+    ///
+    /// let runtime = Runtime::new();
+    /// let story = Story { plan: String::from("abcd") };
+    /// let output = futures::executor::block_on(runtime.execute(&flow, story)).unwrap();
+    /// assert_eq!(output, 4);
+    /// ```
+    pub fn then<E, B>(
         &mut self,
         executable: E,
-        source: Ref<E::Input>,
+        binding: B,
     ) -> Result<Ref<E::Output>, FlowBuildError>
     where
         E: Executable + Send + Sync + 'static,
-        E::Input: Clone + 'static,
+        E::Input: Send + 'static,
         E::Output: 'static,
+        B: Binding<Output = E::Input> + Send + Sync + 'static,
     {
-        let slot = self.claim(&source, false)?;
+        let plan = binding.__plan();
+        self.commit_plan(&plan)?;
         let target = self.next_slot();
         self.steps
-            .push(Box::new(SharedStep::new(executable, slot, target)));
+            .push(Box::new(BindingStep::new(executable, binding, target)));
         Ok(Ref::new(self.id, target))
     }
 
     /// 加入一个 child，并把该位置的值交给它（消费读取）。
     ///
-    /// 这一步之后不能再读取该位置；不要求 Input 实现 [`Clone`]，因此非 `Clone` 的业务值可以
-    /// 沿“Input → child → … → Output”直通。
+    /// 等价于 `then(executable, consume(source))`，是 T02 用法的兼容便捷方法：读取语义、构建期
+    /// 校验与读取登记都走同一套 [`then`](Self::then) 路径，不另建系统。不要求 Input 实现
+    /// [`Clone`]，因此非 `Clone` 的业务值可以沿“Input → child → … → Output”直通。
     ///
     /// # 错误
     ///
-    /// - [`FlowBuildError::ForeignRef`]：`source` 属于另一个 Flow。
-    /// - [`FlowBuildError::SourceAlreadyConsumed`]：该位置的值已经被取走。
-    ///
-    /// # 类型连接
-    ///
-    /// 与 [`then`](Self::then) 相同：`source` 的类型必须与该 child 的 Input 一致。
+    /// 与 [`then`](Self::then) 相同。
     ///
     /// # 示例：非 `Clone` 值直通
     ///
@@ -301,11 +363,7 @@ impl<I> FlowBuilder<I> {
         E::Input: 'static,
         E::Output: 'static,
     {
-        let slot = self.claim(&source, true)?;
-        let target = self.next_slot();
-        self.steps
-            .push(Box::new(ConsumingStep::new(executable, slot, target)));
-        Ok(Ref::new(self.id, target))
+        self.then(executable, consume(source))
     }
 
     /// 声明最终 Output，得到可执行的 [`Flow`]。
@@ -349,6 +407,63 @@ impl<I> FlowBuilder<I> {
             meta.consumed = true;
         }
         Ok(slot)
+    }
+
+    /// 校验并一次性提交一个 Binding 的读取计划。
+    ///
+    /// 先对计划里所有根 Ref 做归属、位置有效性、既有消费状态与计划内部读/消费冲突的完整校验；
+    /// 任一项失败时直接返回，`reads`、`consumed` 与 Step 列表都不变。全部通过后才写入读取计数，
+    /// 避免逐个登记在第 k 个 Ref 失败时留下前 k−1 条读取记录。
+    fn commit_plan(&mut self, plan: &BindingPlan) -> Result<(), FlowBuildError> {
+        // 按 slot 聚合读取次数与消费次数；`Vec` 而非 `HashMap`，计划规模很小。
+        let mut totals: Vec<(SlotId, u32, u32)> = Vec::new();
+        for entry in &plan.0 {
+            if entry.flow != self.id {
+                return Err(FlowBuildError::ForeignRef);
+            }
+            let Some(meta) = self.slots.get(entry.slot.0) else {
+                return Err(FlowBuildError::Invariant(InvariantError::new(
+                    "绑定引用了本 Flow 之外的数据位置",
+                )));
+            };
+            if meta.consumed {
+                return Err(FlowBuildError::SourceAlreadyConsumed);
+            }
+            let consumes = u32::from(entry.mode == ReadMode::Consume);
+            match totals.iter_mut().find(|(slot, _, _)| *slot == entry.slot) {
+                Some((_, reads, consumes_total)) => {
+                    *reads += 1;
+                    *consumes_total += consumes;
+                }
+                None => totals.push((entry.slot, 1, consumes)),
+            }
+        }
+
+        // 计划内部冲突：同一位置既消费又复用（或重复消费）。
+        for (_, reads, consumes) in &totals {
+            if *consumes > 0 && *reads > 1 {
+                return Err(FlowBuildError::ReadModeConflict);
+            }
+        }
+
+        // 计数溢出在写入前统一检查，保证提交阶段不会中途失败。
+        for (slot, reads, _) in &totals {
+            self.slots[slot.0]
+                .reads
+                .checked_add(*reads)
+                .ok_or_else(|| {
+                    FlowBuildError::Invariant(InvariantError::new("数据位置读取计数溢出"))
+                })?;
+        }
+
+        for (slot, reads, consumes) in totals {
+            let meta = &mut self.slots[slot.0];
+            meta.reads += reads;
+            if consumes > 0 {
+                meta.consumed = true;
+            }
+        }
+        Ok(())
     }
 
     /// 为一个新产生的值分配数据位置。
@@ -525,65 +640,37 @@ trait Step: Send + Sync {
     fn run<'a>(&'a self, runtime: &'a Runtime, store: &'a mut ValueStore) -> StepFuture<'a>;
 }
 
-/// 复用读取的一步。
-struct SharedStep<E> {
+/// 一步的执行：先解析 Binding 得到 owned Input，再经 Runtime 执行 child，最后写回 Output。
+///
+/// 不同类型、不同 Input／Output 的 child 由泛型 `E` 表示，Binding 由泛型 `B` 表示；两者的
+/// 类型关系在 [`FlowBuilder::then`] 的签名处已经固定。Binding 解析发生在 child 启动之前，
+/// 并且不经过 [`Runtime`]。
+struct BindingStep<E, B> {
     executable: E,
-    source: SlotId,
+    binding: B,
     target: SlotId,
 }
 
-impl<E> SharedStep<E> {
-    fn new(executable: E, source: SlotId, target: SlotId) -> Self {
+impl<E, B> BindingStep<E, B> {
+    fn new(executable: E, binding: B, target: SlotId) -> Self {
         Self {
             executable,
-            source,
+            binding,
             target,
         }
     }
 }
 
-impl<E> Step for SharedStep<E>
+impl<E, B> Step for BindingStep<E, B>
 where
     E: Executable + Send + Sync + 'static,
-    E::Input: Clone + 'static,
+    E::Input: Send + 'static,
     E::Output: 'static,
+    B: Binding<Output = E::Input> + Send + Sync + 'static,
 {
     fn run<'a>(&'a self, runtime: &'a Runtime, store: &'a mut ValueStore) -> StepFuture<'a> {
         Box::pin(async move {
-            let input = store.read_shared::<E::Input>(self.source)?;
-            let output = runtime.execute(&self.executable, input).await?;
-            store.insert::<E::Output>(self.target, output);
-            Ok(())
-        })
-    }
-}
-
-/// 消费读取的一步。
-struct ConsumingStep<E> {
-    executable: E,
-    source: SlotId,
-    target: SlotId,
-}
-
-impl<E> ConsumingStep<E> {
-    fn new(executable: E, source: SlotId, target: SlotId) -> Self {
-        Self {
-            executable,
-            source,
-            target,
-        }
-    }
-}
-
-impl<E> Step for ConsumingStep<E>
-where
-    E: Executable + Send + Sync + 'static,
-    E::Input: 'static,
-    E::Output: 'static,
-{
-    fn run<'a>(&'a self, runtime: &'a Runtime, store: &'a mut ValueStore) -> StepFuture<'a> {
-        Box::pin(async move {
-            let input = store.read_consuming::<E::Input>(self.source)?;
+            let input = self.binding.__resolve(&mut ResolveCtx(&mut *store))?;
             let output = runtime.execute(&self.executable, input).await?;
             store.insert::<E::Output>(self.target, output);
             Ok(())
@@ -598,6 +685,7 @@ mod tests {
 
     use super::*;
     use crate::core::Node;
+    use crate::core::binding::PlanEntry;
     use crate::core::value_store::ValueStore;
 
     /// 记录自己是否被执行过的叶子。
@@ -619,19 +707,79 @@ mod tests {
     #[test]
     fn input_resolution_failure_stops_before_the_child_runs() {
         let runs = Arc::new(AtomicU32::new(0));
-        let step = ConsumingStep::new(
+        let step = BindingStep::new(
             Counting {
                 runs: Arc::clone(&runs),
             },
-            SlotId(0),
+            consume(Ref::new(FlowId::next(), SlotId(0))),
             SlotId(1),
         );
-        // 位置 0 登记了一次读取，但从来没有值写入：这是框架不变量被破坏的情形。
+        // 位置 0 登记了一次消费读取，但从来没有值写入：这是框架不变量被破坏的情形。
         let mut store = ValueStore::new(&[1, 0]);
 
         let error = futures::executor::block_on(step.run(&Runtime::new(), &mut store)).unwrap_err();
 
         assert!(matches!(error, ExecutionError::Invariant(_)));
         assert_eq!(runs.load(Ordering::SeqCst), 0, "child 不得被执行");
+    }
+
+    /// 定向验证：计划中后位出现外来 Ref 时，前位读取也不得被登记。
+    ///
+    /// 外部测试只能观察到“结果仍正确”，而多登记一次读取只会让该次读取走克隆路径、结果不变；
+    /// 这里直接断言登记状态，才能真正证明失败是原子的。
+    #[test]
+    fn a_foreign_entry_in_the_middle_registers_nothing() {
+        let mut flow = FlowBuilder::<String>::new();
+        let input = flow.input();
+        let plan = BindingPlan(vec![
+            PlanEntry {
+                flow: flow.id,
+                slot: input.slot(),
+                mode: ReadMode::Read,
+            },
+            PlanEntry {
+                flow: FlowId::next(),
+                slot: input.slot(),
+                mode: ReadMode::Read,
+            },
+        ]);
+
+        assert_eq!(
+            flow.commit_plan(&plan).unwrap_err(),
+            FlowBuildError::ForeignRef
+        );
+        assert_eq!(
+            flow.slots[INPUT_SLOT.0].reads, 0,
+            "失败不得留下前一条读取登记"
+        );
+        assert!(!flow.slots[INPUT_SLOT.0].consumed);
+        assert!(flow.steps.is_empty());
+    }
+
+    /// 定向验证：计划内部冲突时，`reads`、`consumed` 与 Step 列表都不变。
+    #[test]
+    fn a_conflicting_entry_registers_nothing() {
+        let mut flow = FlowBuilder::<String>::new();
+        let input = flow.input();
+        let plan = BindingPlan(vec![
+            PlanEntry {
+                flow: flow.id,
+                slot: input.slot(),
+                mode: ReadMode::Consume,
+            },
+            PlanEntry {
+                flow: flow.id,
+                slot: input.slot(),
+                mode: ReadMode::Read,
+            },
+        ]);
+
+        assert_eq!(
+            flow.commit_plan(&plan).unwrap_err(),
+            FlowBuildError::ReadModeConflict
+        );
+        assert_eq!(flow.slots[INPUT_SLOT.0].reads, 0, "失败不得登记任何读取");
+        assert!(!flow.slots[INPUT_SLOT.0].consumed, "失败不得标记消费");
+        assert!(flow.steps.is_empty());
     }
 }
