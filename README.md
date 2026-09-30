@@ -2,7 +2,7 @@
 
 System Runtime Workflow（SRFlow）是一个以强类型 Flow 为中心的 Rust 执行框架。本仓库独立维护其设计、实现、测试和示例。
 
-T01～T05 已通过复审（G1 于 2026-09-30 单独通过；G2 尚未关闭）。仓库是一个可编译的 `srflow` library crate，提供统一异步执行基础 `Runtime`、`Executable`、`Node`，最小 Flow（`FlowBuilder`、`Flow`、`Ref`），Binding（整值读取、字段投影、2～8 元 tuple、命名结构装配，由 `consume`、`field!`、`bind!` 表达），以及两个控制型 Executable：`Retry`（正常业务 Output 驱动的有限重做）与 `Match`（依据已有路由值执行唯一分支）。Each／Iter 仍在后续任务中。
+T01～T05 已通过复审，T06 Each 已实现并完成复审（G1 于 2026-09-30 单独通过；G2 尚未关闭）。仓库是一个可编译的 `srflow` library crate，提供统一异步执行基础 `Runtime`、`Executable`、`Node`，最小 Flow（`FlowBuilder`、`Flow`、`Ref`），Binding（整值读取、字段投影、2～8 元 tuple、命名结构装配，由 `consume`、`field!`、`bind!` 表达），以及三个控制型 Executable：`Retry`（正常业务 Output 驱动的有限重做）、`Match`（依据已有路由值执行唯一分支）与 `Each`（顺序逐项执行并收集结果）。Iter 仍在后续任务中。
 
 ```
 cargo test --all-targets                  # 测试
@@ -14,6 +14,7 @@ cargo run --example binding_projection    # Binding：非 Clone 根 + 字段投�
 cargo run --example binding_assembly      # Binding：四来源命名装配与嵌套装配
 cargo run --example retry                 # Retry：生成→检查→重做、早停、耗尽、作为 Flow child
 cargo run --example match                 # Match：JudgeNode 产出路由值、tuple Binding 组装 (K, I)、default
+cargo run --example each                  # Each：顺序逐项执行、Flow Body、非 Clone 元素、作为 Flow child
 ```
 
 示例与文档测试用 `futures::executor::block_on` 驱动异步代码；`srflow` 本身不依赖任何 executor，使用者需要在自己的项目里选择并添加一个（本仓库的开发依赖不会随 `srflow` 提供）。

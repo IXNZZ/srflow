@@ -1,9 +1,9 @@
 //! SRFlow —— 以强类型 Flow 为中心的系统执行框架。
 //!
-//! 本 crate 当前处于 T05：提供统一异步执行基础（[`Runtime`]、[`Executable`]、[`Node`]）、最小 Flow
+//! 本 crate 当前处于 T06：提供统一异步执行基础（[`Runtime`]、[`Executable`]、[`Node`]）、最小 Flow
 //! （[`FlowBuilder`]、[`Flow`]、[`Ref`]）、Binding（整值读取、字段投影、多值组合与命名结构装配），
-//! 以及两个控制型 Executable：[`Retry`]（正常业务 Output 驱动的有限重做）与 [`Match`]（依据已有
-//! 路由值执行唯一分支）。Each／Iter 尚未实现。
+//! 以及三个控制型 Executable：[`Retry`]（正常业务 Output 驱动的有限重做）、[`Match`]（依据已有
+//! 路由值执行唯一分支）与 [`Each`]（按顺序逐项执行并收集结果）。Iter 尚未实现。
 //!
 //! # 四个角色
 //!
@@ -276,6 +276,73 @@
 //!
 //! 另见 `examples/match`。
 //!
+//! # 控制：Each
+//!
+//! [`Each<B>`](Each) 按输入顺序对集合中的每个 Item 调用**同一个 Body**，把结果按对应顺序收集为
+//! `Vec<O>`：契约是 `Vec<I> → Vec<O>`，`I`／`O` 由 Body 的 `Executable::Input`／`Output` 决定。
+//! Body 可以是 Node、Flow 或其他合法 Executable；每个 Item 的实际调用都重新经过同一个 [`Runtime`]。
+//!
+//! ```
+//! use srflow::{Each, ExecutionError, FlowBuilder, Node, Runtime};
+//!
+//! struct Length;
+//! impl Node for Length {
+//!     type Input = String;
+//!     type Output = usize;
+//!     async fn run(&self, input: String) -> Result<usize, ExecutionError> {
+//!         Ok(input.chars().count())
+//!     }
+//! }
+//!
+//! struct Total;
+//! impl Node for Total {
+//!     type Input = Vec<usize>;
+//!     type Output = usize;
+//!     async fn run(&self, input: Vec<usize>) -> Result<usize, ExecutionError> {
+//!         Ok(input.into_iter().sum())
+//!     }
+//! }
+//!
+//! let runtime = Runtime::new();
+//!
+//! // 直接经 Runtime 执行。
+//! let lengths = futures::executor::block_on(
+//!     runtime.execute(&Each::new(Length), vec![String::from("ab"), String::from("cde")]),
+//! )
+//! .unwrap();
+//! assert_eq!(lengths, vec![2, 3]);
+//!
+//! // 作为父 Flow 的普通 child：集合由 Flow Input 提供，`Vec<O>` 继续交给下游。
+//! let mut flow = FlowBuilder::<Vec<String>>::new();
+//! let input = flow.input();
+//! // 消费读取：整个集合交给 Each，不对元素做额外克隆。
+//! let lengths = flow.then_move(Each::new(Length), input).unwrap();
+//! let total = flow.then_move(Total, lengths).unwrap();
+//! let flow = flow.output(total).unwrap();
+//!
+//! let total = futures::executor::block_on(
+//!     runtime.execute(&flow, vec![String::from("ab"), String::from("cde")]),
+//! )
+//! .unwrap();
+//! assert_eq!(total, 5);
+//! ```
+//!
+//! 要点：
+//!
+//! - **次数由集合限定**：全部正常完成时每个 Item 恰好调用 Body 一次；若某项出错，后续项不再执行。
+//!   没有独立 `limit`。
+//! - **严格顺序**：第 k 项完成之后才开始第 k+1 项；不会先启动多个子调用再排序结果，也不会并行。
+//! - **空集合不是错误**：`[] → []`，Body 执行 0 次；若业务认为空集合非法，应由进入 Each 之前的检查表达。
+//! - **第一处错误即传播**：出错项之后的 Item 不再启动，先前结果不作为正常 `Vec<O>` 返回，外部副作用也不
+//!   自动回滚。
+//! - **Each 本身不建立跨项数据关系**：`Body(I2)` 的 Input 不包含 `O1`；需要跨项推进请用 Iter，而不是用
+//!   共享可变状态模拟。Body 仍可访问共享的外部资源，因此不宣称各项绝对独立。
+//! - **bounds**：`Body: Executable + Sync`（同一次执行中反复借用 `&self.body` 并跨越 `.await`）；
+//!   `I`／`O` 只受既有 `Send` 约束，且与 Body 一样都不要求 `Clone`。作为 Flow child 时另受 `then` 的
+//!   既有 `Send + Sync + 'static` 约束。
+//!
+//! 另见 `examples/each`。
+//!
 //! # 扩展：实现组合型 Executable
 //!
 //! 需要新增执行语义（而不是新增业务操作）时直接实现 [`Executable`]。组合型实现通过父级传入的
@@ -367,7 +434,7 @@
 pub mod core;
 
 pub use crate::core::{
-    Assemble, Binding, Consume, Executable, ExecutionError, Field, Flow, FlowBuildError,
+    Assemble, Binding, Consume, Each, Executable, ExecutionError, Field, Flow, FlowBuildError,
     FlowBuilder, InvariantError, Match, MatchBuildError, MatchBuilder, NoMatch, Node, Ref, Retry,
     RetryDecision, Runtime, consume,
 };
