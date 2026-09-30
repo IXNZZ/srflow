@@ -4,15 +4,16 @@
 //! [`FlowBuilder`]、[`Flow`]、[`Ref`] 与 [`ExecutionError`]；需要直接实现新的执行语义
 //! （组合型 `Executable`）时再进入本模块。
 //!
-//! T06 阶段本层包含执行协议、最小 Flow、Binding（整值读取、字段投影、多值组合与命名结构装配），
-//! 以及三个控制型 Executable：`Retry`（有限重做）、`Match`（依据已有路由值的单一路由）与
-//! `Each`（顺序逐项执行并收集结果）。Iter 仍属于后续任务。
+//! T07 阶段本层包含执行协议、最小 Flow、Binding（整值读取、字段投影、多值组合与命名结构装配），
+//! 以及四种控制型 Executable：`Retry`（有限重做）、`Match`（依据已有路由值的单一路由）、
+//! `Each`（顺序逐项执行并收集结果）与 `Iter`（携带上一轮状态的顺序推进）。
 
 pub mod binding;
 pub mod each;
 pub mod error;
 pub mod executable;
 pub mod flow;
+pub mod iter;
 pub mod r#match;
 pub mod node;
 pub mod reference;
@@ -25,6 +26,7 @@ pub use each::Each;
 pub use error::{ExecutionError, InvariantError};
 pub use executable::Executable;
 pub use flow::{Flow, FlowBuildError, FlowBuilder};
+pub use iter::Iter;
 pub use r#match::{Match, MatchBuildError, MatchBuilder, NoMatch};
 pub use node::Node;
 pub use reference::Ref;

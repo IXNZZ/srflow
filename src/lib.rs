@@ -1,9 +1,9 @@
 //! SRFlow —— 以强类型 Flow 为中心的系统执行框架。
 //!
-//! 本 crate 当前处于 T06：提供统一异步执行基础（[`Runtime`]、[`Executable`]、[`Node`]）、最小 Flow
+//! 本 crate 当前处于 T07：提供统一异步执行基础（[`Runtime`]、[`Executable`]、[`Node`]）、最小 Flow
 //! （[`FlowBuilder`]、[`Flow`]、[`Ref`]）、Binding（整值读取、字段投影、多值组合与命名结构装配），
-//! 以及三个控制型 Executable：[`Retry`]（正常业务 Output 驱动的有限重做）、[`Match`]（依据已有
-//! 路由值执行唯一分支）与 [`Each`]（按顺序逐项执行并收集结果）。Iter 尚未实现。
+//! 以及四种控制型 Executable：[`Retry`]（正常业务 Output 驱动的有限重做）、[`Match`]（依据已有
+//! 路由值执行唯一分支）、[`Each`]（按顺序逐项执行并收集结果）与 [`Iter`]（携带上一轮状态的顺序推进）。
 //!
 //! # 四个角色
 //!
@@ -343,6 +343,66 @@
 //!
 //! 另见 `examples/each`。
 //!
+//! # 控制：Iter
+//!
+//! [`Iter<Item, T, B>`](Iter) 把**上一轮的正常 Output 作为下一轮 Input 的状态部分**，按 Item 顺序
+//! 推进，最终只返回最后的 `T`：契约是 `(Vec<Item>, T) → T`，Body 是 `(T, Item) → T`。它建立的是
+//! 显式的 `PreviousOutput → NextInput` 关系（“后一项需要看到前一项已经形成的结果”），因此与
+//! [`Each`] 的逐项独立处理不同。
+//!
+//! ```
+//! use srflow::{ExecutionError, Iter, Node, Runtime};
+//!
+//! struct Key(String);
+//!
+//! struct Prose {
+//!     plan: String,
+//!     prose: String,
+//! }
+//!
+//! struct Advance;
+//! impl Node for Advance {
+//!     type Input = (Prose, Key);
+//!     type Output = Prose;
+//!     async fn run(&self, (mut prose, key): (Prose, Key)) -> Result<Prose, ExecutionError> {
+//!         prose.prose.push_str(&key.0);
+//!         Ok(prose)
+//!     }
+//! }
+//!
+//! let runtime = Runtime::new();
+//! // Item／状态都由用法推断，无需 turbofish。
+//! let prose = futures::executor::block_on(runtime.execute(
+//!     &Iter::new(Advance),
+//!     (
+//!         vec![Key(String::from("a")), Key(String::from("b"))],
+//!         Prose {
+//!             plan: String::from("plan"),
+//!             prose: String::new(),
+//!         },
+//!     ),
+//! ))
+//! .unwrap();
+//! assert_eq!(prose.plan, "plan");
+//! assert_eq!(prose.prose, "ab");
+//! ```
+//!
+//! 要点：
+//!
+//! - **状态推进**：`T0 → T1 → … → Tn`，每轮都能看到上一轮实际形成的状态；`T` 可以同时携带持续变化的
+//!   内容和每轮仍需的不变上下文。
+//! - **核心 Output 只有最终 `T`**：不是 `Vec<T>`，也不返回中间历史（历史变体按设计属于后续能力）。
+//! - **正常业务状态不提前停止**：某轮正常返回带“不通过／需修订”标记的状态，仍会继续处理下一个 Item。
+//! - **严格顺序**：上一轮完成并产出 `T` 之后才开始下一轮；每轮的实际执行都重新经过同一个 [`Runtime`]。
+//! - **空集合**：Body 执行 0 次，按值返回原始 `T0`；不要求 `T: Default` 或 `T: Clone`，也不是错误。
+//! - **错误**：立即原样传播，后续 Item 不启动，不返回部分成功的 `T`，也不自动回滚外部副作用。由于状态
+//!   按所有权移动，出错时 Iter 不保证能把已交给 Body 的那个 `T` 返还给调用方。
+//! - **bounds**：`Body: Executable + Sync`（同一次执行中反复借用 `&self.body` 并跨越 `.await`）；
+//!   `Item`／`T` 只受既有 `Send` 约束，都不要求 `Clone`。作为 Flow child 时另受 `then` 的既有
+//!   `Send + Sync + 'static` 约束。
+//!
+//! 另见 `examples/iter`。
+//!
 //! # 扩展：实现组合型 Executable
 //!
 //! 需要新增执行语义（而不是新增业务操作）时直接实现 [`Executable`]。组合型实现通过父级传入的
@@ -435,8 +495,8 @@ pub mod core;
 
 pub use crate::core::{
     Assemble, Binding, Consume, Each, Executable, ExecutionError, Field, Flow, FlowBuildError,
-    FlowBuilder, InvariantError, Match, MatchBuildError, MatchBuilder, NoMatch, Node, Ref, Retry,
-    RetryDecision, Runtime, consume,
+    FlowBuilder, InvariantError, Iter, Match, MatchBuildError, MatchBuilder, NoMatch, Node, Ref,
+    Retry, RetryDecision, Runtime, consume,
 };
 
 // 供 `field!`／`bind!` 宏展开调用；不是公开契约，请勿直接使用。
