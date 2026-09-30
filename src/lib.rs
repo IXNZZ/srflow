@@ -1,8 +1,9 @@
 //! SRFlow —— 以强类型 Flow 为中心的系统执行框架。
 //!
-//! 本 crate 当前处于 T03：提供统一异步执行基础（[`Runtime`]、[`Executable`]、[`Node`]）、
-//! 最小 Flow（[`FlowBuilder`]、[`Flow`]、[`Ref`]）以及 Binding（整值读取、字段投影、多值
-//! 组合与命名结构装配）。控制型 Executable（Retry／Match／Each／Iter）尚未实现。
+//! 本 crate 当前处于 T04：提供统一异步执行基础（[`Runtime`]、[`Executable`]、[`Node`]）、最小 Flow
+//! （[`FlowBuilder`]、[`Flow`]、[`Ref`]）、Binding（整值读取、字段投影、多值组合与命名结构装配），
+//! 以及第一个控制型 Executable [`Retry`]（正常业务 Output 驱动的有限重做）。Match／Each／Iter
+//! 尚未实现。
 //!
 //! # 四个角色
 //!
@@ -161,6 +162,57 @@
 //! `bind!` 宏本身只生成字段路径与字段装配，不会注入；但宏参数里写出满足 Binding 约束的表达式
 //! 仍可能绕过约定，同样属于评审红线。因此不要直接调用这两个入口，请使用 [`field!`]、[`bind!`]。
 //!
+//! # 控制：Retry
+//!
+//! [`Retry`] 是第一个控制型 [`Executable`]：用**语义上相同的业务 Input** 有限次重做同一个 Body，
+//! 每轮只根据 Body 的**正常 Output** 决定停止或重做。它和 Node、SubFlow 一样经
+//! `flow.then(retry, binding)` 连接；每轮 Body 的实际执行都重新经过同一个 [`Runtime`]。
+//!
+//! ```
+//! use std::num::NonZeroUsize;
+//! use srflow::{ExecutionError, Node, Retry, RetryDecision, Runtime};
+//!
+//! /// Body 把“是否接受”放进正常 Output。
+//! struct Attempt;
+//! impl Node for Attempt {
+//!     type Input = String;
+//!     type Output = (String, bool);
+//!     async fn run(&self, input: String) -> Result<(String, bool), ExecutionError> {
+//!         Ok((input.clone(), input.len() >= 3))
+//!     }
+//! }
+//!
+//! let retry = Retry::with_limit(
+//!     Attempt,
+//!     // Condition 只读取已形成的判断字段。
+//!     |output: &(String, bool)| {
+//!         if output.1 { RetryDecision::Stop } else { RetryDecision::Retry }
+//!     },
+//!     NonZeroUsize::new(3).unwrap(),
+//! );
+//!
+//! let runtime = Runtime::new();
+//! let output = futures::executor::block_on(runtime.execute(&retry, String::from("abcd"))).unwrap();
+//! assert_eq!(output, (String::from("abcd"), true));
+//! ```
+//!
+//! 要点：
+//!
+//! - **do-while**：Body 至少执行一次；`limit` 是 Body 的**总执行次数上限**，默认 8。
+//! - **`limit = 0` 不可表示**：`limit` 是 [`NonZeroUsize`](std::num::NonZeroUsize)。
+//! - **三种结果**：某轮 Condition 返回 [`RetryDecision::Stop`] → 返回该轮 `O`；一直
+//!   `RetryDecision::Retry` 直到用满上限 → 返回**最后一次正常 `O`**（不是技术 Error）；某轮 Body
+//!   返回 [`ExecutionError`] → 立即原样传播，不调用 Condition、不执行后续轮次。耗尽只表示“用完了
+//!   允许的尝试次数”，业务是否失败由 `O` 表达。
+//! - **业务重做 ≠ 技术重试**：Retry 不做退避／延迟，也不把技术 `Error` 当作“需要重做”。
+//! - **`I: Clone` 只局部施加**：重复执行需要若干个 owned Input，因此 Retry 要求 `I: Clone`（非
+//!   `Clone` 的 Input 不能经 Retry）；`O` 不要求 `Clone`。复制次数为 `n − [n == limit]`，详细的成本
+//!   说明见 [`Retry`]。
+//! - **Condition 是只读局部判断**：不得成为复杂业务评分器；需要复杂判断时先由 Body 内的 Node 产出
+//!   明确字段。`Fn`／`&O` 无法从类型系统禁止内部可变性，这条红线由文档与评审约束。
+//!
+//! 另见 `examples/retry`。
+//!
 //! # 扩展：实现组合型 Executable
 //!
 //! 需要新增执行语义（而不是新增业务操作）时直接实现 [`Executable`]。组合型实现通过父级传入的
@@ -253,7 +305,7 @@ pub mod core;
 
 pub use crate::core::{
     Assemble, Binding, Consume, Executable, ExecutionError, Field, Flow, FlowBuildError,
-    FlowBuilder, InvariantError, Node, Ref, Runtime, consume,
+    FlowBuilder, InvariantError, Node, Ref, Retry, RetryDecision, Runtime, consume,
 };
 
 // 供 `field!`／`bind!` 宏展开调用；不是公开契约，请勿直接使用。

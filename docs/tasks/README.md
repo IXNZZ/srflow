@@ -21,11 +21,11 @@ SRFlow 以独立 crate 对外提供，因此使用文档与可运行示例是交
 
 | 任务 | 内容与交付 | 主要验收条件 | 前置 | 状态 |
 | --- | --- | --- | --- | --- |
-| [T01 工程与异步执行基础](T01_Async_Execution_Foundation.md) | 建立单 crate 结构；实现 Executable、Runtime、Node 的最小公共边界、Node 自动适配和基本错误传播 | 异步 Node 与测试用组合型 Executable 均经 Runtime 执行；普通 Node 使用者无需手写 Executable，Node 不接收用于编排的 Runtime；正常业务否定结果保留在 Output，执行错误沿调用链传播；crate 首页与上述公共契约有入门说明 | G0 | COMPLETED · 2026-09-28 复审通过；G1 未关闭 |
-| [T02 最小 Flow 与值存储](T02_Minimal_Flow_And_Value_Store.md) | 实现 Flow Input、强类型 `Ref<T>`、异构步骤、顺序 `then`、显式 `output`、SubFlow 和每次调用独立的值存储；选择并记录初始所有权策略 | 不同 Input/Output 类型可连接；Ref 只读可复用且归属特定 Flow，外来 Ref 在 `then`／`output` 中被拒绝；可直接输出 Flow Input；子执行经 Runtime；重复调用不串数据 | T01 | COMPLETED · 2026-09-29 复审通过；G1 未关闭 |
-| [T03 Binding 与 Input 装配](T03_Binding_And_Input_Assembly.md) | 实现整值读取、字段投影、多值组合和命名结构装配；复核 T02 的值存储策略能否支持这些用法 | 错误类型接线编译失败；跨 Flow Ref 经投影或组合后仍被拒绝；常规 Binding 接口封闭且隐藏构造入口的剩余漏洞如实记录；明确大值复用的所有权与复制代价 | T02 | COMPLETED · 2026-09-30 复审通过；G1 待单独审查 |
-| T04 Retry | 实现同一业务 Input 的有限重做语义；Condition 只消费正常 Output 中已有的控制信息 | Body 至少执行一次；`limit = 0` 被拒绝，默认最多执行 8 次；正常停止返回本轮 Output，上限耗尽返回最后正常 Output；执行错误立即传播、不触发技术重试；每轮经 Runtime | T03 | 待开始 |
-| T05 Match | 实现依据已有匹配值的单一路由，允许不同具体类型但相同 Input/Output 契约的分支 | Match 不生成业务判断；只执行被选分支；未命中时有 default 则执行 default、否则返回 Error；已选分支出错不改走 default；被选分支经 Runtime | T03 | 待开始 |
+| [T01 工程与异步执行基础](T01_Async_Execution_Foundation.md) | 建立单 crate 结构；实现 Executable、Runtime、Node 的最小公共边界、Node 自动适配和基本错误传播 | 异步 Node 与测试用组合型 Executable 均经 Runtime 执行；普通 Node 使用者无需手写 Executable，Node 不接收用于编排的 Runtime；正常业务否定结果保留在 Output，执行错误沿调用链传播；crate 首页与上述公共契约有入门说明 | G0 | COMPLETED · 2026-09-28 复审通过；G1 于 2026-09-30 单独通过 |
+| [T02 最小 Flow 与值存储](T02_Minimal_Flow_And_Value_Store.md) | 实现 Flow Input、强类型 `Ref<T>`、异构步骤、顺序 `then`、显式 `output`、SubFlow 和每次调用独立的值存储；选择并记录初始所有权策略 | 不同 Input/Output 类型可连接；Ref 只读可复用且归属特定 Flow，外来 Ref 在 `then`／`output` 中被拒绝；可直接输出 Flow Input；子执行经 Runtime；重复调用不串数据 | T01 | COMPLETED · 2026-09-29 复审通过；G1 于 2026-09-30 单独通过 |
+| [T03 Binding 与 Input 装配](T03_Binding_And_Input_Assembly.md) | 实现整值读取、字段投影、多值组合和命名结构装配；复核 T02 的值存储策略能否支持这些用法 | 错误类型接线编译失败；跨 Flow Ref 经投影或组合后仍被拒绝；常规 Binding 接口封闭且隐藏构造入口的剩余漏洞如实记录；明确大值复用的所有权与复制代价 | T02 | COMPLETED · 2026-09-30 复审通过；G1 于同日单独通过 |
+| [T04 Retry](T04_Retry.md) | 实现同一业务 Input 的有限重做语义；Condition 只读取正常 Output 中已有的控制信息 | Body 至少执行一次；`limit = 0` 被拒绝，默认最多执行 8 次；正常停止返回本轮 Output，上限耗尽返回最后正常 Output；执行错误立即传播、不触发技术重试；每轮经 Runtime | T03、G1 | COMPLETED · 2026-09-30 复审通过；G2 未关闭 |
+| [T05 Match](T05_Match.md) | 实现依据已有匹配值的单一路由，允许不同具体类型但相同 Input/Output 契约的分支 | Match 不生成业务判断；只执行被选分支；未命中时有 default 则执行 default、否则返回 Error；已选分支出错不改走 default；被选分支经 Runtime | T04、G1 | DRAFT · 待用户审定，尚未授权实现 |
 | T06 Each | 实现顺序逐项处理并收集结果 | 空输入返回空集合且不执行 Body；输入与输出顺序对应；中途错误停止后续项、不返回部分正常 Output；每项经 Runtime，且不隐式传递上一项 Output | T03 | 待开始 |
 | T07 Iter | 实现以前一轮累积值组成下一轮 Input 的顺序推进 | 空输入返回初始值；跨轮结果正确传递；中途错误停止后续项、不返回部分正常 Output；每轮经 Runtime；核心 Output 是最终累积值 | T03 | 待开始 |
 | T08 核心端到端与公共边界收口 | 在本仓库内用 Fake Node 表达真实 SES 决策流程，组合 Flow、Binding、SubFlow 和四种控制型 Executable；从外部使用者视角审查公开接口；整理按学习顺序排列的 examples | 嵌套组合可自然表达；外部保持强类型；内部存储与类型擦除不泄漏；业务示例不依赖 SES 仓库或真实服务；完整测试、文档测试、README 快速入门及公开示例通过 | T04～T07 | 待开始 |
@@ -56,6 +56,16 @@ T04～T07 须在 T03 通过、G1 单独审查通过后，才可按各自已审�
 | G4 发布候选 | T11 通过，且本次发布范围内的任务均已完成 | 决定是否打标签并发布到 crates.io |
 
 任务通过不自动关闭阶段验收点；阶段结果需单独记录。T09～T10 不属于 G3 核心可用的关闭条件。GitHub 上的日常提交／推送与 crates.io 发布是不同事项，G4 不阻止正常的代码协作。设计语义冲突不能通过修改任务表或照抄 Probe 来消解，应先回到上位设计评审。
+
+### G1 独立验收记录（2026-09-30）
+
+**结论：G1 PASS。** T01、T02、T03 已分别完成实现与复审；本次另行检查三项能力的组合边界，而非把三项任务的状态机械相加：
+
+- 异步 `Executable`／`Node` 具有强类型 Input／Output，`Runtime::execute` 是统一入口；组合型 Executable 与 Flow 内部 child 均重新经过 Runtime，普通 Node 不获得编排用 Runtime。
+- Flow 顺序执行异构 child；`Ref<T>` 只读、可复用且属于特定 Flow，外来 Ref 在构建期拒绝；SubFlow 只经 Input／Output 与父级交换数据，每次调用的值存储独立。
+- Binding 能在统一 `then(executable, binding)` 入口下完成整值复用／消费、字段投影、2～8 元 tuple、命名及嵌套装配；类型错接在编译期拒绝，多来源读取登记失败保持原子性，投影不强迫复制整个根。
+
+依据 T01～T03 的验收记录、公开 API／执行路径审查及最近一次独立复跑：61 项目标测试、25 项文档测试、六个离线示例、格式／Clippy／文档构建均通过。**保留边界：**T03 的两个 `#[doc(hidden)]` 公开构造入口仍可绕过结构性约定，已作为已知漏洞写入 Rustdoc 与 T03 验收记录；G1 通过不等于该风险被类型系统封死。Rust 1.85 的 MSRV 实测留给发布前验收。G1 只解锁控制型 Executable 的任务书审定与后续逐项实现；不自动授权 T04，也不关闭 G2。
 
 ## 5. 执行与仓库约束
 
