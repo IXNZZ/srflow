@@ -2,6 +2,8 @@
 
 System Runtime Workflow（SRFlow）是一个以强类型 Flow 为中心的 Rust 执行框架。本仓库独立维护其设计、实现、测试和示例。
 
+> 当前总规范为 [SRFlow Design v2.1](docs/SRFlow_Design_v2.1.md)，已于 2026-10-03 完成规范切换。以下代码用法和 T01～T08 验收对应现存 v2.0 实现，是迁移起点；v2.1 Runtime 尚待按[新任务入口](docs/tasks/README.md)实施和整合验收。
+
 T01～T08 已通过复审，G1／G2／G3 已分别完成独立验收。仓库是一个可编译的 `srflow` library crate，提供统一异步执行基础 `Runtime`、`Executable`、`Node`，最小 Flow（`FlowBuilder`、`Flow`、`Ref`），Binding（整值读取、字段投影、2～8 元 tuple、命名结构装配，由 `consume`、`field!`、`bind!` 表达），以及四种控制型 Executable：`Retry`（正常业务 Output 驱动的有限重做）、`Match`（依据已有路由值执行唯一分支）、`Each`（按顺序逐项执行并收集结果）与 `Iter`（携带上一轮状态的顺序推进）。四者可以在同一条流程里组合使用。
 
 ## 首次使用（最短路径）
@@ -35,7 +37,17 @@ cargo run --example iter                  # Iter：跨轮状态推进、不变�
 cargo run --example story_workflow        # 计划 → 路由 → 逐项加工 → 逐轮推进 → 最终结果（全离线 Fake）
 ```
 
-- [规范性设计文档](docs/SRFlow_Design_v2.0.md)
+## 仓库协作约定
+
+- `docs/` 目录下的内容不提交到 Git 仓库。
+- 每个任务完成后，对该任务的代码变更统一提交一次。
+
+## 设计文档
+
+- [当前总规范 v2.1](docs/SRFlow_Design_v2.1.md)
+- [Core 语义基线](docs/SRFlow_Core_Design_v0.1.md)
+- [Runtime 内部实现基线](docs/SRFlow_Core_Runtime_Implementation_Design_v0.1.md)
+- [v2.0 历史规范](docs/SRFlow_Design_v2.0.md)
 - [开发任务总览](docs/tasks/README.md)
 - [仓库协作约定](AGENTS.md)
 
