@@ -28,7 +28,7 @@ SRFlow 以独立 crate 对外提供，因此使用文档与可运行示例是交
 | [T05 Match](T05_Match.md) | 实现依据已有匹配值的单一路由，允许不同具体类型但相同 Input/Output 契约的分支 | Match 不生成业务判断；只执行被选分支；未命中时有 default 则执行 default、否则返回 Error；已选分支出错不改走 default；被选分支经 Runtime | T04、G1 | COMPLETED · 2026-09-30 复审通过；G2 于同日单独通过 |
 | [T06 Each](T06_Each.md) | 实现顺序逐项处理并收集结果 | 空输入返回空集合且不执行 Body；输入与输出顺序对应；中途错误停止后续项、不返回部分正常 Output；每项经 Runtime，且不隐式传递上一项 Output | T03 | COMPLETED · 2026-09-30 复审通过；G2 于同日单独通过 |
 | [T07 Iter](T07_Iter.md) | 实现以前一轮累积值组成下一轮 Input 的顺序推进 | 空输入返回初始值；跨轮结果正确传递；中途错误停止后续项、不返回部分正常 Output；每轮经 Runtime；核心 Output 是最终累积值 | T03 | COMPLETED · 2026-09-30 复审通过；G2 于同日单独通过 |
-| [T08 核心端到端与公共边界收口](T08_Core_End_to_End_And_Public_Boundary.md) | 在本仓库内用 Fake Node 表达真实 SES 决策流程，组合 Flow、Binding、SubFlow 和四种控制型 Executable；从外部使用者视角审查公开接口；整理按学习顺序排列的 examples | 嵌套组合可自然表达；外部保持强类型；内部存储与类型擦除不泄漏；业务示例不依赖 SES 仓库或真实服务；完整测试、文档测试、README 快速入门及公开示例通过 | T04～T07、G2 | COMPLETED · 2026-09-30 复审通过；G3 未关闭 |
+| [T08 核心端到端与公共边界收口](T08_Core_End_to_End_And_Public_Boundary.md) | 在本仓库内用 Fake Node 表达真实 SES 决策流程，组合 Flow、Binding、SubFlow 和四种控制型 Executable；从外部使用者视角审查公开接口；整理按学习顺序排列的 examples | 嵌套组合可自然表达；外部保持强类型；内部存储与类型擦除不泄漏；业务示例不依赖 SES 仓库或真实服务；完整测试、文档测试、README 快速入门及公开示例通过 | T04～T07、G2 | COMPLETED · 2026-09-30 复审通过；G3 于同日单独通过 |
 | T09 LLM 扩展方案 | 单独确定 `llm` feature 的能力边界、所需外部服务适配方式、公开配置和错误语义 | 方案经评审；明确哪些内容属于可选扩展而非核心，以及如何用本地替身验收；不预设具体服务商为核心依赖 | T08 | 待开始 |
 | T10 LLM 扩展实现 | 按 T09 方案实现可直接使用的 LLM Node 与可选 `llm` feature，并补充 feature 文档和示例 | 不启用 feature 时不引入 LLM 依赖；启用后可在 Flow 中使用；自动测试不访问真实服务；外部调用错误不被框架暗中重试；示例不要求真实凭据即可验证基本用法 | T09 | 待开始 |
 | T11 发布准备 | 选择本次发布范围与 crate 版本；整理包元数据、许可证、README、示例和 feature 文档，检查打包内容及 Rustdoc | 明确是核心单独发布还是包含 `llm`；相应 feature 组合、公开示例、本地文档构建与打包／发布预检通过；公开项文档、站内链接及 feature 可见性适合 docs.rs 展示；实际发布另行确认 | T08；若包含 `llm` 则还需 T10 | 待开始 |
@@ -77,6 +77,18 @@ T04～T07 须在 T03 通过、G1 单独审查通过后，才可按各自已审�
 - 父 `Flow` 的每个异构步骤在解析 Binding 后重新调用 `Runtime::execute(&child, input)`；因此控制器作为 Flow child、其 Body／branch 为 SubFlow 时，递归调用链仍经过同一 Runtime。Runtime 本身不含四种控制规则。
 
 独立复跑 `cargo fmt --all -- --check`、`cargo clippy --all-targets --all-features -- -D warnings`、`cargo test --all-targets`（125 项通过）和 `cargo test --doc`（33 项运行、17 项预期编译失败），全部通过。**验收边界：**G2 证明四种控制语义及递归入口已在正式 crate 中成立；它不声称完整 SES 决策流程或公共 API 使用体验已经通过。后者属于 T08。G2 通过允许起草、评审并单独授权 T08，不自动授权实施或关闭 G3。
+
+### G3 独立验收记录（2026-09-30）
+
+**结论：G3 PASS，核心达到当前设计范围内的可用状态。** T08 已完成独立复审；本次另行核查完整组合流程、外部公共边界及其与规范性设计的关系，而非仅沿用 T08 的任务结论：
+
+- 一个父 Flow 从单次 `Runtime::execute` 运行至最终业务结果；同一强类型 DAG 中接入 Binding、SubFlow 与 Retry／Match／Each／Iter。正常、空集合、拒绝／耗尽、未命中和中途执行错误等路径均有测试，技术错误不冒充业务否定或隐式重试，失败不声称回滚副作用。
+- crate 根部提供普通使用所需的 Node、Runtime、Flow、Binding 和控制器入口；业务侧可按 README 的学习顺序运行离线示例。`then` 的 Input／Output 关系保持强类型，Flow-local `Ref` 归属与构建错误、执行错误有明确边界；内部值存储和类型擦除不成为普通业务接线接口。
+- 执行路径符合设计：Runtime 是所有 Executable 的统一调用入口；Flow 只编排和连接数据，Binding 只应进行结构性装配；四种控制器各自保持重做、单一路由、逐项处理、逐项推进的不同语义。端到端 Fake 业务模型没有进入核心公共 API。
+
+本次独立复跑格式检查、`cargo check --all-targets`、全功能 Clippy、`cargo test --all-targets`（141 项）、`cargo test --doc`（33 项运行、17 项预期编译失败）、严格 Rustdoc 构建及全部 11 个离线示例，均通过。另将核心模块 Rustdoc 中过时的“T07 阶段”表述改为当前能力描述。
+
+**保留边界：**Binding 的两个 `#[doc(hidden)]` 公开构造入口仍允许绕过结构性约定；这不是类型系统已封闭的能力，已在 crate Rustdoc 和 G1／T08 验收中如实记录，按设计 §11.8.1 由最少入口、文档约束与代码评审控制。G3 不证明真实 LLM 接入、生产性能、Rust 1.85 MSRV 或发布包质量；后两者属于 T11。G3 通过仅解除核心可用性关口，不自动授权 T09／T10 扩展、T11 发布准备或关闭 G4。
 
 ## 5. 执行与仓库约束
 

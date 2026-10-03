@@ -2,7 +2,7 @@
 
 System Runtime Workflow（SRFlow）是一个以强类型 Flow 为中心的 Rust 执行框架。本仓库独立维护其设计、实现、测试和示例。
 
-T01～T08 已通过复审，G1／G2 已单独通过；G3 核心可用验收尚未关闭。仓库是一个可编译的 `srflow` library crate，提供统一异步执行基础 `Runtime`、`Executable`、`Node`，最小 Flow（`FlowBuilder`、`Flow`、`Ref`），Binding（整值读取、字段投影、2～8 元 tuple、命名结构装配，由 `consume`、`field!`、`bind!` 表达），以及四种控制型 Executable：`Retry`（正常业务 Output 驱动的有限重做）、`Match`（依据已有路由值执行唯一分支）、`Each`（按顺序逐项执行并收集结果）与 `Iter`（携带上一轮状态的顺序推进）。四者可以在同一条流程里组合使用。
+T01～T08 已通过复审，G1／G2／G3 已分别完成独立验收。仓库是一个可编译的 `srflow` library crate，提供统一异步执行基础 `Runtime`、`Executable`、`Node`，最小 Flow（`FlowBuilder`、`Flow`、`Ref`），Binding（整值读取、字段投影、2～8 元 tuple、命名结构装配，由 `consume`、`field!`、`bind!` 表达），以及四种控制型 Executable：`Retry`（正常业务 Output 驱动的有限重做）、`Match`（依据已有路由值执行唯一分支）、`Each`（按顺序逐项执行并收集结果）与 `Iter`（携带上一轮状态的顺序推进）。四者可以在同一条流程里组合使用。
 
 ## 首次使用（最短路径）
 

@@ -25,7 +25,6 @@
 //!
 //! 运行：`cargo run --example story_workflow`
 
-#[path = "support/story_workflow.rs"]
 mod support;
 
 use support::{StoryConfig, build_story_workflow, run_story_workflow};

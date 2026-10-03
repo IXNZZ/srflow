@@ -11,10 +11,15 @@
 //!    `consume` 组合成 `(Vec<Key>, ProseState)`（两者都没有实现 `Clone`）。
 //!
 //! 为什么这里用 Iter 而不是 Each：后一个关键节点需要看到前面节点已经形成的正文。
+//! 示例用 `?` 传播 Flow 构建错误和执行错误，让接线与数据流保持清晰。
 //!
 //! 运行：`cargo run --example iter`
 
-use srflow::{ExecutionError, Flow, FlowBuilder, Iter, Node, Runtime, consume, field};
+use std::error::Error;
+
+use srflow::{
+    ExecutionError, Flow, FlowBuildError, FlowBuilder, Iter, Node, Runtime, consume, field,
+};
 
 /// 关键节点（Item）。刻意不实现 `Clone`。
 struct Key(String);
@@ -54,13 +59,13 @@ impl Node for Review {
 }
 
 /// Body：一个 Flow，因此链路是 `Runtime → Iter → Runtime → Flow → Runtime → Node`。
-fn advance_flow() -> Flow<(ProseState, Key), ProseState> {
+fn advance_flow() -> Result<Flow<(ProseState, Key), ProseState>, FlowBuildError> {
     let mut flow = FlowBuilder::<(ProseState, Key)>::new();
     let input = flow.input();
     // `(ProseState, Key)` 都不是 `Clone`：消费读取把整个元组交给第一步。
-    let appended = flow.then_move(Append, input).expect("连接失败");
-    let reviewed = flow.then_move(Review, appended).expect("连接失败");
-    flow.output(reviewed).expect("连接失败")
+    let appended = flow.then_move(Append, input)?;
+    let reviewed = flow.then_move(Review, appended)?;
+    flow.output(reviewed)
 }
 
 /// 父 Flow 的输入：节点主题与每轮都要用的计划。
@@ -98,7 +103,9 @@ impl Node for MakeInitial {
 }
 
 /// 下游 Node：把最终状态汇报成一行文本。
-struct Report;
+struct Report {
+    name: String
+}
 
 impl Node for Report {
     type Input = ProseState;
@@ -106,8 +113,8 @@ impl Node for Report {
 
     async fn run(&self, state: ProseState) -> Result<String, ExecutionError> {
         Ok(format!(
-            "plan={} prose={} needs_revision={}",
-            state.plan, state.prose, state.needs_revision
+            "plan={} prose={} needs_revision={}, name={}",
+            state.plan, state.prose, state.needs_revision, self.name
         ))
     }
 }
@@ -120,7 +127,11 @@ fn initial_state() -> ProseState {
     }
 }
 
-fn main() {
+fn main() -> Result<(), Box<dyn Error>> {
+    futures::executor::block_on(run())
+}
+
+async fn run() -> Result<(), Box<dyn Error>> {
     let runtime = Runtime::new();
 
     // 1) 直接执行：逐轮把上一轮形成的正文带进下一轮。
@@ -129,10 +140,9 @@ fn main() {
         Key(String::from("冲突")),
         Key(String::from("转折")),
     ];
-    let state = futures::executor::block_on(
-        runtime.execute(&Iter::new(advance_flow()), (keys, initial_state())),
-    )
-    .expect("执行失败");
+    let state = runtime
+        .execute(&Iter::new(advance_flow()?), (keys, initial_state()))
+        .await?;
     println!(
         "直接执行：plan={} prose={} needs_revision={}",
         state.plan, state.prose, state.needs_revision
@@ -141,30 +151,36 @@ fn main() {
     // 2) 作为父 Flow 的 child：集合与初始状态来自两个不同位置，用 tuple Binding + consume 组合。
     let mut flow = FlowBuilder::<Brief>::new();
     let brief = flow.input();
-    let keys = flow.then(MakeKeys, field!(brief.topics)).expect("连接失败");
-    let initial = flow
-        .then(MakeInitial, field!(brief.plan))
-        .expect("连接失败");
-    let advanced = flow
-        .then(Iter::new(advance_flow()), (consume(keys), consume(initial)))
-        .expect("连接失败");
-    let report = flow.then_move(Report, advanced).expect("连接失败");
-    let flow = flow.output(report).expect("连接失败");
+
+
+
+    let keys = flow.then(MakeKeys, field!(brief.topics))?;
+    
+    let initial = flow.then(MakeInitial, field!(brief.plan))?;
+    let advanced = flow.then(
+        Iter::new(advance_flow()?),
+        (consume(keys), consume(initial)),
+    )?;
+
+    let report1 = Report { name: String::from("John") };
+
+    let report = flow.then_move(report1, advanced)?;
+    let flow = flow.output(report)?;
 
     let brief = Brief {
         topics: vec![String::from("开场"), String::from("冲突")],
         plan: String::from("三幕结构"),
     };
-    let report = futures::executor::block_on(runtime.execute(&flow, brief)).expect("执行失败");
+    let report = runtime.execute(&flow, brief).await?;
     println!("作为 Flow child：{report}");
 
     // 3) 空集合：Body 执行 0 次，初始状态按值返回。
-    let state = futures::executor::block_on(
-        runtime.execute(&Iter::new(advance_flow()), (Vec::new(), initial_state())),
-    )
-    .expect("执行失败");
+    let state = runtime
+        .execute(&Iter::new(advance_flow()?), (Vec::new(), initial_state()))
+        .await?;
     println!(
         "空集合：Body 执行 0 次，原样返回初始状态（plan={}）",
         state.plan
     );
+    Ok(())
 }
