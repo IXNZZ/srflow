@@ -13,7 +13,7 @@
 use std::any::{Any, TypeId};
 use std::marker::PhantomData;
 
-use super::builder::{Definition, run_site};
+use super::builder::Definition;
 use super::context::{BodyError, ExecutionContext, InvocationKind, TerminationKind};
 use super::identity::ScopeId;
 use super::internal_error::ScopeError;
@@ -240,10 +240,8 @@ impl<'a, P, K: OutKind> OrchScope<'a, P, K> {
     /// 这是编排体准备输出的**唯一**方式：新增业务值必须由真实 Node 返回并绑定到本地
     /// 声明位置，编排体视图不提供任意 owned 业务值注入入口。
     pub(crate) async fn run_steps(&mut self) -> Result<(), BodyError> {
-        for step in self.inner.steps() {
-            run_site(self.ctx, self.child, step.site()).await?;
-        }
-        Ok(())
+        // 与 Root Flow 共用同一顺序主体（`run_definition`）；此处当前 frame 就是 child Scope。
+        super::builder::run_definition(self.ctx, self.inner).await
     }
 }
 
@@ -353,6 +351,16 @@ where
             // 建立阶段：先做可失败预检（终止、可见范围、caller Active 由 create_child 内部
             // 覆盖），再建立直接 child Scope；失败时不留孤立 Scope 或部分输入绑定。
             let child = ctx.create_child(caller)?;
+            // cfg(test) 只读观测：记录真实调用边界建立的 child Scope 身份与执行域地址，
+            // 供取消／关闭／唯一执行域样本核对；不替换 body、不复制提交路径，也不进入
+            // 非 test 构建。
+            #[cfg(test)]
+            super::test_support::boundary_address_record(
+                child.clone(),
+                ctx.identity_probe(),
+                ctx.coordinator_probe(),
+                ctx.container_probe(),
+            );
             let imports: Vec<ImportSlot> = ports
                 .iter()
                 .zip(&self.caller_inputs)
@@ -384,6 +392,12 @@ where
             let outcome = run_orchestrator_body::<O, I, K>(&mut guard, &child, self, inner).await;
             match outcome {
                 Ok(()) => {
+                    // cfg(test) 只读观测：提交前记录 child 的本地绑定与责任集合，供整组
+                    // Export 失败时的转移／清理证据核对；不改变提交路径。
+                    #[cfg(test)]
+                    if let Ok((refs, owned)) = guard.snapshot_probe(&child) {
+                        super::test_support::export_attempt_record(child.clone(), refs, owned);
+                    }
                     let exported = export_orchestrator_outputs(
                         &mut guard,
                         &child,

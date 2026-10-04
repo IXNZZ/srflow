@@ -165,7 +165,10 @@ impl Definition {
             .iter()
             .any(|port| port.position() == position.position())
         {
-            return Err(BuildError::UndeclaredPosition(position.position().clone()));
+            // 位置合法但已被声明为输出端口：与"未声明位置"区分，供完成路径复用同一类别。
+            return Err(BuildError::DuplicateOutputPosition(
+                position.position().clone(),
+            ));
         }
         self.output_ports
             .push(DeclaredPort::new::<T>(position.position().clone()));
@@ -195,6 +198,56 @@ impl Definition {
     /// Step 列表（下标即顺序位置）。
     pub(crate) fn steps(&self) -> &[Step] {
         &self.steps
+    }
+
+    /// 完成 Flow 前的整组输出校验：只读，不做任何声明变更。
+    ///
+    /// 逐项检查来源归属 → 已声明输入／已产出 Step 位置 → 位置唯一（含端口重复与本次
+    /// 选择内部重复）→ 非 unit 业务类型。任何一项失败都不写入输出端口，调用方也不消耗
+    /// Ref 序号；错误保留冲突 `RefId`，不再用 `UndeclaredPosition` 表达"合法但重复"。
+    pub(crate) fn check_finish_outputs(&self, ports: &[DeclaredPort]) -> Result<(), BuildError> {
+        let unit = TypeId::of::<()>();
+        for (index, port) in ports.iter().enumerate() {
+            let position = port.position();
+            if !position.belongs_to(&self.source) {
+                return Err(BuildError::ForeignPosition(position.clone()));
+            }
+            let declaration = self
+                .inputs
+                .iter()
+                .chain(self.produced.iter())
+                .find(|candidate| candidate.position() == position);
+            let Some(declaration) = declaration else {
+                return Err(BuildError::UndeclaredPosition(position.clone()));
+            };
+            // 真实声明类型必须与本次选择类型一致：只找到 RefId 不足以证明完成态一致。
+            if declaration.expected() != port.expected() {
+                return Err(BuildError::OutputTypeMismatch {
+                    position: position.clone(),
+                    expected: declaration.expected_name(),
+                    actual: port.expected_name(),
+                });
+            }
+            let repeated_in_ports = self
+                .output_ports
+                .iter()
+                .any(|candidate| candidate.position() == position);
+            let repeated_in_selection = ports[..index]
+                .iter()
+                .any(|candidate| candidate.position() == position);
+            if repeated_in_ports || repeated_in_selection {
+                return Err(BuildError::DuplicateOutputPosition(position.clone()));
+            }
+            if port.expected() == unit {
+                return Err(BuildError::UnitDataOutputNotSupported);
+            }
+        }
+        Ok(())
+    }
+
+    /// 声明整组输出端口（不可失败；调用方已完成 [`Self::check_finish_outputs`]）。
+    pub(crate) fn declare_finish_outputs(&mut self, ports: Vec<DeclaredPort>) {
+        self.output_ports.extend(ports);
     }
 
     /// 本次 Definition 已分配的位置数量（测试观测：构建失败不消耗序号）。

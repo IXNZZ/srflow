@@ -355,8 +355,26 @@ pub(crate) enum BuildError {
     UnitDataOutputNotSupported,
     /// 输入位置来自另一条 Definition 来源序列。
     ForeignPosition(RefId),
-    /// 输入位置同源，但未登记为当前 Definition 的输入或此前 Step 的输出。
+    /// 位置同源，但未登记为当前 Definition 的输入或此前 Step 的输出。
+    ///
+    /// 同时用于输入接线与 Flow 完成时的输出选择：两处拒绝的都是"该位置不是本 Definition
+    /// 的合法来源"。
     UndeclaredPosition(RefId),
+    /// 完成 Flow 的输出选择与该位置的真实声明类型不一致。
+    ///
+    /// 位置的声明类型来自已声明输入或已产出 Step 的输出端口；选择类型由
+    /// `FlowOutput` 决定。内部 `DataRef::from_position` 可以给已有位置套上任意类型，
+    /// 因此完成前必须比对元数据，不能只找到"某个已声明位置"。
+    OutputTypeMismatch {
+        position: RefId,
+        expected: &'static str,
+        actual: &'static str,
+    },
+    /// 完成 Flow 的输出选择里同一位置出现多次（含 clone 同一个 `DataRef` 后再选择）。
+    ///
+    /// 与 [`Self::UndeclaredPosition`] 区分：位置本身合法，只是被重复选择；判重依据完整
+    /// `RefId` 身份，不按裸序号或 Data 类型。输出端口 likewise 不允许同一位置重复声明。
+    DuplicateOutputPosition(RefId),
     /// 声明端口数量与传入参数数量不一致。
     InputCountMismatch { expected: usize, supplied: usize },
     /// 输入位置已声明类型与实际传入类型不一致。
@@ -384,7 +402,11 @@ impl BuildError {
                 "a data output declaration may not carry the unit type"
             }
             Self::ForeignPosition(_) => "input position belongs to another definition",
-            Self::UndeclaredPosition(_) => "input position is not declared for this definition",
+            Self::UndeclaredPosition(_) => "position is not declared for this definition",
+            Self::OutputTypeMismatch { .. } => {
+                "output selection type does not match the declared position"
+            }
+            Self::DuplicateOutputPosition(_) => "output position is selected more than once",
             Self::InputCountMismatch { .. } => "input count does not match the declared signature",
             Self::InputTypeMismatch { .. } => "input type does not match the declared position",
             Self::SignatureMismatch { .. } => {
@@ -400,6 +422,16 @@ impl fmt::Display for BuildError {
         match self {
             Self::ForeignPosition(position) => write!(f, "{}: {position}", self.note()),
             Self::UndeclaredPosition(position) => write!(f, "{}: {position}", self.note()),
+            Self::OutputTypeMismatch {
+                position,
+                expected,
+                actual,
+            } => write!(
+                f,
+                "{}: {position} declares `{expected}`, completion selects `{actual}`",
+                self.note()
+            ),
+            Self::DuplicateOutputPosition(position) => write!(f, "{}: {position}", self.note()),
             Self::InputCountMismatch { expected, supplied } => {
                 write!(
                     f,

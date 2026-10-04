@@ -14,6 +14,7 @@ pub(crate) mod builder;
 pub(crate) mod context;
 pub(crate) mod data_container;
 pub(crate) mod data_ref;
+pub(crate) mod flow;
 pub(crate) mod identity;
 pub(crate) mod internal_error;
 pub(crate) mod node;
@@ -24,4 +25,8 @@ pub(crate) mod scope;
 pub(crate) mod signature;
 
 #[cfg(test)]
+mod test_support;
+#[cfg(test)]
 mod v21_05_tests;
+#[cfg(test)]
+mod v21_06_tests;

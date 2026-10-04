@@ -6,7 +6,6 @@
 
 use std::cell::{Cell, RefCell};
 use std::future::Future;
-use std::pin::Pin;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::task::{Context as TaskContext, Poll, Waker};
@@ -20,115 +19,16 @@ use super::orchestrator::{OrchCall, OrchScope, Targets1, Targets2};
 use super::ref_id::RefId;
 use super::runtime::RootExecution;
 use super::signature::{BuildError, Data, NodeFut, Out2, Unit};
+use super::test_support::{
+    RootInput, advance_to_pending, child_scope_record, child_scope_reset, child_scope_snapshot,
+    drive, drive_pinned, gate_wait, install_gate, record, root_input, take_events,
+    take_shared_events,
+};
 
-// ---- 测试基础设施（事件、挂起点、Future 驱动） ----
-
-thread_local! {
-    static EVENTS: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
-}
-
-/// 记录一个可观察事件（顺序即证据）。
-///
-/// 同时写入 V21-04 既有的 `context::creation_counts` 事件日志：业务 Drop 见证因此与
-/// guard 清理／frame 退出事件处在同一条可比较序列上（R12 的 frame 次序证据）。
-fn record(event: &str) {
-    EVENTS.with(|events| events.borrow_mut().push(event.to_string()));
-    super::context::creation_counts::record_event(event);
-}
-
-/// 取走 Context 侧共享日志（含 guard 清理与 frame 退出事件）。
-fn take_shared_events() -> Vec<String> {
-    super::context::creation_counts::take_events()
-}
-
-/// 取走当前线程的事件序列。
-fn take_events() -> Vec<String> {
-    EVENTS.with(|events| std::mem::take(&mut *events.borrow_mut()))
-}
+// ---- 本模块保留：业务调用计数与夹具（共享驱动见 `super::test_support`） ----
 
 thread_local! {
-    static PENDING_GATE: RefCell<Option<Rc<Cell<bool>>>> = const { RefCell::new(None) };
     static BODY_CALLS: Cell<usize> = const { Cell::new(0) };
-}
-
-/// 安装一个挂起点；异步业务体在 await 前调用 [`gate_wait`]。
-fn install_gate() {
-    PENDING_GATE.with(|gate| *gate.borrow_mut() = Some(Rc::new(Cell::new(false))));
-}
-
-/// 释放已安装的挂起点。
-fn release_gate() {
-    PENDING_GATE.with(|gate| {
-        if let Some(open) = gate.borrow().as_ref() {
-            open.set(true);
-        }
-    });
-}
-
-/// 在挂起点上等待：安装时先 Pending，释放后下一次 poll 返回。
-async fn gate_wait() {
-    let open = PENDING_GATE.with(|gate| gate.borrow().clone());
-    if let Some(open) = open {
-        std::future::poll_fn(|_| {
-            if open.get() {
-                Poll::Ready(())
-            } else {
-                Poll::Pending
-            }
-        })
-        .await;
-    }
-}
-
-/// 推进到 Ready；每次 Pending 先释放挂起点。
-fn drive<F: Future>(future: F) -> F::Output {
-    let mut future = Box::pin(future);
-    let mut pending = 0usize;
-    loop {
-        let waker = Waker::noop();
-        let mut cx = TaskContext::from_waker(waker);
-        match future.as_mut().poll(&mut cx) {
-            Poll::Ready(output) => return output,
-            Poll::Pending => {
-                pending += 1;
-                assert!(pending < 64, "future is not making progress");
-                release_gate();
-            }
-        }
-    }
-}
-
-/// 推进一个已 boxed 的 Future 到 Ready；每次 Pending 先释放挂起点。
-fn drive_pinned<F: Future + ?Sized>(mut boxed: Pin<Box<F>>) -> F::Output {
-    let mut pending = 0usize;
-    loop {
-        let waker = Waker::noop();
-        let mut cx = TaskContext::from_waker(waker);
-        match boxed.as_mut().poll(&mut cx) {
-            Poll::Ready(output) => return output,
-            Poll::Pending => {
-                pending += 1;
-                assert!(pending < 64, "future is not making progress");
-                release_gate();
-            }
-        }
-    }
-}
-
-/// 推进到第 `stops` 次 Pending 后停下，返回仍持有 Future 本体的 Box。
-///
-/// 丢弃这个 Box 才是"丢弃 Future 本体"；只丢一个 `Pin<&mut F>` 或引用不算。
-fn advance_to_pending<F: Future>(future: F, stops: usize) -> Pin<Box<F>> {
-    let mut boxed = Box::pin(future);
-    for stop in 1..=stops {
-        let waker = Waker::noop();
-        let mut cx = TaskContext::from_waker(waker);
-        match boxed.as_mut().poll(&mut cx) {
-            Poll::Pending => {}
-            Poll::Ready(_) => panic!("future completed before pending stop {stop}"),
-        }
-    }
-    boxed
 }
 
 /// 非 `Clone`、非 `Send` 的业务值：用于证明数据路径不引入额外 bound。
@@ -150,12 +50,6 @@ impl LocalOnly {
         self.value
     }
 }
-
-/// 一个 Root 输入：声明位置 + 把值登记到该位置。
-type RootInput = (
-    super::ref_id::RefId,
-    Box<dyn FnOnce(&mut ExecutionContext, &super::ref_id::RefId)>,
-);
 
 /// Root 内运行一个 Definition：登记输入、进入 Root frame、执行并正常收口。
 ///
@@ -208,20 +102,6 @@ where
             }
         }
     })
-}
-
-/// 把 `value` 登记到声明输入位置的便捷构造。
-fn root_input<T: 'static>(position: &DataRef<T>, value: T) -> RootInput {
-    let position = position.position().clone();
-    (
-        position,
-        Box::new(
-            move |ctx: &mut ExecutionContext, position: &super::ref_id::RefId| {
-                ctx.register_owned(&ctx.root_scope(), position, value)
-                    .expect("root input");
-            },
-        ),
-    )
 }
 
 /// Root 关闭前的只读／受限观察视图。
@@ -1734,10 +1614,6 @@ fn e19_dropping_the_owned_erased_leaf_future_releases_the_borrow_first() {
 
 // ---- E20：erased 编排 Future 取消 ----
 
-thread_local! {
-    static CHILD_SCOPES: RefCell<Vec<ScopeId>> = const { RefCell::new(Vec::new()) };
-}
-
 /// 内层 child 的 owned 临时值：Drop 即"内层清理"事件。
 struct InnerTemp;
 
@@ -1792,7 +1668,7 @@ impl OrchCall<(LocalOnly,), Data<u32>> for E20Deep {
 
     fn run<'a>(&'a self, mut scope: OrchScope<'a, Self::Pack, Data<u32>>) -> NodeFut<'a, ()> {
         Box::pin(async move {
-            CHILD_SCOPES.with(|scopes| scopes.borrow_mut().push(scope.child().clone()));
+            child_scope_record(scope.child().clone());
             scope.run_steps().await
         })
     }
@@ -1828,7 +1704,7 @@ impl OrchCall<(LocalOnly,), Data<u32>> for E20Outer {
 
     fn run<'a>(&'a self, mut scope: OrchScope<'a, Self::Pack, Data<u32>>) -> NodeFut<'a, ()> {
         Box::pin(async move {
-            CHILD_SCOPES.with(|scopes| scopes.borrow_mut().push(scope.child().clone()));
+            child_scope_record(scope.child().clone());
             scope.run_steps().await
         })
     }
@@ -1837,7 +1713,7 @@ impl OrchCall<(LocalOnly,), Data<u32>> for E20Outer {
 #[test]
 fn e20_dropping_the_outer_orchestrator_future_cleans_inner_to_outer() {
     install_gate();
-    CHILD_SCOPES.with(|scopes| scopes.borrow_mut().clear());
+    child_scope_reset();
     take_shared_events();
     let mut definition = Definition::new();
     let input = definition.declare_input::<LocalOnly>("a").expect("input");
@@ -1895,8 +1771,8 @@ fn e20_dropping_the_outer_orchestrator_future_cleans_inner_to_outer() {
         "each layer's owned value drops exactly once: {events:?}"
     );
     // frame 次序：借用结束 → 内层清理 → 内层 Boundary frame 退出 → 外层清理 → 外层 Boundary frame 退出。
-    let outer_child = CHILD_SCOPES.with(|scopes| scopes.borrow().first().cloned());
-    let inner_child = CHILD_SCOPES.with(|scopes| scopes.borrow().last().cloned());
+    let outer_child = child_scope_snapshot().first().cloned();
+    let inner_child = child_scope_snapshot().last().cloned();
     let (outer_child, inner_child) = (
         outer_child.expect("outer child recorded"),
         inner_child.expect("inner child recorded"),
@@ -1927,7 +1803,7 @@ fn e20_dropping_the_outer_orchestrator_future_cleans_inner_to_outer() {
         "frame exits must follow the inner-to-outer cleanup order: {cancellation_window:?}"
     );
 
-    let deepest = CHILD_SCOPES.with(|scopes| scopes.borrow().last().cloned());
+    let deepest = child_scope_snapshot().last().cloned();
     let deepest = deepest.expect("the nested orchestrator recorded its child scope");
     assert_eq!(
         guard
@@ -1941,7 +1817,7 @@ fn e20_dropping_the_outer_orchestrator_future_cleans_inner_to_outer() {
         Some("pending future dropped")
     );
     // 内到外：内层 child 先关闭，外层 child 后关闭，Root 保留。
-    for child in CHILD_SCOPES.with(|scopes| scopes.borrow().clone()) {
+    for child in child_scope_snapshot() {
         assert!(
             matches!(guard.state(&child), Ok(super::scope::ScopeState::Closed)),
             "child scope {child} must be closed by cancellation cleanup"
