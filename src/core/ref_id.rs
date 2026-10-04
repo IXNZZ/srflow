@@ -86,6 +86,19 @@ impl RefId {
     pub(crate) fn seq(&self) -> u64 {
         self.seq
     }
+
+    /// 归属检查：本位置是否由给定来源根分配。
+    pub(crate) fn belongs_to(&self, source: &Arc<RefIdSource>) -> bool {
+        Arc::ptr_eq(&self.source, source)
+    }
+
+    /// 归属检查：两个位置是否来自同一条来源序列（同一次 Definition 构建）。
+    ///
+    /// 与 [`Self::eq`] 相同地只比较来源分配地址与本地序号，不依赖来源字段值；它只
+    /// 说明"同源"，不说明位置已在当前 Definition 登记（后者由构建器声明表回答）。
+    pub(crate) fn same_source(&self, other: &Self) -> bool {
+        self.seq == other.seq && Arc::ptr_eq(&self.source, &other.source)
+    }
 }
 
 impl Clone for RefId {
@@ -143,6 +156,35 @@ impl RefIdAllocator {
     pub(crate) fn allocate(&self) -> Result<RefId, InternalError> {
         let seq = self.source.allocate_next()?;
         Ok(RefId::new(Arc::clone(&self.source), seq))
+    }
+
+    /// 从同一来源序列一次取 `count` 个连续 `RefId`（checked 整组分配）。
+    ///
+    /// 序列在同一次原子更新中推进 `count` 位：任何一个序号会溢出时整组失败，且**不
+    /// 消耗任何序号、不留下部分分配**。`count == 0` 不接触序列。调用方据此先完成全部
+    /// 可恢复预检、再整组提交（V21-05 的 0／1／2 输出位置分配）。
+    pub(crate) fn allocate_batch(&self, count: u64) -> Result<Vec<RefId>, InternalError> {
+        if count == 0 {
+            return Ok(Vec::new());
+        }
+        let start = self
+            .source
+            .next
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |next| {
+                next.checked_add(count)
+            })
+            .map_err(|_| InternalError::IdSpaceExhausted { kind: IdKind::Ref })?;
+        let mut batch = Vec::with_capacity(count as usize);
+        for offset in 0..count {
+            batch.push(RefId::new(Arc::clone(&self.source), start + offset));
+        }
+        Ok(batch)
+    }
+
+    /// 测试观测：本来源序列尚未分配的下一个序号（不改动序列）。
+    #[cfg(test)]
+    pub(crate) fn next_probe(&self) -> u64 {
+        self.source.next.load(Ordering::SeqCst)
     }
 }
 

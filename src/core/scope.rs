@@ -157,11 +157,21 @@ pub(crate) struct ImportSlot {
 impl ImportSlot {
     /// 以 `T` 声明 child 本地目标位置的类型。
     pub(crate) fn new<T: Any>(source: &RefId, target: &RefId) -> Self {
+        Self::with_type(source, target.clone(), TypeId::of::<T>(), type_name::<T>())
+    }
+
+    /// 以运行时类型声明目标位置：Orchestrator 的 child-local 端口由内部 Definition 决定。
+    pub(crate) fn with_type(
+        source: &RefId,
+        target: RefId,
+        expected: TypeId,
+        expected_name: &'static str,
+    ) -> Self {
         Self {
             source: source.clone(),
-            target: target.clone(),
-            expected: TypeId::of::<T>(),
-            expected_name: type_name::<T>(),
+            target,
+            expected,
+            expected_name,
         }
     }
 }
@@ -181,14 +191,28 @@ pub(crate) struct ExportSlot {
 impl ExportSlot {
     /// 以 `T` 声明 child 本地输出位置的类型。
     pub(crate) fn new<T: Any>(child: &RefId, caller: &RefId) -> Self {
+        Self::with_type(child, caller.clone(), TypeId::of::<T>(), type_name::<T>())
+    }
+
+    /// 以运行时类型声明输出位置：Orchestrator 的 child-local 端口由内部 Definition 决定。
+    pub(crate) fn with_type(
+        child: &RefId,
+        caller: RefId,
+        expected: TypeId,
+        expected_name: &'static str,
+    ) -> Self {
         Self {
             child: child.clone(),
-            caller: caller.clone(),
-            expected: TypeId::of::<T>(),
-            expected_name: type_name::<T>(),
+            caller,
+            expected,
+            expected_name,
         }
     }
 }
+
+/// 测试观测用的 Scope 元数据快照：本地引用集合与责任集合（均按本地序号排序）。
+#[cfg(test)]
+pub(crate) type ScopeSnapshot = (Vec<(RefId, DataId)>, Vec<DataId>);
 
 /// 一个 Scope 的元数据记录。
 ///
@@ -576,6 +600,71 @@ impl ScopeCoordinator {
         // 才能提供读取；sibling-owned、无 owner 与重复 owner 都必须拒绝。
         self.require_visible_target(target.data_id(), scope)?;
         Ok(borrowed)
+    }
+
+    /// 测试观测：只读快照某个 Scope 的本地引用与责任集合（终止后仍允许）。
+    ///
+    /// 只查表、不要求 Active、不授予读取权；用于证明失败的整组导出没有留下部分绑定或
+    /// 责任转移。返回按本地序号排序的确定性列表。
+    #[cfg(test)]
+    pub(crate) fn snapshot_probe(&self, scope: &ScopeId) -> Result<ScopeSnapshot, ScopeError> {
+        let record = self.registry.lookup(scope)?;
+        let mut refs: Vec<(RefId, DataId)> = record
+            .refs
+            .iter()
+            .map(|(position, target)| (position.clone(), target.data_id().clone()))
+            .collect();
+        refs.sort_by_key(|(position, _)| position.seq());
+        let mut owned: Vec<DataId> = record.owned.iter().cloned().collect();
+        owned.sort_by_key(DataId::seq);
+        Ok((refs, owned))
+    }
+
+    /// 输出位置预检：只校验 Scope 状态与"该位置尚未被绑定"，不做任何变更。
+    ///
+    /// 叶子调用在执行业务体之前用它做预检：已知输出冲突时业务体不运行，错误带真实的
+    /// `RefAlreadyBound` 诊断，供调用方以执行错误退出（而不是退化成未标记取消）。
+    pub(crate) fn precheck_output_position(
+        &self,
+        scope: &ScopeId,
+        position: &RefId,
+    ) -> Result<(), ScopeError> {
+        let record = self.registry.lookup(scope)?;
+        record.require_active()?;
+        if record.refs.contains_key(position) {
+            return Err(ScopeError::RefAlreadyBound {
+                scope: scope.clone(),
+                position: position.clone(),
+            });
+        }
+        Ok(())
+    }
+
+    /// 位置校验：只校验归属、存活与声明类型，不借用业务值。
+    ///
+    /// 供 Orchestrator 输入 pack 的擦除后校验使用：它走与 [`Self::resolve`] 相同的
+    /// Scope 访问关系与容器归属 → 存活 → 类型检查路径，不建立第二条可能漂移的顺序，
+    /// 也不产生长期 `&T`。
+    pub(crate) fn validate_position(
+        &self,
+        scope: &ScopeId,
+        position: &RefId,
+        expected: TypeId,
+        expected_name: &'static str,
+    ) -> Result<(), ScopeError> {
+        let record = self.registry.lookup(scope)?;
+        record.require_active()?;
+        let target = record
+            .refs
+            .get(position)
+            .ok_or_else(|| ScopeError::RefNotBound {
+                scope: scope.clone(),
+                position: position.clone(),
+            })?;
+        self.container
+            .validate_type(target.data_id(), expected, expected_name)
+            .map_err(|source| ScopeError::from_storage(position.clone(), source))?;
+        self.require_visible_target(target.data_id(), scope)
     }
 
     /// 整组 Import（本地引用来源）：[`Self::import_batch_with_states`] 的 convenience 入口。

@@ -20,14 +20,15 @@ use super::internal_error::ScopeError;
 ///
 /// 丢弃它（例如丢弃持有它的 Root Future）即销毁 Context 与其中唯一 DataContainer；
 /// 丢弃前若仍有未完成调用，由对应 guard 的取消清理负责。
-#[allow(dead_code)] // Root 驱动在真实 Runtime 接入（V21-10）前只由驱动与测试使用
+#[allow(dead_code)] // 非 test 构建下无生产消费者；由 V21-04／V21-05 的验收样本与后续任务驱动
 pub(crate) struct RootExecution {
     context: ExecutionContext,
 }
 
-#[allow(dead_code)] // 同上
+#[allow(dead_code)] // 非 test 构建下无生产消费者；由 V21-04／V21-05 的验收样本与后续任务驱动
 impl RootExecution {
     /// 创建一次 Root Execution：新身份根 + 新 Context（含唯一协调组件与 Container）。
+    #[allow(dead_code)] // V21-10 接入真实 Runtime::execute 与公开结果记录前只由内部驱动与测试使用
     pub(crate) fn start() -> Self {
         Self {
             context: ExecutionContext::new(ExecutionIdentity::new()),
@@ -44,13 +45,14 @@ impl RootExecution {
         &mut self.context
     }
 }
-#[allow(dead_code)] // V21-10 接入真实 Runtime::execute 前只由内部驱动与测试使用
 /// Root 驱动的收口结果：拥有执行体错误、首次终止原因、Root 关闭诊断与首个清理诊断。
 ///
 /// 这是内部驱动的结果记录，不是公开 Execution Error API。原执行失败与清理失败都在这里
 /// 保留，互不覆盖，也不会在收口时被丢弃。
 #[derive(Debug)]
+#[allow(dead_code)] // V21-10 接入真实 Runtime::execute 与公开结果记录前只由内部驱动与测试使用
 pub(crate) struct RootExit {
+    #[allow(dead_code)]
     body_error: Option<BodyError>,
     termination: Option<ExecutionTermination>,
     close_error: Option<ScopeError>,
@@ -59,9 +61,10 @@ pub(crate) struct RootExit {
     cleanup_events: usize,
 }
 
-#[allow(dead_code)] // 同上
+#[allow(dead_code)] // V21-10 接入真实 Runtime::execute 与公开结果记录前只由内部驱动与测试使用
 impl RootExit {
     /// 执行体的原始失败（含说明与可选 Scope 诊断）。
+    #[allow(dead_code)] // V21-10 接入真实 Runtime::execute 与公开结果记录前只由内部驱动与测试使用
     pub(crate) fn body_error(&self) -> Option<&BodyError> {
         self.body_error.as_ref()
     }
@@ -120,7 +123,6 @@ impl RootExit {
     }
 }
 
-#[allow(dead_code)] // V21-10 接入真实 Runtime::execute 前只由内部驱动与测试使用
 /// Root 驱动：拥有 Context 的 async 执行体。
 ///
 /// 进入 Root frame 后运行 `body`；成功返回且本次执行未被终止时，沿已验收的 finalization
@@ -128,10 +130,10 @@ impl RootExit {
 /// 都走受控失败退出：由 guard 清理 RootScope 与未完成责任，并保留首次原因与清理诊断。
 ///
 /// `config` 是 Root 执行体自带的非 Data 上下文参数（V21-10 的 Root Orchestrator 与
-/// 定义），驱动原样透传，不解释也不存储。
+/// 定义），驱动原样透传，不解释也不存储。V21-05 起 `config` 可以是借用（例如
+/// `&Definition`）：驱动不要求 `'static`，也不把借用存进任何长期结构。
 pub(crate) async fn run_root<X, F>(mut execution: RootExecution, config: X, body: F) -> RootExit
 where
-    X: 'static,
     F: for<'a> AsyncFnOnce(&'a mut ExecutionContext, X) -> Result<(), BodyError>,
 {
     let root_scope = execution.context.root_scope();
