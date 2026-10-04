@@ -94,6 +94,11 @@ pub(crate) struct Definition {
     produced: Vec<DeclaredPort>,
     output_ports: Vec<DeclaredPort>,
     steps: Vec<Step>,
+    /// 私有可选路径登记表（Match 的 branch／default 调用点）。
+    ///
+    /// 它与 [`Self::steps`] 分开保存：`run_steps` 只执行顺序 Step，不会顺序执行互斥 branch；
+    /// 受控选择入口也只从**本 Definition 自己的**这张表取调用点，因此不接受外来调用表。
+    alternatives: Vec<CallSite>,
 }
 
 #[allow(dead_code)] // V21-06 接入完整 Flow／Root 驱动前，V21-05 的真实执行样本是唯一消费者
@@ -108,6 +113,7 @@ impl Definition {
             produced: Vec::new(),
             output_ports: Vec::new(),
             steps: Vec::new(),
+            alternatives: Vec::new(),
         }
     }
 
@@ -121,6 +127,7 @@ impl Definition {
             produced: Vec::new(),
             output_ports: Vec::new(),
             steps: Vec::new(),
+            alternatives: Vec::new(),
         }
     }
 
@@ -250,10 +257,72 @@ impl Definition {
         self.output_ports.extend(ports);
     }
 
+    /// Match 专用共同输出装配：**一次** checked 整组分配 `K` 的共同端口并批量登记。
+    ///
+    /// 与 [`Self::declare_finish_outputs`] 的区别是本入口自己分配位置：这些位置既不是本
+    /// Definition 的声明输入，也不是任何 Step 的产出，而是"由互斥 branch 调用在运行时产出
+    /// 的声明端口"。因此它不做 `check_finish_outputs` 的来源查找（该查找会按
+    /// `inputs ∪ produced` 拒绝共同端口），只做端口自身的可失败校验：非 unit 业务类型与
+    /// 整组分配。与 branch 相关的校验（`K` 一致性、`A` 输入映射、branch 声明类型）由调用方
+    /// 在分配**之前**完成。
+    ///
+    /// 失败时一个序号都不消耗、不写入任何端口；成功后端口只进入 `output_ports`，不进入
+    /// `inputs`／`produced`，因此不会成为 `then` 的合法接线来源，`steps()` 也不增加。
+    pub(crate) fn declare_common_outputs<K: OutKind>(&mut self) -> Result<Vec<RefId>, BuildError> {
+        let unit = TypeId::of::<()>();
+        if K::port_types()
+            .iter()
+            .any(|(_, expected)| *expected == unit)
+        {
+            return Err(BuildError::UnitDataOutputNotSupported);
+        }
+        // 一次整组 checked 分配：0／1／2 位，互异性与来源由 `K::allocate` 保证。
+        let slots = K::allocate(&self.allocator)?;
+        let positions = K::positions(&slots);
+        let ports: Vec<DeclaredPort> = positions
+            .iter()
+            .cloned()
+            .zip(K::port_types())
+            .map(|(position, (expected_name, expected))| {
+                DeclaredPort::with_type(position, expected, expected_name)
+            })
+            .collect();
+        debug_assert!(
+            ports.iter().all(|port| !self
+                .output_ports
+                .iter()
+                .any(|existing| existing.position() == port.position())),
+            "freshly allocated common ports cannot repeat an existing output port"
+        );
+        // 此后不可失败：批量登记共同端口。
+        self.output_ports.extend(ports);
+        Ok(positions)
+    }
+
+    /// 登记一个私有可选路径调用点（Match 的 branch／default 包装）。
+    ///
+    /// 这是受控选择入口的唯一来源：入口只接受索引，实际调用点由**当前执行中的
+    /// Definition 自己**提供，调用者无法传入另一张表。本方法不进入 `steps`，因此顺序主体
+    /// 不会执行它，`declared()` 也不因此变化。
+    pub(crate) fn register_alternative(&mut self, site: CallSite) {
+        self.alternatives.push(site);
+    }
+
+    /// 私有可选路径登记表（按登记顺序；索引即受控入口的输入）。
+    pub(crate) fn alternatives(&self) -> &[CallSite] {
+        &self.alternatives
+    }
+
     /// 本次 Definition 已分配的位置数量（测试观测：构建失败不消耗序号）。
     #[cfg(test)]
     pub(crate) fn allocated_probe(&self) -> u64 {
         self.allocator.next_probe()
+    }
+
+    /// 测试观测：替换一个已登记的可选路径调用点（构造元数据不符／错类型样本）。
+    #[cfg(test)]
+    pub(crate) fn replace_alternative_probe(&mut self, index: usize, site: CallSite) {
+        self.alternatives[index] = site;
     }
 
     /// 输入归属与位置声明检查。
@@ -728,6 +797,7 @@ where
             self,
             vec![args.position().clone()],
             out_positions.to_vec(),
+            O::ROLE,
         )))
     }
 }
@@ -758,6 +828,7 @@ where
             self,
             vec![args.0.position().clone(), args.1.position().clone()],
             out_positions.to_vec(),
+            O::ROLE,
         )))
     }
 }

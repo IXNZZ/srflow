@@ -28,13 +28,16 @@ use super::test_support::{
     root_input, take_events, take_shared_events,
 };
 
-// ---- Root 驱动夹具（面向完整 Flow） ----
+// ---- Root 驱动夹具（面向完整 Flow 的薄委托） ----
+//
+// 共同主体、观察视图与三个入口已提升到 `test_support` 并按 `&Definition` 参数化
+// （V21-07 §4.6／§8.5）：这里只保留 Flow 侧的薄委托，把 `flow.definition()` 交给共同驱动。
+// 断言语义、prepare／observe 时机、空声明收口与错误路径均不变。
 
-/// 在 Root 中执行完整 Flow 的异步主体：登记输入 → 预备钩子 → 进入 Root frame →
-/// 顺序主体 → 关闭前观察 → **固定空声明输出／空 ExportSlot 收口**。
-///
-/// 收口不代表 Root Output 移交：不 take、不校验声明输出的提取资格（类型／可移交 owner／
-/// 重复 DataId）、不向 Application 转交 Data、也不为移交预先解除 Root owned 责任。
+/// Root 关闭前的只读观察视图（共享实现）。
+type FlowRootView<'a, 'ctx> = super::test_support::RootView<'a, 'ctx>;
+
+/// 在 Root 中执行完整 Flow 的异步主体。
 async fn flow_in_root<I, K, P, F>(
     flow: &Flow<I, K>,
     inputs: Vec<RootInput>,
@@ -48,48 +51,7 @@ where
     P: FnOnce(&mut ExecutionContext, &ScopeId),
     F: FnOnce(&mut FlowRootView<'_, '_>) -> Result<(), BodyError>,
 {
-    let mut execution = RootExecution::start();
-    let root = execution.context().root_scope();
-    for (position, register) in inputs {
-        register(execution.context_mut(), &position);
-    }
-    prepare(execution.context_mut(), &root);
-    let observe = RefCell::new(observe);
-    let mut guard = execution
-        .context_mut()
-        .enter(InvocationKind::Root, &root, true)
-        .expect("fresh execution accepts a root frame");
-    match run_definition(&mut guard, flow.definition()).await {
-        Ok(()) => {
-            let observed = match observe.borrow_mut().take() {
-                Some(observer) => {
-                    let mut view = FlowRootView {
-                        guard: &mut guard,
-                        root: root.clone(),
-                    };
-                    observer(&mut view)
-                }
-                None => Ok(()),
-            };
-            match observed {
-                Ok(()) => {
-                    guard
-                        .finalize(&root, &[], &mut Vec::new())
-                        .map_err(BodyError::from)?;
-                    guard.complete();
-                    Ok(())
-                }
-                Err(error) => {
-                    guard.failed_with(&error);
-                    Err(error)
-                }
-            }
-        }
-        Err(error) => {
-            guard.failed_with(&error);
-            Err(error)
-        }
-    }
+    super::test_support::definition_in_root(flow.definition(), inputs, prepare, observe).await
 }
 
 /// Root 中执行完整 Flow：可携带预备钩子（例如预占 caller 输出位置）。
@@ -135,61 +97,6 @@ where
     I::Pack: PackFor<I>,
 {
     run_flow_prepared(flow, inputs, |_, _| {})
-}
-
-/// Root 关闭前的只读观察视图（含受控登记，供 DataId 序号与责任检查使用）。
-struct FlowRootView<'a, 'ctx> {
-    guard: &'a mut InvocationGuard<'ctx>,
-    root: ScopeId,
-}
-
-impl FlowRootView<'_, '_> {
-    fn root(&self) -> &ScopeId {
-        &self.root
-    }
-
-    /// 只读 Context 视图：快照、存活／owner 诊断与 frame 状态。
-    fn probe(&self) -> &ExecutionContext {
-        self.guard
-    }
-
-    fn resolve<T: 'static>(&self, position: &RefId) -> Result<&T, BodyError> {
-        Ok(self.guard.resolve::<T>(&self.root, position)?)
-    }
-
-    /// 把一个业务值登记到 Root Scope 的指定位置（测试夹具，不代表生产注入入口）。
-    fn register<T: 'static>(&mut self, position: &RefId, value: T) -> Result<DataId, BodyError> {
-        Ok(self.guard.register_owned(&self.root, position, value)?)
-    }
-
-    fn state(&self, scope: &ScopeId) -> Result<super::scope::ScopeState, BodyError> {
-        Ok(self.guard.state(scope)?)
-    }
-
-    fn root_is_active(&self) -> bool {
-        matches!(self.state(&self.root), Ok(super::scope::ScopeState::Active))
-    }
-
-    /// Root Scope 的 `(位置, DataId)` 只读快照。
-    fn snapshot(&self) -> Result<Vec<(RefId, DataId)>, BodyError> {
-        let (refs, _) = self.guard.snapshot_probe(&self.root)?;
-        Ok(refs)
-    }
-
-    /// Root Scope 的完整只读快照：本地引用绑定与责任集合。
-    #[allow(clippy::type_complexity)]
-    fn snapshot_full(&self) -> Result<(Vec<(RefId, DataId)>, Vec<DataId>), BodyError> {
-        Ok(self.guard.snapshot_probe(&self.root)?)
-    }
-
-    /// 快照里某个位置当前解析到的 `DataId`。
-    fn data_id_of(&self, position: &RefId) -> Result<DataId, BodyError> {
-        self.snapshot()?
-            .into_iter()
-            .find(|(candidate, _)| candidate == position)
-            .map(|(_, id)| id)
-            .ok_or_else(|| BodyError::new("position is not bound"))
-    }
 }
 
 // ---- 业务夹具 ----

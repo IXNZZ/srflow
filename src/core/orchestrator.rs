@@ -13,7 +13,7 @@
 use std::any::{Any, TypeId};
 use std::marker::PhantomData;
 
-use super::builder::Definition;
+use super::builder::{CallSite, Definition};
 use super::context::{BodyError, ExecutionContext, InvocationKind, TerminationKind};
 use super::identity::ScopeId;
 use super::internal_error::ScopeError;
@@ -28,6 +28,34 @@ impl PackFor<()> for Targets0 {}
 impl<A: 'static> PackFor<(A,)> for Targets1<A> {}
 impl<A: 'static, B: 'static> PackFor<(A, B)> for Targets2<A, B> {}
 
+/// 调用语义中的 Scope 角色（只读诊断用标签，不是新的身份种类）。
+///
+/// 规范没有为 Match／Branch 增加 `InvocationKind`：分支边界仍是
+/// [`InvocationKind::Boundary`](super::context::InvocationKind::Boundary)。这里的角色只用于
+/// `cfg(test)` 只读记录真实创建点，说明该 child Scope 是由哪一类调用建立的。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)] // 非 test 构建下只由记录钩子与 Match 登记表消费；角色不参与执行语义
+pub(crate) enum ScopeRole {
+    /// Flow／SubFlow 调用建立的 child Scope。
+    Flow,
+    /// Match 调用建立的 child Scope（MatchScope）。
+    Match,
+    /// Match 内部被选 branch 的包装调用建立的 child Scope（BranchScope）。
+    Branch,
+}
+
+#[allow(dead_code)] // 标签供 cfg(test) 记录与断言引用
+impl ScopeRole {
+    /// 稳定标签，供事件与断言引用。
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::Flow => "flow",
+            Self::Match => "match",
+            Self::Branch => "branch",
+        }
+    }
+}
+
 /// 业务 Orchestrator 协议：显式声明输入签名 `I`、输出分类 `K` 与输入 pack 类型。
 ///
 /// `definition()` 返回该编排体持有的内部 Definition（真实子调用描述），不是任意 body
@@ -40,6 +68,12 @@ pub(crate) trait OrchCall<I: 'static + InputTypes, K: OutKind> {
     /// `OrchCall<(u32,), _>` 却给 `Targets1<String>`）在**编译期**就不成立，
     /// 不会等到执行期 Import 才失败。
     type Pack: PackFor<I> + PackFromPorts;
+
+    /// 该编排体在被上层接线调用时使用的 Scope 角色（默认 Flow；Match 覆盖为 Match）。
+    ///
+    /// 只影响 `cfg(test)` 的创建点记录与诊断标签，不改变调用边界语义。
+    #[allow(dead_code)] // 非 test 构建下唯一消费者是记录钩子；角色本身不参与执行
+    const ROLE: ScopeRole = ScopeRole::Flow;
 
     /// 内部 Definition：声明输入端口、输出端口与真实子调用。
     fn definition(&self) -> &Definition;
@@ -243,6 +277,44 @@ impl<'a, P, K: OutKind> OrchScope<'a, P, K> {
         // 与 Root Flow 共用同一顺序主体（`run_definition`）；此处当前 frame 就是 child Scope。
         super::builder::run_definition(self.ctx, self.inner).await
     }
+
+    /// 受控选择执行：只运行**本编排体自身 Definition** 已登记的第 `index` 个可选路径。
+    ///
+    /// 适用于"一次调用只执行一个 branch"的控制器（Match）。执行面只接受索引：调用点由
+    /// 当前执行中的 Definition 自己的私有登记表提供（[`Definition::alternatives`]），
+    /// 因此调用者**无法**提交另一张表、外来 `CallSite`、外部 ScopeId 或任意 output target；
+    /// 索引越界在任何 child 建立或业务体运行之前被拒绝。
+    ///
+    /// 它不暴露 `ctx_mut`、可变 Container、owned register／take，也不代替
+    /// [`Self::run_steps`] 的顺序语义（调用方不得用它顺序执行全表）。
+    pub(crate) async fn run_registered_site(&mut self, index: usize) -> Result<(), BodyError> {
+        let Some(site) = self.inner.alternatives().get(index) else {
+            return Err(BodyError::from(
+                super::internal_error::ScopeError::Invariant {
+                    violated: "registered alternative index is out of range",
+                },
+            ));
+        };
+        super::builder::run_site(self.ctx, self.child, site).await
+    }
+
+    /// 本编排体自身 Definition 已登记的第 `index` 个可选路径（只读；调用前校验用）。
+    pub(crate) fn registered_alternative(&self, index: usize) -> Option<&CallSite> {
+        self.inner.alternatives().get(index)
+    }
+
+    #[cfg(test)]
+    /// 测试观测：把自身 Scope 的某个本地位置**预先**绑定到一个测试值（预占 caller 端口样本）。
+    ///
+    /// 只用于构造"M17 后项 caller 位置冲突"这类真实提交前失败：绑定走真实
+    /// `register_owned`，因此冲突仍发生在真实 `finalize` 预检里；它不提供生产绑定入口，
+    /// 也不改变清理顺序。
+    pub(crate) fn prebind_probe(&mut self, position: &RefId, value: u8) -> Result<(), BodyError> {
+        self.ctx
+            .register_owned(self.child, position, value)
+            .map(|_| ())
+            .map_err(BodyError::from)
+    }
 }
 
 /// 擦除后的 Orchestrator 调用点。
@@ -252,6 +324,11 @@ pub(crate) trait OrchestratorSite {
     fn inputs(&self) -> &[RefId];
     /// 本次接线的 caller 输出位置。
     fn outputs(&self) -> &[RefId];
+    /// 实际将被调用的 child Definition（只读）。
+    ///
+    /// 它让调用边界能核对**真实被执行对象**的输入／输出 Signature，而不是任何在别处
+    /// 复制的元数据；不提供可变访问，也不能据此取得 Context、owned 值或任意 target。
+    fn inner_definition(&self) -> &Definition;
     /// 执行一次编排调用：建立 child、Import、运行编排体、整组 Export 并关闭。
     fn invoke<'a>(
         &'a self,
@@ -270,6 +347,7 @@ pub(crate) struct OrchSite<O, I, K> {
     orchestrator: O,
     caller_inputs: Vec<RefId>,
     caller_outputs: Vec<RefId>,
+    role: ScopeRole,
     #[cfg(test)]
     pack_override: std::cell::RefCell<Option<Box<dyn Any>>>,
     marker: PhantomData<fn() -> (I, K)>,
@@ -277,16 +355,18 @@ pub(crate) struct OrchSite<O, I, K> {
 
 #[allow(dead_code)] // V21-06 接入完整 Flow／Root 驱动前，V21-05 的真实执行样本是唯一消费者
 impl<O, I, K> OrchSite<O, I, K> {
-    /// 构建调用点：caller 位置与声明输出位置已由接线器确定。
+    /// 构建调用点：caller 位置、声明输出位置与 Scope 角色已由接线器确定。
     pub(crate) fn new(
         orchestrator: O,
         caller_inputs: Vec<RefId>,
         caller_outputs: Vec<RefId>,
+        role: ScopeRole,
     ) -> Self {
         Self {
             orchestrator,
             caller_inputs,
             caller_outputs,
+            role,
             #[cfg(test)]
             pack_override: std::cell::RefCell::new(None),
             marker: PhantomData,
@@ -335,6 +415,10 @@ where
         &self.caller_outputs
     }
 
+    fn inner_definition(&self) -> &Definition {
+        self.orchestrator.definition()
+    }
+
     #[cfg(test)]
     fn inject_pack_probe(&self, pack: Box<dyn Any>) {
         self.inject_pack_probe(pack);
@@ -351,12 +435,14 @@ where
             // 建立阶段：先做可失败预检（终止、可见范围、caller Active 由 create_child 内部
             // 覆盖），再建立直接 child Scope；失败时不留孤立 Scope 或部分输入绑定。
             let child = ctx.create_child(caller)?;
-            // cfg(test) 只读观测：记录真实调用边界建立的 child Scope 身份与执行域地址，
-            // 供取消／关闭／唯一执行域样本核对；不替换 body、不复制提交路径，也不进入
-            // 非 test 构建。
+            // cfg(test) 只读观测：在真实 `create_child` 成功之后、Import 与 body 之前记录
+            // 实际 Scope 身份、parent、调用角色与执行域地址，供 Scope 创建证据与唯一执行域
+            // 样本核对；不替换 body、不复制提交路径，也不进入非 test 构建。
             #[cfg(test)]
-            super::test_support::boundary_address_record(
+            super::test_support::boundary_creation_record(
                 child.clone(),
+                caller.clone(),
+                self.role,
                 ctx.identity_probe(),
                 ctx.coordinator_probe(),
                 ctx.container_probe(),

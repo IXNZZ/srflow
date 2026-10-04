@@ -17,6 +17,8 @@ pub(crate) mod data_ref;
 pub(crate) mod flow;
 pub(crate) mod identity;
 pub(crate) mod internal_error;
+#[allow(dead_code)] // V21-07 交付的内部 Match：当前消费者是验收样本；公开入口由后续任务接续
+pub(crate) mod match_orchestrator;
 pub(crate) mod node;
 pub(crate) mod orchestrator;
 pub(crate) mod ref_id;
@@ -30,3 +32,5 @@ mod test_support;
 mod v21_05_tests;
 #[cfg(test)]
 mod v21_06_tests;
+#[cfg(test)]
+mod v21_07_tests;

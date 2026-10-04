@@ -228,6 +228,9 @@ pub(crate) trait Wiring: 'static {
     /// 是否为"普通函数 item"路径：该路径只支持产生 Data，输出为 `()` 时构建期拒绝。
     const ORDINARY_FUNCTION: bool;
 
+    /// 该 Marker 是否走 Orchestrator 调用边界（`OrchSig`）：用于报告 branch 包装的真实调用类别。
+    const ORCHESTRATOR: bool;
+
     /// 业务输出类型的 `TypeId`（`Unit` 为 `()`）。
     fn output_type() -> TypeId;
 
@@ -245,12 +248,13 @@ pub(crate) trait Wiring: 'static {
 }
 
 macro_rules! wiring_for_marker {
-    ($marker:ident, $ordinary:expr) => {
+    ($marker:ident, $ordinary:expr, $orchestrator:expr) => {
         impl<I: 'static, K: OutKind> Wiring for $marker<I, K> {
             type Slots = K::Slots;
             type BuildOutput = K::BuildOutput;
             const DECLARED: usize = K::DECLARED;
             const ORDINARY_FUNCTION: bool = $ordinary;
+            const ORCHESTRATOR: bool = $orchestrator;
 
             fn output_type() -> TypeId {
                 TypeId::of::<K::Output>()
@@ -275,11 +279,11 @@ macro_rules! wiring_for_marker {
     };
 }
 
-wiring_for_marker!(SyncFnSig, true);
-wiring_for_marker!(AsyncFnSig, true);
-wiring_for_marker!(NodeSig, false);
-wiring_for_marker!(ArcNodeSig, false);
-wiring_for_marker!(OrchSig, false);
+wiring_for_marker!(SyncFnSig, true, false);
+wiring_for_marker!(AsyncFnSig, true, false);
+wiring_for_marker!(NodeSig, false, false);
+wiring_for_marker!(ArcNodeSig, false, false);
+wiring_for_marker!(OrchSig, false, true);
 
 /// 正式输入 Signature 的类型清单：把 Orchestrator 的 `I` 与内部声明输入逐项可比。
 ///
@@ -389,6 +393,34 @@ pub(crate) enum BuildError {
         expected: &'static str,
         actual: &'static str,
     },
+    /// 同一个 branch key 被登记两次。
+    ///
+    /// 只报告"key 类别"，不要求 `R: Debug`／`Display`；比较按登记 key 的共享借用进行。
+    DuplicateBranchKey,
+    /// 已经登记过 default，不能再登记第二个。
+    SecondDefault,
+    /// 登记的 branch 输出数量与本次完成的共同 Output Signature 不一致。
+    ///
+    /// 结构上 branch 与 Match 共用同一个 `K`，本拒绝是完成装配的防御性整组校验。
+    BranchOutputArity {
+        /// 登记顺序下标。
+        branch: usize,
+        /// 共同 Signature 的端口数量。
+        expected: usize,
+        /// 该 branch 声明的端口数量。
+        supplied: usize,
+    },
+    /// 登记的 branch 输出类型与本次完成的共同 Output Signature 不一致。
+    BranchOutputType {
+        /// 登记顺序下标。
+        branch: usize,
+        /// 声明顺序下标。
+        position: usize,
+        /// 共同 Signature 的类型名。
+        expected: &'static str,
+        /// 该 branch 声明的类型名。
+        actual: &'static str,
+    },
     /// `RefId` 序号空间耗尽：整组分配失败，本次调用不消耗任何序号。
     OutputPositionExhausted,
 }
@@ -411,6 +443,14 @@ impl BuildError {
             Self::InputTypeMismatch { .. } => "input type does not match the declared position",
             Self::SignatureMismatch { .. } => {
                 "orchestrator definition inputs do not match its wiring signature"
+            }
+            Self::DuplicateBranchKey => "a branch key is already registered",
+            Self::SecondDefault => "a match default is already registered",
+            Self::BranchOutputArity { .. } => {
+                "a registered branch output count does not match the common output signature"
+            }
+            Self::BranchOutputType { .. } => {
+                "a registered branch output type does not match the common output signature"
             }
             Self::OutputPositionExhausted => "ref id sequence space exhausted",
         }
@@ -457,8 +497,29 @@ impl fmt::Display for BuildError {
                 "{}: input {index} declares `{expected}`, signature supplies `{actual}`",
                 self.note()
             ),
+            Self::BranchOutputArity {
+                branch,
+                expected,
+                supplied,
+            } => write!(
+                f,
+                "{}: the common signature declares {expected} port(s), branch {branch} declares {supplied}",
+                self.note()
+            ),
+            Self::BranchOutputType {
+                branch,
+                position,
+                expected,
+                actual,
+            } => write!(
+                f,
+                "{}: the common signature declares `{expected}` at output {position}, branch {branch} declares `{actual}`",
+                self.note()
+            ),
             Self::UnsupportedFunctionUnitOutput
             | Self::UnitDataOutputNotSupported
+            | Self::DuplicateBranchKey
+            | Self::SecondDefault
             | Self::OutputPositionExhausted => f.write_str(self.note()),
         }
     }

@@ -2,7 +2,7 @@
 
 System Runtime Workflow（SRFlow）是面向强类型业务流程的 Rust 执行与编排框架。本工程独立维护其设计、实现、测试和示例。
 
-> 当前总规范为 [SRFlow Design v2.1](docs/SRFlow_Design_v2.1.md)。实施路线是在同一 crate 中从空工程重写 Core；V21-00～V21-06 已验收为 **COMPLETED**。[G21-A](docs/tasks/G21_A_Foundation_Review.md) 为 PASS；V21-06 的 R1～R10 全部关闭，198 项测试、23 个编译负例及六项工程检查通过，见[最终验收记录 §12](docs/tasks/V21_06_RESULTS.md#12-最终复审与验收2026-10-04)。后续阶段状态和任务书以[任务入口](docs/tasks/README.md)为准。
+> 当前总规范为 [SRFlow Design v2.1](docs/SRFlow_Design_v2.1.md)。实施路线是在同一 crate 中从空工程重写 Core；V21-00～V21-07 已验收为 **COMPLETED**。[G21-A](docs/tasks/G21_A_Foundation_Review.md)／[G21-B](docs/tasks/G21_B_Typed_Flow_Review.md) 为 PASS；V21-07 的 R1～R7 全部关闭，223 项测试、33 个编译负例及六项工程检查通过，见[最终验收记录 §21](docs/tasks/V21_07_RESULTS.md#21-最终复审与验收2026-10-05)。后续阶段状态和任务书以[任务入口](docs/tasks/README.md)为准。
 
 ## 当前工程状态
 
@@ -10,7 +10,9 @@ System Runtime Workflow（SRFlow）是面向强类型业务流程的 Rust 执行
 
 V21-04 已验收内部单 Context／Invocation 与三类退出设施：真实异步输入借用、建立失败终止、清理／控制权限、原始错误及取消定位、不可恢复终止、frame 关系检查，以及提交与分路径取消析构证据。V21-05 已验收内部强类型接线与双路径分派：`DataRef<T>` 逻辑位置句柄、`OutKind` 输出分类（数据／显式 unit／两个异构位置）、五种接线 Marker、业务 Node 协议（函数 item 的 HRTB 与结构体／`Arc<具体 Node>` 的单一短生命周期 boxed Future）、独立 Orchestrator 协议与 child-local 端口／输入 pack、异型 `CallSite`／`Step` 保存、Definition 声明表与 checked 整组分配，以及基础执行样本。普通 `Result<()>` 函数的构建期拒绝已有证据；任意编排体 Data 注入、Signature 关联、零输入 Arc、叶子失败终止和原子性／取消证据缺口均已关闭。V21-06 已验收内部完整 `FlowBuilder<I>`／`Flow<I, K>`：显式完成态、单／双非空输入、unit／单 Data／两个独立输出位置、完成输出整组类型校验、真实 SubFlow Import／Export 与顺序执行、定义复用及错误／取消清理。Root 测试驱动只观察并按空声明收口，尚不移交 owned 输出。
 
-当前 crate 仍**没有任何公开 API**：`core` 不对外导出，业务侧无法按整数构造 ID、取得存储入口或访问 Scope 内部。公开 Node／Orchestrator／Flow API、Match／Each／Loop 与完整 Root 移交由后续任务交付；不得据当前内部底座宣称这些保证已经成立。
+V21-07 已验收内部完成态 Match：已有路由 Data 与显式业务输入、函数／结构体／Arc Node 或完整 Flow branch、三种共同输出、不可变分支登记与来源校验、单一路由及 default、真实 BranchScope 与两层 Export、imported alias、错误终止及 Future 取消清理。未选 branch 不创建 Scope 或执行业务；子调用失败不改选分支。
+
+当前 crate 仍**没有任何公开 API**：`core` 不对外导出，业务侧无法按整数构造 ID、取得存储入口或访问 Scope 内部。公开 Node／Orchestrator／Flow／Match API、Each／Loop 与完整 Root 移交由后续任务交付；不得据当前内部底座宣称这些保证已经成立。
 
 历史 T01～T08 和 G1～G3 的通过记录对应旧 v2.0，不表示新实现完成。[P01～P07 Probe](docs/SRFlow_Core_Compile_Probe_Results_v0.1.md) 是局部可行性证据，正式调用链仍需重新验收。
 

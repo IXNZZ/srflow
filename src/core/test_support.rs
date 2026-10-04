@@ -20,7 +20,7 @@ use std::pin::Pin;
 use std::rc::Rc;
 use std::task::{Context as TaskContext, Poll, Waker};
 
-use super::context::ExecutionContext;
+use super::context::{BodyError, ExecutionContext};
 use super::identity::ScopeId;
 use super::ref_id::RefId;
 
@@ -228,6 +228,288 @@ pub(crate) fn export_attempt_snapshot() -> Vec<(
     Vec<crate::core::identity::DataId>,
 )> {
     EXPORT_ATTEMPTS.with(|entries| std::mem::take(&mut *entries.borrow_mut()))
+}
+
+// ---- 真实创建点的 Scope 角色／parent 记录（cfg(test) 只读元数据） ----
+
+thread_local! {
+    static BOUNDARY_CREATIONS: RefCell<Vec<(ScopeId, ScopeId, super::orchestrator::ScopeRole)>> =
+        const { RefCell::new(Vec::new()) };
+    #[allow(clippy::type_complexity)]
+    static MATCH_FAILURE_SCOPES: RefCell<Vec<(ScopeId, Vec<(RefId, crate::core::identity::DataId)>, Vec<crate::core::identity::DataId>)>> =
+        const { RefCell::new(Vec::new()) };
+}
+
+/// 真实 `OrchSite` 调用边界建立 child 后记录完整创建元数据：ScopeId、parent 与调用角色。
+///
+/// 记录点在真实 `create_child` 成功之后、Import 与 body 之前，因此它是"某次调用未建立
+/// Scope"的证据来源（未选 branch 没有对应记录）；同时保留既有执行域地址序列。
+pub(crate) fn boundary_creation_record(
+    child: ScopeId,
+    parent: ScopeId,
+    role: super::orchestrator::ScopeRole,
+    identity: *const (),
+    coordinator: *const (),
+    container: *const (),
+) {
+    boundary_address_record(child.clone(), identity, coordinator, container);
+    BOUNDARY_CREATIONS.with(|entries| entries.borrow_mut().push((child, parent, role)));
+}
+
+/// 清空真实创建点的记录。
+pub(crate) fn boundary_creation_reset() {
+    BOUNDARY_CREATIONS.with(|entries| entries.borrow_mut().clear());
+}
+
+/// 真实创建点记录的 `(child, parent, role)` 快照（按建立顺序）。
+pub(crate) fn boundary_creation_snapshot() -> Vec<(ScopeId, ScopeId, super::orchestrator::ScopeRole)>
+{
+    BOUNDARY_CREATIONS.with(|entries| entries.borrow().clone())
+}
+
+/// 真实 Match body 在判定"无匹配且无 default"、尚未返回执行错误时记录自身 Scope 快照。
+///
+/// 取点必须在受控清理之前：`Closed` 之后的空快照不能证明"运行中没有自行绑定输出"。
+pub(crate) fn match_failure_scope_record(
+    child: ScopeId,
+    refs: Vec<(RefId, crate::core::identity::DataId)>,
+    owned: Vec<crate::core::identity::DataId>,
+) {
+    MATCH_FAILURE_SCOPES.with(|entries| entries.borrow_mut().push((child, refs, owned)));
+}
+
+/// 取走 Match 路由失败时刻记录的自身 Scope 快照。
+#[allow(clippy::type_complexity)]
+pub(crate) fn match_failure_scope_snapshot() -> Vec<(
+    ScopeId,
+    Vec<(RefId, crate::core::identity::DataId)>,
+    Vec<crate::core::identity::DataId>,
+)> {
+    MATCH_FAILURE_SCOPES.with(|entries| std::mem::take(&mut *entries.borrow_mut()))
+}
+
+// ---- Match 预占端口开关（cfg(test) 窄注入，M17） ----
+
+thread_local! {
+    static EXPORT_CONFLICT: Cell<Option<usize>> = const { Cell::new(None) };
+}
+
+/// 让下一次真实 Match 调用在运行 branch 之前预占其共同端口 `index`（构造后项冲突）。
+pub(crate) fn install_export_conflict(index: usize) {
+    EXPORT_CONFLICT.with(|slot| slot.set(Some(index)));
+}
+
+/// 取出（一次性）预占开关。
+pub(crate) fn take_export_conflict() -> Option<usize> {
+    EXPORT_CONFLICT.with(|slot| slot.take())
+}
+
+// ---- Match body 阶段快照（cfg(test) 只读；M17／M18 的两侧原子性证据） ----
+
+thread_local! {
+    #[allow(clippy::type_complexity)]
+    static MATCH_STAGES: RefCell<Vec<(&'static str, ScopeId, Vec<(RefId, crate::core::identity::DataId)>, Vec<crate::core::identity::DataId>)>> =
+        const { RefCell::new(Vec::new()) };
+}
+
+/// 在真实 Match body 内、受控清理之前记录自身 Scope 的完整绑定与责任快照。
+///
+/// 阶段名由 Match body 提供（提交前／被选 branch 失败后／body 成功）：记录点都在真实调用
+/// 路径内，不复制 Export 算法，也不改变清理顺序。
+pub(crate) fn match_stage_record(stage: &'static str, child: ScopeId, ctx: &ExecutionContext) {
+    if let Ok((refs, owned)) = ctx.snapshot_probe(&child) {
+        MATCH_STAGES.with(|entries| entries.borrow_mut().push((stage, child, refs, owned)));
+    }
+}
+
+/// 取走 Match body 阶段快照（按记录顺序）。
+#[allow(clippy::type_complexity)]
+pub(crate) fn match_stage_snapshot() -> Vec<(
+    &'static str,
+    ScopeId,
+    Vec<(RefId, crate::core::identity::DataId)>,
+    Vec<crate::core::identity::DataId>,
+)> {
+    MATCH_STAGES.with(|entries| std::mem::take(&mut *entries.borrow_mut()))
+}
+
+// ---- Root 驱动（按 &Definition 参数化，Flow 侧只做薄委托） ----
+
+/// Root 关闭前的只读观察视图（含受控登记，供 DataId 序号与责任检查使用）。
+///
+/// 与 Definition 一起参数化：V21-06 的 Flow 夹具与 V21-07 的 Match 主场景共用同一驱动，
+/// 不按 Flow 类型分叉，也不另建第二份 Root 观察设施。
+pub(crate) struct RootView<'a, 'ctx> {
+    /// guard 与 Root Scope 由创建它的驱动提供；字段对本 crate 的样本可见，不提供生产入口。
+    pub(crate) guard: &'a mut super::context::InvocationGuard<'ctx>,
+    pub(crate) root: ScopeId,
+}
+
+impl RootView<'_, '_> {
+    /// 本次 Root Scope。
+    pub(crate) fn root(&self) -> &ScopeId {
+        &self.root
+    }
+
+    /// 只读 Context 视图：快照、存活／owner 诊断与 frame 状态。
+    pub(crate) fn probe(&self) -> &ExecutionContext {
+        self.guard
+    }
+
+    /// 从 Root Scope 的本地位置解析只读借用。
+    pub(crate) fn resolve<T: 'static>(&self, position: &RefId) -> Result<&T, BodyError> {
+        Ok(self.guard.resolve::<T>(&self.root, position)?)
+    }
+
+    /// 把一个业务值登记到 Root Scope 的指定位置（测试夹具，不代表生产注入入口）。
+    pub(crate) fn register<T: 'static>(
+        &mut self,
+        position: &RefId,
+        value: T,
+    ) -> Result<super::identity::DataId, BodyError> {
+        Ok(self.guard.register_owned(&self.root, position, value)?)
+    }
+
+    /// 某个 Scope 的当前状态。
+    pub(crate) fn state(&self, scope: &ScopeId) -> Result<super::scope::ScopeState, BodyError> {
+        Ok(self.guard.state(scope)?)
+    }
+
+    /// Root Scope 是否仍可接受新业务操作。
+    pub(crate) fn root_is_active(&self) -> bool {
+        matches!(self.state(&self.root), Ok(super::scope::ScopeState::Active))
+    }
+
+    /// Root Scope 的 `(位置, DataId)` 只读快照。
+    pub(crate) fn snapshot(&self) -> Result<Vec<(RefId, super::identity::DataId)>, BodyError> {
+        let (refs, _) = self.guard.snapshot_probe(&self.root)?;
+        Ok(refs)
+    }
+
+    /// Root Scope 的完整只读快照：本地引用绑定与责任集合。
+    #[allow(clippy::type_complexity)]
+    pub(crate) fn snapshot_full(
+        &self,
+    ) -> Result<
+        (
+            Vec<(RefId, super::identity::DataId)>,
+            Vec<super::identity::DataId>,
+        ),
+        BodyError,
+    > {
+        Ok(self.guard.snapshot_probe(&self.root)?)
+    }
+
+    /// 快照里某个位置当前解析到的 `DataId`。
+    pub(crate) fn data_id_of(
+        &self,
+        position: &RefId,
+    ) -> Result<super::identity::DataId, BodyError> {
+        self.snapshot()?
+            .into_iter()
+            .find(|(candidate, _)| candidate == position)
+            .map(|(_, id)| id)
+            .ok_or_else(|| BodyError::new("position is not bound"))
+    }
+}
+
+/// 在 Root 中执行一个 Definition 的异步主体：登记输入 → 预备钩子 → 进入 Root frame →
+/// 顺序主体 → 关闭前观察 → **固定空声明输出／空 ExportSlot 收口**。
+///
+/// 收口不代表 Root Output 移交：不 take、不校验声明输出的提取资格（类型／可移交 owner／
+/// 重复 DataId）、不向 Application 转交 Data、也不为移交预先解除 Root owned 责任。
+pub(crate) async fn definition_in_root<P, F>(
+    definition: &super::builder::Definition,
+    inputs: Vec<RootInput>,
+    prepare: P,
+    observe: Option<F>,
+) -> Result<(), BodyError>
+where
+    P: FnOnce(&mut ExecutionContext, &ScopeId),
+    F: FnOnce(&mut RootView<'_, '_>) -> Result<(), BodyError>,
+{
+    let mut execution = super::runtime::RootExecution::start();
+    let root = execution.context().root_scope();
+    for (position, register) in inputs {
+        register(execution.context_mut(), &position);
+    }
+    prepare(execution.context_mut(), &root);
+    let observe = RefCell::new(observe);
+    let mut guard = execution
+        .context_mut()
+        .enter(super::context::InvocationKind::Root, &root, true)
+        .expect("fresh execution accepts a root frame");
+    match super::builder::run_definition(&mut guard, definition).await {
+        Ok(()) => {
+            let observed = match observe.borrow_mut().take() {
+                Some(observer) => {
+                    let mut view = RootView {
+                        guard: &mut guard,
+                        root: root.clone(),
+                    };
+                    observer(&mut view)
+                }
+                None => Ok(()),
+            };
+            match observed {
+                Ok(()) => {
+                    guard
+                        .finalize(&root, &[], &mut Vec::new())
+                        .map_err(BodyError::from)?;
+                    guard.complete();
+                    Ok(())
+                }
+                Err(error) => {
+                    guard.failed_with(&error);
+                    Err(error)
+                }
+            }
+        }
+        Err(error) => {
+            guard.failed_with(&error);
+            Err(error)
+        }
+    }
+}
+
+/// 在 Root 中执行一个 Definition，可携带预备钩子（例如预占 caller 输出位置）。
+pub(crate) fn run_definition_prepared<P>(
+    definition: &super::builder::Definition,
+    inputs: Vec<RootInput>,
+    prepare: P,
+) -> Result<(), BodyError>
+where
+    P: FnOnce(&mut ExecutionContext, &ScopeId),
+{
+    drive(definition_in_root::<
+        P,
+        fn(&mut RootView<'_, '_>) -> Result<(), BodyError>,
+    >(definition, inputs, prepare, None))
+}
+
+/// 在 Root 中执行一个 Definition，关闭前观察。
+pub(crate) fn run_definition_in_root<F>(
+    definition: &super::builder::Definition,
+    inputs: Vec<RootInput>,
+    observe: F,
+) -> Result<(), BodyError>
+where
+    F: FnOnce(&mut RootView<'_, '_>) -> Result<(), BodyError>,
+{
+    drive(definition_in_root(
+        definition,
+        inputs,
+        |_, _| {},
+        Some(observe),
+    ))
+}
+
+/// 在 Root 中执行一个 Definition，不做额外观察。
+pub(crate) fn run_definition_plain(
+    definition: &super::builder::Definition,
+    inputs: Vec<RootInput>,
+) -> Result<(), BodyError> {
+    run_definition_prepared(definition, inputs, |_, _| {})
 }
 
 // ---- Root 输入登记 ----
