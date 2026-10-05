@@ -20,6 +20,7 @@ use super::internal_error::ScopeError;
 use super::ref_id::RefId;
 use super::scope::{ExportSlot, ImportSlot};
 use super::signature::{BuildError, DeclaredPort, InputTypes, NodeFut, OutKind};
+use super::signature::{Data, WireInputs};
 
 /// 把 pack 类型与正式输入 Signature 关联：只有匹配的类型 tuple 才成立。
 pub(crate) trait PackFor<I: 'static> {}
@@ -42,6 +43,10 @@ pub(crate) enum ScopeRole {
     Match,
     /// Match 内部被选 branch 的包装调用建立的 child Scope（BranchScope）。
     Branch,
+    /// Each 调用建立的 child Scope（EachScope）。
+    Each,
+    /// Each 内部每个 item 建立的 child Scope（ItemScope）。
+    Item,
 }
 
 #[allow(dead_code)] // 标签供 cfg(test) 记录与断言引用
@@ -52,6 +57,8 @@ impl ScopeRole {
             Self::Flow => "flow",
             Self::Match => "match",
             Self::Branch => "branch",
+            Self::Each => "each",
+            Self::Item => "item",
         }
     }
 }
@@ -314,6 +321,56 @@ impl<'a, P, K: OutKind> OrchScope<'a, P, K> {
             .register_owned(self.child, position, value)
             .map(|_| ())
             .map_err(BodyError::from)
+    }
+}
+
+/// Each 调用点专用的受控转交。
+///
+/// 只对与 Each 形状匹配的 `OrchScope`（`Pack = Sh::Pack`、`K = Data<Vec<O>>`）实现，
+/// 并且**以正在执行的 Each 为准**：转交前核对 `scope.inner` 就是该 Each 的 Definition，
+/// 包装与最终输出位置也只从该 Each 的登记中取（不接受调用者提供的 runner／ports／target）。
+/// 转交在内部建立 collector 并构造 `EachSession`，不把 `&mut ExecutionContext` 交出。
+/// 因此另一个 Definition 的 body 即便拿到形状相同的 Scope，也不能借它执行 foreign 包装。
+pub(crate) trait EachScopeTransfer<'a, Sh, O: 'static> {
+    /// 核对实际 Definition 并建立 collector，把本视图交给该 Each 的受控会话。
+    fn begin_each_session(
+        self,
+        each: &'a super::each::Each<Sh, O>,
+    ) -> Result<super::each::EachSession<'a, Sh, O>, BodyError>
+    where
+        Sh: super::each::EachShape + 'static;
+}
+
+impl<'a, Sh, O> EachScopeTransfer<'a, Sh, O> for OrchScope<'a, Sh::Pack, Data<Vec<O>>>
+where
+    Sh: super::each::EachShape + 'static,
+    O: 'static,
+    <<Sh as super::each::EachShape>::Wrapper as super::flow::FlowInputs>::Handles:
+        WireInputs + Clone,
+{
+    fn begin_each_session(
+        self,
+        each: &'a super::each::Each<Sh, O>,
+    ) -> Result<super::each::EachSession<'a, Sh, O>, BodyError> {
+        // 本次实际执行的 Definition 必须就是该 Each 自身；否则在 collector／Item／body 之前拒绝。
+        if self.inner as *const Definition as *const ()
+            != each.definition() as *const Definition as *const ()
+        {
+            return Err(BodyError::new(
+                "each session requires the running definition to be the each orchestrator",
+            ));
+        }
+        each.verify_registration()?;
+        let collector = self.ctx.begin_collector::<O>(self.child)?;
+        Ok(super::each::EachSession::new(
+            self.ctx,
+            self.child,
+            self.inner,
+            self.pack,
+            each.registered_wrapper(),
+            collector,
+            each.final_position().clone(),
+        ))
     }
 }
 

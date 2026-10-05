@@ -116,21 +116,111 @@ struct CollectorRecord {
     element_name: &'static str,
 }
 
-/// Execution 内部的运行时目标。本阶段只承载完整 Data 实例。
+/// Execution 内部的运行时目标：完整 Data 实例，或受 lifetime cap 保护的集合元素。
 ///
-/// 目标只是定位信息，不拥有业务 Data。
+/// 目标只是定位信息，不拥有业务 Data；CollectionItem 不取得独立 DataId，也不拥有
+/// 业务值。它只在 ItemScope 存活且请求方位于 cap 内时可临时借用。
 #[derive(Debug, Clone)]
 pub(crate) enum RefTarget {
     /// 已存储在 DataContainer 中的完整 Data 实例。
     Data(DataId),
+    /// 某个 `Vec<T>` 集合内部、有效期不超过 ItemScope 的 item。
+    CollectionItem {
+        /// 来源集合的完整 Data 身份。
+        collection: DataId,
+        /// 元素下标。
+        index: usize,
+        /// item 的有效期上限（ItemScope）。
+        lifetime_cap: ScopeId,
+        /// 封闭的元素访问描述（由 typed `Vec<T>` 工厂创建）。
+        access: ItemAccess,
+    },
 }
 
 impl RefTarget {
-    /// 目标指向的完整 Data 身份。
-    fn data_id(&self) -> &DataId {
+    /// 完整 Data 身份；CollectionItem 没有独立 DataId。
+    fn data_id(&self) -> Option<&DataId> {
         match self {
-            Self::Data(id) => id,
+            Self::Data(id) => Some(id),
+            Self::CollectionItem { .. } => None,
         }
+    }
+
+    /// 要求目标为完整 Data：需要 owned／完整 Data 的入口用它显式拒绝 item。
+    fn require_data<'a>(&'a self, position: &RefId) -> Result<&'a DataId, ScopeError> {
+        self.data_id().ok_or_else(|| ScopeError::NonCompleteTarget {
+            position: position.clone(),
+        })
+    }
+
+    /// CollectionItem 元数据；完整 Data 返回空。
+    fn item(&self) -> Option<(&DataId, usize, &ScopeId, &ItemAccess)> {
+        match self {
+            Self::Data(_) => None,
+            Self::CollectionItem {
+                collection,
+                index,
+                lifetime_cap,
+                access,
+            } => Some((collection, *index, lifetime_cap, access)),
+        }
+    }
+}
+
+/// 集合元素访问描述：只服务 safe 校验与临时借用。
+///
+/// 由框架的 typed `Vec<T>` 工厂在创建 item 目标时构造；不拥有业务值、不保存长期
+/// `&T`、不接受业务 callback 或任意解析器。声明的类型元数据只用于快速比较，实际
+/// 存储类型必须由 [`Self::project`] 对真实值 downcast 复核，不能靠元数据绕过。
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct ItemAccess {
+    collection_type: TypeId,
+    collection_name: &'static str,
+    element_type: TypeId,
+    element_name: &'static str,
+    element_at: fn(&dyn Any, usize) -> Option<&dyn Any>,
+}
+
+impl ItemAccess {
+    /// 为集合 `Vec<T>` 构造访问描述（`T` 为元素类型）。
+    pub(crate) fn for_collection<T: Any>() -> Self {
+        Self {
+            collection_type: TypeId::of::<Vec<T>>(),
+            collection_name: type_name::<Vec<T>>(),
+            element_type: TypeId::of::<T>(),
+            element_name: type_name::<T>(),
+            element_at: |value, index| {
+                value
+                    .downcast_ref::<Vec<T>>()
+                    .and_then(|values| values.get(index))
+                    .map(|item| item as &dyn Any)
+            },
+        }
+    }
+
+    /// 集合声明类型。
+    pub(crate) fn collection_type(&self) -> TypeId {
+        self.collection_type
+    }
+
+    /// 集合声明类型名。
+    pub(crate) fn collection_name(&self) -> &'static str {
+        self.collection_name
+    }
+
+    /// 元素声明类型。
+    pub(crate) fn element_type(&self) -> TypeId {
+        self.element_type
+    }
+
+    /// 元素声明类型名。
+    pub(crate) fn element_name(&self) -> &'static str {
+        self.element_name
+    }
+
+    /// 从真实集合值投影第 `index` 个元素：先按实际 `Vec<T>` downcast，再取元素并擦除。
+    fn project<'a>(&self, value: &'a dyn Any, index: usize) -> Option<&'a dyn Any> {
+        (self.element_at)(value, index)
     }
 }
 
@@ -210,9 +300,71 @@ impl ExportSlot {
     }
 }
 
+/// 直接 Consume 的结果报告：原始拒绝与其后的清理诊断分别保留。
+#[derive(Debug)]
+pub(crate) enum ConsumeOutcome {
+    /// 消费成功：值已移入 collector，ItemScope 已关闭。
+    Consumed,
+    /// 拒绝：`primary` 是原始原因，`cleanup_failure` 是其后的清理失败（若有）。
+    Rejected {
+        /// 原始拒绝原因。
+        primary: ScopeError,
+        /// prepare 拒绝后 `cleanup_subtree` 的诊断（若有）。
+        cleanup_failure: Option<ScopeError>,
+    },
+}
+
 /// 测试观测用的 Scope 元数据快照：本地引用集合与责任集合（均按本地序号排序）。
 #[cfg(test)]
 pub(crate) type ScopeSnapshot = (Vec<(RefId, DataId)>, Vec<DataId>);
+
+/// 测试观测用的 target-aware 快照类型：`(refs, owned)`。
+#[cfg(test)]
+pub(crate) type TargetSnapshotPair = (Vec<(RefId, TargetSnapshot)>, Vec<DataId>);
+
+/// 测试观测用的 target 快照：明确区分完整 Data 与 CollectionItem，不把 item 扁平化成
+/// 集合 DataId。
+#[cfg(test)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum TargetSnapshot {
+    /// 完整 Data 实例。
+    Data(DataId),
+    /// 集合元素目标（含来源集合、下标、cap 与声明类型）。
+    CollectionItem {
+        /// 来源集合。
+        collection: DataId,
+        /// 元素下标。
+        index: usize,
+        /// item 的 lifetime cap。
+        lifetime_cap: ScopeId,
+        /// 声明的集合类型。
+        collection_type: TypeId,
+        /// 声明的元素类型。
+        element_type: TypeId,
+    },
+}
+
+#[cfg(test)]
+impl TargetSnapshot {
+    /// 由真实 target 投影（只读）。
+    fn of(target: &RefTarget) -> Self {
+        match target {
+            RefTarget::Data(id) => Self::Data(id.clone()),
+            RefTarget::CollectionItem {
+                collection,
+                index,
+                lifetime_cap,
+                access,
+            } => Self::CollectionItem {
+                collection: collection.clone(),
+                index: *index,
+                lifetime_cap: lifetime_cap.clone(),
+                collection_type: access.collection_type(),
+                element_type: access.element_type(),
+            },
+        }
+    }
+}
 
 /// 一个 Scope 的元数据记录。
 ///
@@ -591,28 +743,197 @@ impl ScopeCoordinator {
                 scope: scope.clone(),
                 position: position.clone(),
             })?;
-        // 先走容器检查（归属 → 存活 → 类型），保持既有诊断顺序。
-        let borrowed = self
+        match target {
+            RefTarget::Data(id) => {
+                // 先走容器检查（归属 → 存活 → 类型），保持既有诊断顺序。
+                let borrowed = self
+                    .container
+                    .borrow::<T>(id)
+                    .map_err(|source| ScopeError::from_storage(position.clone(), source))?;
+                // 容器校验之后、返回借用之前验证责任链：只有本 Scope 自身或其后代可见的
+                // 责任方才能提供读取；sibling-owned、无 owner 与重复 owner 都必须拒绝。
+                self.require_visible_target(id, scope)?;
+                Ok(borrowed)
+            }
+            RefTarget::CollectionItem { .. } => self.borrow_item::<T>(target, scope, position),
+        }
+    }
+
+    /// CollectionItem 借用：cap 有效且请求方在 cap 内 → 集合存活与实际 `Vec<T>` 类型 →
+    /// index／元素类型 → 责任链。返回的 `&T` 绑定组件的 `&self`，与其他借用同寿命上限。
+    fn borrow_item<'a, T: Any>(
+        &'a self,
+        target: &'a RefTarget,
+        scope: &ScopeId,
+        position: &RefId,
+    ) -> Result<&'a T, ScopeError> {
+        let (_, _, cap, access) = target
+            .item()
+            .expect("borrow_item is only called for item targets");
+        self.require_in_cap(position, cap, scope)?;
+        self.check_item(position, target, TypeId::of::<T>(), type_name::<T>())?;
+        let (collection, index, _, _) = target.item().expect("item target");
+        let value = self
             .container
-            .borrow::<T>(target.data_id())
+            .borrow_any(collection)
             .map_err(|source| ScopeError::from_storage(position.clone(), source))?;
-        // 容器校验之后、返回借用之前验证责任链：只有本 Scope 自身或其后代可见的责任方
-        // 才能提供读取；sibling-owned、无 owner 与重复 owner 都必须拒绝。
-        self.require_visible_target(target.data_id(), scope)?;
-        Ok(borrowed)
+        let projected =
+            access
+                .project(value, index)
+                .ok_or_else(|| ScopeError::ItemIndexOutOfRange {
+                    position: position.clone(),
+                    index,
+                })?;
+        projected
+            .downcast_ref::<T>()
+            .ok_or_else(|| ScopeError::TypeMismatch {
+                position: position.clone(),
+                expected: type_name::<T>(),
+                actual: access.element_name(),
+            })
+    }
+
+    /// item 目标的共享检查：cap 有效 → cap 内转移目的 → 集合存活与实际 `Vec<T>` 类型 →
+    /// 元素声明类型 → index 在界 → 责任链（cap 仍能看到来源集合）。请求方范围由调用方
+    /// 按语义给出诊断（业务读取用 `ItemOutsideCap`，跨 Scope 转移用 `ItemCapEscape`）。
+    fn check_item(
+        &self,
+        position: &RefId,
+        target: &RefTarget,
+        expected: TypeId,
+        expected_name: &'static str,
+    ) -> Result<(), ScopeError> {
+        let (collection, index, cap, access) = target
+            .item()
+            .expect("check_item is only called for item targets");
+        self.require_live_cap(position, cap)?;
+        if self.container.borrow_any(collection).is_err() {
+            return Err(ScopeError::ItemCollectionNotAlive {
+                position: position.clone(),
+                collection: collection.clone(),
+            });
+        }
+        self.container
+            .validate_type(
+                collection,
+                access.collection_type(),
+                access.collection_name(),
+            )
+            .map_err(|source| ScopeError::from_storage(position.clone(), source))?;
+        if access.element_type() != expected {
+            return Err(ScopeError::TypeMismatch {
+                position: position.clone(),
+                expected: expected_name,
+                actual: access.element_name(),
+            });
+        }
+        self.require_visible_target(collection, cap)?;
+        let value = self
+            .container
+            .borrow_any(collection)
+            .map_err(|source| ScopeError::from_storage(position.clone(), source))?;
+        if access.project(value, index).is_none() {
+            return Err(ScopeError::ItemIndexOutOfRange {
+                position: position.clone(),
+                index,
+            });
+        }
+        Ok(())
+    }
+
+    /// 请求方必须在 item 的 lifetime cap 内（业务读取与位置校验）。
+    fn require_in_cap(
+        &self,
+        position: &RefId,
+        cap: &ScopeId,
+        requester: &ScopeId,
+    ) -> Result<(), ScopeError> {
+        if self.is_ancestor_or_self(cap, requester) {
+            Ok(())
+        } else {
+            Err(ScopeError::ItemOutsideCap {
+                position: position.clone(),
+                cap: cap.clone(),
+                requester: requester.clone(),
+            })
+        }
+    }
+
+    /// 转移目的必须在 item 的 lifetime cap 内（Import／Export／Promote）。
+    fn require_destination_in_cap(
+        &self,
+        position: &RefId,
+        cap: &ScopeId,
+        destination: &ScopeId,
+    ) -> Result<(), ScopeError> {
+        if self.is_ancestor_or_self(cap, destination) {
+            Ok(())
+        } else {
+            Err(ScopeError::ItemCapEscape {
+                position: position.clone(),
+                cap: cap.clone(),
+                destination: destination.clone(),
+            })
+        }
+    }
+
+    /// cap 必须仍存在且未关闭；Closed 身份不能重新代表新 Scope，因此旧 cap 不会复活。
+    fn require_live_cap(&self, position: &RefId, cap: &ScopeId) -> Result<(), ScopeError> {
+        let _ = position;
+        let record = self.registry.lookup(cap)?;
+        if record.state == ScopeState::Closed {
+            return Err(ScopeError::ScopeClosed { scope: cap.clone() });
+        }
+        Ok(())
+    }
+
+    /// 窄只读观察：collector 已移动进建构区的元素个数。
+    ///
+    /// 只读 Count，不改变 collector 状态；finish 与控制器清理都会移除计数，因此证据必须
+    /// 在移除之前留存。
+    #[cfg(test)]
+    pub(crate) fn collector_moves_probe(
+        &self,
+        collector: &CollectorId,
+    ) -> Result<usize, ScopeError> {
+        self.container
+            .collector_moves(collector)
+            .map_err(|source| ScopeError::Storage { source })
     }
 
     /// 测试观测：只读快照某个 Scope 的本地引用与责任集合（终止后仍允许）。
     ///
     /// 只查表、不要求 Active、不授予读取权；用于证明失败的整组导出没有留下部分绑定或
-    /// 责任转移。返回按本地序号排序的确定性列表。
+    /// 责任转移。返回按本地序号排序的确定性列表。本投影**只接受完整 Data 绑定**：
+    /// 出现 CollectionItem 时显式报"不适用"，不把集合 DataId 扁平化成 item 身份
+    /// （target-aware 观察见 [`Self::snapshot_targets_probe`]）。
     #[cfg(test)]
     pub(crate) fn snapshot_probe(&self, scope: &ScopeId) -> Result<ScopeSnapshot, ScopeError> {
+        let (refs, owned) = self.snapshot_targets_probe(scope)?;
+        let mut projected: Vec<(RefId, DataId)> = Vec::with_capacity(refs.len());
+        for (position, target) in refs {
+            match target {
+                TargetSnapshot::Data(id) => projected.push((position, id)),
+                TargetSnapshot::CollectionItem { .. } => {
+                    return Err(ScopeError::NonCompleteTarget { position });
+                }
+            }
+        }
+        Ok((projected, owned))
+    }
+
+    /// target-aware 只读快照：refs 区分完整 Data 与 CollectionItem（含来源集合、下标、
+    /// cap 与声明类型），owned 仍是完整 DataId 集合；不做任何扁平化。
+    #[cfg(test)]
+    pub(crate) fn snapshot_targets_probe(
+        &self,
+        scope: &ScopeId,
+    ) -> Result<TargetSnapshotPair, ScopeError> {
         let record = self.registry.lookup(scope)?;
-        let mut refs: Vec<(RefId, DataId)> = record
+        let mut refs: Vec<(RefId, TargetSnapshot)> = record
             .refs
             .iter()
-            .map(|(position, target)| (position.clone(), target.data_id().clone()))
+            .map(|(position, target)| (position.clone(), TargetSnapshot::of(target)))
             .collect();
         refs.sort_by_key(|(position, _)| position.seq());
         let mut owned: Vec<DataId> = record.owned.iter().cloned().collect();
@@ -661,10 +982,33 @@ impl ScopeCoordinator {
                 scope: scope.clone(),
                 position: position.clone(),
             })?;
-        self.container
-            .validate_type(target.data_id(), expected, expected_name)
-            .map_err(|source| ScopeError::from_storage(position.clone(), source))?;
-        self.require_visible_target(target.data_id(), scope)
+        match target {
+            RefTarget::Data(id) => {
+                self.container
+                    .validate_type(id, expected, expected_name)
+                    .map_err(|source| ScopeError::from_storage(position.clone(), source))?;
+                self.require_visible_target(id, scope)
+            }
+            RefTarget::CollectionItem { .. } => {
+                self.validate_item(position, target, scope, expected, expected_name)
+            }
+        }
+    }
+
+    /// CollectionItem 的位置校验：不建立长期借用，顺序与 [`Self::borrow_item`] 一致。
+    fn validate_item(
+        &self,
+        position: &RefId,
+        target: &RefTarget,
+        scope: &ScopeId,
+        expected: TypeId,
+        expected_name: &'static str,
+    ) -> Result<(), ScopeError> {
+        let (_, _, cap, _) = target
+            .item()
+            .expect("validate_item is only called for item targets");
+        self.require_in_cap(position, cap, scope)?;
+        self.check_item(position, target, expected, expected_name)
     }
 
     /// 整组 Import（本地引用来源）：[`Self::import_batch_with_states`] 的 convenience 入口。
@@ -712,16 +1056,30 @@ impl ScopeCoordinator {
             for slot in local {
                 let target = self.local_import_target(caller, &slot.source)?;
                 self.check_child_position(child, &slot.target, &planned)?;
-                self.container
-                    .validate_type(target.data_id(), slot.expected, slot.expected_name)
-                    .map_err(|source| ScopeError::from_storage(slot.target.clone(), source))?;
-                let owner = self.owner_of(target.data_id())?;
-                if !self.is_ancestor_or_self(&owner, caller) {
-                    return Err(ScopeError::IllegalOwner {
-                        id: target.data_id().clone(),
-                        owner,
-                        boundary: child.clone(),
-                    });
+                match &target {
+                    RefTarget::Data(id) => {
+                        self.container
+                            .validate_type(id, slot.expected, slot.expected_name)
+                            .map_err(|source| {
+                                ScopeError::from_storage(slot.target.clone(), source)
+                            })?;
+                        let owner = self.owner_of(id)?;
+                        if !self.is_ancestor_or_self(&owner, caller) {
+                            return Err(ScopeError::IllegalOwner {
+                                id: id.clone(),
+                                owner,
+                                boundary: child.clone(),
+                            });
+                        }
+                    }
+                    RefTarget::CollectionItem { .. } => {
+                        // item 只作为 alias 导入：来源与目的都必须在 cap 内，不产生 item-owned
+                        // 登记；合法目的不能替非法来源背书。
+                        let (_, _, cap, _) = target.item().expect("item target matched by variant");
+                        self.check_item(&slot.source, &target, slot.expected, slot.expected_name)?;
+                        self.require_in_cap(&slot.source, cap, caller)?;
+                        self.require_destination_in_cap(&slot.source, cap, child)?;
+                    }
                 }
                 planned.push((slot.target.clone(), target));
             }
@@ -756,16 +1114,35 @@ impl ScopeCoordinator {
                     });
                 }
                 self.check_child_position(child, &slot.target, &planned)?;
-                self.container
-                    .validate_type(state_target.data_id(), slot.expected, slot.expected_name)
-                    .map_err(|source| ScopeError::from_storage(slot.target.clone(), source))?;
-                let owner = self.owner_of(state_target.data_id())?;
-                if !self.is_ancestor_or_self(&owner, caller) {
-                    return Err(ScopeError::IllegalOwner {
-                        id: state_target.data_id().clone(),
-                        owner,
-                        boundary: child.clone(),
-                    });
+                match &state_target {
+                    RefTarget::Data(id) => {
+                        self.container
+                            .validate_type(id, slot.expected, slot.expected_name)
+                            .map_err(|source| {
+                                ScopeError::from_storage(slot.target.clone(), source)
+                            })?;
+                        let owner = self.owner_of(id)?;
+                        if !self.is_ancestor_or_self(&owner, caller) {
+                            return Err(ScopeError::IllegalOwner {
+                                id: id.clone(),
+                                owner,
+                                boundary: child.clone(),
+                            });
+                        }
+                    }
+                    RefTarget::CollectionItem { .. } => {
+                        let (_, _, cap, _) =
+                            state_target.item().expect("item target matched by variant");
+                        self.check_item(
+                            &slot.target,
+                            &state_target,
+                            slot.expected,
+                            slot.expected_name,
+                        )?;
+                        // 状态来源的持有者是 caller 本身：来源也必须位于 cap 内。
+                        self.require_in_cap(&slot.target, cap, caller)?;
+                        self.require_destination_in_cap(&slot.target, cap, child)?;
+                    }
                 }
                 planned.push((slot.target.clone(), state_target));
             }
@@ -799,10 +1176,19 @@ impl ScopeCoordinator {
                     scope: controller.clone(),
                     position: from_local.clone(),
                 })?;
-            self.container
-                .validate_type(target.data_id(), TypeId::of::<T>(), type_name::<T>())
-                .map_err(|source| ScopeError::from_storage(from_local.clone(), source))?;
-            self.require_visible_target(target.data_id(), controller)?;
+            match target {
+                RefTarget::Data(id) => {
+                    self.container
+                        .validate_type(id, TypeId::of::<T>(), type_name::<T>())
+                        .map_err(|source| ScopeError::from_storage(from_local.clone(), source))?;
+                    self.require_visible_target(id, controller)?;
+                }
+                RefTarget::CollectionItem { .. } => {
+                    let (_, _, cap, _) = target.item().expect("item target matched by variant");
+                    self.require_in_cap(from_local, cap, controller)?;
+                    self.check_item(from_local, target, TypeId::of::<T>(), type_name::<T>())?;
+                }
+            }
             target.clone()
         };
         self.register_state_record(
@@ -956,14 +1342,24 @@ impl ScopeCoordinator {
                     .ok_or_else(|| ScopeError::StateUninitialized {
                         state: state.clone(),
                     })?;
-            self.container
-                .validate_type(
-                    target.data_id(),
-                    state_record.expected,
-                    state_record.expected_name,
-                )
-                .map_err(|source| ScopeError::from_storage(position.clone(), source))?;
-            self.require_visible_target(target.data_id(), controller)?;
+            match &target {
+                RefTarget::Data(id) => {
+                    self.container
+                        .validate_type(id, state_record.expected, state_record.expected_name)
+                        .map_err(|source| ScopeError::from_storage(position.clone(), source))?;
+                    self.require_visible_target(id, controller)?;
+                }
+                RefTarget::CollectionItem { .. } => {
+                    let (_, _, cap, _) = target.item().expect("item target matched by variant");
+                    self.require_in_cap(position, cap, controller)?;
+                    self.check_item(
+                        position,
+                        &target,
+                        state_record.expected,
+                        state_record.expected_name,
+                    )?;
+                }
+            }
             target
         };
 
@@ -1044,24 +1440,306 @@ impl ScopeCoordinator {
         selected: &RefId,
         collector: &CollectorId,
     ) -> Result<(), ScopeError> {
+        match self.consume_item_report(item, selected, collector) {
+            ConsumeOutcome::Consumed => Ok(()),
+            ConsumeOutcome::Rejected {
+                primary,
+                cleanup_failure,
+            } => Err(cleanup_failure.unwrap_or(primary)),
+        }
+    }
+
+    /// 直接 Consume 的报告形状：与 [`Self::consume_item`] 复用同一 prepare／commit／
+    /// cleanup 实现，但把**原始拒绝**与其后的**清理失败**分别保留。
+    ///
+    /// 早期前置拒绝（Item 非 Active、仍有活 descendant、查表失败）发生在冻结之前，
+    /// 不假装已经清理；prepare 拒绝后按既有纪律执行 `cleanup_subtree`，其失败作为
+    /// `cleanup_failure` 独立报告，不覆盖 `primary`。
+    pub(crate) fn consume_item_report(
+        &mut self,
+        item: &ScopeId,
+        selected: &RefId,
+        collector: &CollectorId,
+    ) -> ConsumeOutcome {
+        match self.consume_item_early_check(item) {
+            Ok(()) => {}
+            Err(primary) => {
+                return ConsumeOutcome::Rejected {
+                    primary,
+                    cleanup_failure: None,
+                };
+            }
+        }
+        if let Err(primary) = self
+            .registry
+            .lookup_mut(item)
+            .map(|record| record.state = ScopeState::Finalizing)
         {
-            let record = self.registry.lookup(item)?;
-            record.require_active()?;
-            if self.has_live_descendants(item)? {
-                return Err(ScopeError::ActiveDescendants {
-                    scope: item.clone(),
+            return ConsumeOutcome::Rejected {
+                primary,
+                cleanup_failure: None,
+            };
+        }
+        #[cfg(test)]
+        self.record_pre_cleanup_probe(
+            super::test_support::ConsumeSnapshotPhase::Before,
+            item,
+            selected,
+            collector,
+        );
+        match self.prepare_consume(item, selected, collector) {
+            Ok(plan) => match self.commit_consume(plan) {
+                Ok(()) => ConsumeOutcome::Consumed,
+                Err(primary) => ConsumeOutcome::Rejected {
+                    primary,
+                    cleanup_failure: None,
+                },
+            },
+            Err(primary) => {
+                #[cfg(test)]
+                self.record_pre_cleanup_probe(
+                    super::test_support::ConsumeSnapshotPhase::AfterReject,
+                    item,
+                    selected,
+                    collector,
+                );
+                ConsumeOutcome::Rejected {
+                    primary,
+                    cleanup_failure: self.cleanup_subtree(item).err(),
+                }
+            }
+        }
+    }
+
+    /// cfg(test) 元数据故障注入：把某位置上的 CollectionItem 目标替换为给定的访问描述／下标。
+    ///
+    /// 只改目标**元数据**，不新增业务数据通道；解析仍走真实向量／元素校验。
+    #[cfg(test)]
+    pub(crate) fn corrupt_item_access_probe(
+        &mut self,
+        scope: &ScopeId,
+        position: &RefId,
+        access: ItemAccess,
+        index: Option<usize>,
+    ) -> Result<(), ScopeError> {
+        let record = self.registry.lookup_mut(scope)?;
+        let target = record
+            .refs
+            .get_mut(position)
+            .ok_or_else(|| ScopeError::RefNotBound {
+                scope: scope.clone(),
+                position: position.clone(),
+            })?;
+        match target {
+            RefTarget::CollectionItem {
+                access: slot_access,
+                index: slot_index,
+                ..
+            } => {
+                *slot_access = access;
+                if let Some(index) = index {
+                    *slot_index = index;
+                }
+                Ok(())
+            }
+            RefTarget::Data(_) => Err(ScopeError::Invariant {
+                violated: "metadata fault injection requires a collection item target",
+            }),
+        }
+    }
+
+    /// cfg(test) 只读观察：下一个将被分配的 `DataId` 序号。
+    #[cfg(test)]
+    pub(crate) fn next_data_id_probe(&self) -> Option<u64> {
+        self.container.next_data_id_probe()
+    }
+
+    /// cfg(test) 窄只读观察：某位置的完整 Data 身份（item 目标返回空）。
+    #[cfg(test)]
+    pub(crate) fn target_data_id_probe(
+        &self,
+        scope: &ScopeId,
+        position: &RefId,
+    ) -> Result<Option<DataId>, ScopeError> {
+        let record = self.registry.lookup(scope)?;
+        Ok(record
+            .refs
+            .get(position)
+            .and_then(|target| target.data_id().cloned()))
+    }
+
+    /// cfg(test) 完整只读观察：`phase = Before` 在 prepare 之前，`AfterReject` 在 prepare
+    /// 拒绝之后、内部 cleanup 之前。记录两侧完整 target-aware refs／owned（含身份）、
+    /// collector 状态与被选输出责任方；观察失败以 `observation_error` 显式记录，不静默降级。
+    #[cfg(test)]
+    fn record_pre_cleanup_probe(
+        &self,
+        phase: super::test_support::ConsumeSnapshotPhase,
+        item: &ScopeId,
+        selected: &RefId,
+        collector: &CollectorId,
+    ) {
+        let mut error: Option<String> = None;
+        let mut note = |message: String| {
+            if error.is_none() {
+                error = Some(message);
+            }
+        };
+        let item_state = self.snapshot_targets_probe(item);
+        let (item_refs, item_owned) = match item_state {
+            Ok((refs, owned)) => (Some(refs), Some(owned)),
+            Err(err) => {
+                note(format!("item snapshot: {err:?}"));
+                (None, None)
+            }
+        };
+        let parent = self
+            .registry
+            .lookup(item)
+            .ok()
+            .and_then(|record| record.parent.clone());
+        let (parent_refs, parent_owned) = match parent.as_ref() {
+            Some(parent) => match self.snapshot_targets_probe(parent) {
+                Ok((refs, owned)) => (Some(refs), Some(owned)),
+                Err(err) => {
+                    note(format!("parent snapshot: {err:?}"));
+                    (None, None)
+                }
+            },
+            None => (None, None),
+        };
+        let selected_target = self
+            .registry
+            .lookup(item)
+            .ok()
+            .and_then(|record| record.refs.get(selected).cloned());
+        let (selected_data, selected_owner, selected_alive) = match selected_target {
+            Some(RefTarget::Data(id)) => (
+                Some(id.clone()),
+                self.owner_of(&id).ok(),
+                self.container.borrow_any(&id).is_ok(),
+            ),
+            _ => (None, None, false),
+        };
+        let (collector_element, collector_owner, collector_moves) =
+            match self.lookup_collector(collector) {
+                Ok(record) => (
+                    Some(record.element_name),
+                    Some(record.owner.clone()),
+                    self.container.collector_moves(collector).ok(),
+                ),
+                Err(err) => {
+                    note(format!("collector lookup: {err:?}"));
+                    (None, None, None)
+                }
+            };
+        super::test_support::record_consume_pre_cleanup(
+            super::test_support::ConsumePreCleanupSnapshot {
+                phase,
+                item_refs,
+                item_owned,
+                parent_refs,
+                parent_owned,
+                selected_data,
+                selected_owner,
+                selected_alive,
+                collector_element,
+                collector_owner,
+                collector_moves,
+                observation_error: error,
+            },
+        );
+    }
+
+    /// Consume 的冻结前置检查：Item 必须 Active 且没有活的 descendant。
+    fn consume_item_early_check(&self, item: &ScopeId) -> Result<(), ScopeError> {
+        let record = self.registry.lookup(item)?;
+        record.require_active()?;
+        if self.has_live_descendants(item)? {
+            return Err(ScopeError::ActiveDescendants {
+                scope: item.clone(),
+            });
+        }
+        Ok(())
+    }
+
+    /// 在 `item_scope` 中绑定一个 CollectionItem 输入位置（item 创建入口）。
+    ///
+    /// 只接受 `caller`（EachScope）本地已绑定的完整 `Vec<T>` 集合：cap 设为刚建立的
+    /// `item_scope`，不分配 DataId、不移动业务值、不增加 owner。`index` 必须在实际
+    /// 长度内；目标位置必须尚未绑定。
+    pub(crate) fn bind_item_input<T: Any>(
+        &mut self,
+        item_scope: &ScopeId,
+        caller: &ScopeId,
+        source: &RefId,
+        target: &RefId,
+        index: usize,
+    ) -> Result<(), ScopeError> {
+        {
+            let item_record = self.registry.lookup(item_scope)?;
+            item_record.require_active()?;
+            self.registry.lookup(caller)?.require_active()?;
+            if item_record.parent.as_ref() != Some(caller) {
+                return Err(ScopeError::NotDirectParent {
+                    child: item_scope.clone(),
+                    caller: caller.clone(),
                 });
             }
         }
-        self.registry.lookup_mut(item)?.state = ScopeState::Finalizing;
-
-        match self.prepare_consume(item, selected, collector) {
-            Ok(plan) => self.commit_consume(plan),
-            Err(error) => {
-                self.cleanup_subtree(item)?;
-                Err(error)
+        let collection = {
+            let caller_record = self.registry.lookup(caller)?;
+            let bound = caller_record
+                .refs
+                .get(source)
+                .ok_or_else(|| ScopeError::RefNotBound {
+                    scope: caller.clone(),
+                    position: source.clone(),
+                })?;
+            let id = bound.require_data(source)?.clone();
+            self.container
+                .validate_type(&id, TypeId::of::<Vec<T>>(), type_name::<Vec<T>>())
+                .map_err(|source_error| ScopeError::from_storage(source.clone(), source_error))?;
+            self.require_visible_target(&id, caller)?;
+            id
+        };
+        let access = ItemAccess::for_collection::<T>();
+        let length = {
+            let value = self
+                .container
+                .borrow_any(&collection)
+                .map_err(|source_error| ScopeError::from_storage(source.clone(), source_error))?;
+            value
+                .downcast_ref::<Vec<T>>()
+                .expect("validate_type checked the collection type")
+                .len()
+        };
+        if index >= length {
+            return Err(ScopeError::ItemIndexOutOfRange {
+                position: target.clone(),
+                index,
+            });
+        }
+        {
+            let item_record = self.registry.lookup(item_scope)?;
+            if item_record.refs.contains_key(target) {
+                return Err(ScopeError::RefAlreadyBound {
+                    scope: item_scope.clone(),
+                    position: target.clone(),
+                });
             }
         }
+        let item_record = self.registry.lookup_mut(item_scope)?;
+        item_record.refs.insert(
+            target.clone(),
+            RefTarget::CollectionItem {
+                collection,
+                index,
+                lifetime_cap: item_scope.clone(),
+                access,
+            },
+        );
+        Ok(())
     }
 
     /// 完成 collector：建构值成为新的普通 `Vec<O>` Data，登记控制器 owned 并一次性
@@ -1254,9 +1932,20 @@ impl ScopeCoordinator {
                         scope: child.clone(),
                         position: slot.child.clone(),
                     })?;
-            self.container
-                .validate_type(target.data_id(), slot.expected, slot.expected_name)
-                .map_err(|source| ScopeError::from_storage(slot.child.clone(), source))?;
+            match target {
+                RefTarget::Data(id) => {
+                    self.container
+                        .validate_type(id, slot.expected, slot.expected_name)
+                        .map_err(|source| ScopeError::from_storage(slot.child.clone(), source))?;
+                }
+                RefTarget::CollectionItem { .. } => {
+                    // item 不能逃出 cap：来源 child 与目的 caller 都必须位于 cap 内。
+                    let (_, _, cap, _) = target.item().expect("item target matched by variant");
+                    self.check_item(&slot.child, target, slot.expected, slot.expected_name)?;
+                    self.require_in_cap(&slot.child, cap, child)?;
+                    self.require_destination_in_cap(&slot.child, cap, caller)?;
+                }
+            }
             if caller_record.refs.contains_key(&slot.caller) {
                 return Err(ScopeError::RefAlreadyBound {
                     scope: caller.clone(),
@@ -1270,19 +1959,25 @@ impl ScopeCoordinator {
             }
             caller_positions.push(slot.caller.clone());
 
-            let id = target.data_id();
-            let owner = self.owner_of(id)?;
-            if owner == *child {
-                // 同一 DataId 出现在多个输出位置时只转移一次责任。
-                if !transferred.iter().any(|moved| moved == id) {
-                    transferred.push(id.clone());
+            match target {
+                RefTarget::Data(id) => {
+                    let owner = self.owner_of(id)?;
+                    if owner == *child {
+                        // 同一 DataId 出现在多个输出位置时只转移一次责任。
+                        if !transferred.iter().any(|moved| moved == id) {
+                            transferred.push(id.clone());
+                        }
+                    } else if !self.is_ancestor_or_self(&owner, caller) {
+                        return Err(ScopeError::IllegalOwner {
+                            id: id.clone(),
+                            owner,
+                            boundary: child.clone(),
+                        });
+                    }
                 }
-            } else if !self.is_ancestor_or_self(&owner, caller) {
-                return Err(ScopeError::IllegalOwner {
-                    id: id.clone(),
-                    owner,
-                    boundary: child.clone(),
-                });
+                RefTarget::CollectionItem { .. } => {
+                    // item 是 alias 目标：不转移来源集合责任，也不产生第二个 owner。
+                }
             }
             bindings.push((slot.caller.clone(), target.clone()));
         }
@@ -1380,10 +2075,12 @@ impl ScopeCoordinator {
     /// 回收判据的一部分：Controller 自己的本地 alias 同样计入，因此不会为了回收而
     /// 删除仍在使用的引用。已关闭 Scope 的 refs 已清空，不再计入。
     fn has_live_reference(&self, id: &DataId) -> bool {
-        self.registry
-            .scopes
-            .values()
-            .any(|record| record.refs.values().any(|target| target.data_id() == id))
+        self.registry.scopes.values().any(|record| {
+            record
+                .refs
+                .values()
+                .any(|target| matches!(target.data_id(), Some(bound) if bound == id))
+        })
     }
 
     /// 是否有任何控制状态仍把该 DataId 作为当前 target 保留。
@@ -1392,7 +2089,7 @@ impl ScopeCoordinator {
             state
                 .target
                 .as_ref()
-                .is_some_and(|target| target.data_id() == id)
+                .is_some_and(|target| matches!(target.data_id(), Some(bound) if bound == id))
         })
     }
 
@@ -1555,31 +2252,46 @@ impl ScopeCoordinator {
                     scope: source.clone(),
                     position: selected.clone(),
                 })?;
-        self.container
-            .validate_type(
-                target.data_id(),
-                state_record.expected,
-                state_record.expected_name,
-            )
-            .map_err(|source_error| ScopeError::from_storage(selected.clone(), source_error))?;
-
-        let owner = self.owner_of(target.data_id())?;
-        let transferred = if owner == *source {
-            true
-        } else if self.is_ancestor_or_self(&owner, &parent) {
-            false
-        } else {
-            return Err(ScopeError::IllegalOwner {
-                id: target.data_id().clone(),
-                owner,
-                boundary: source.clone(),
-            });
+        let transferred = match &target {
+            RefTarget::Data(id) => {
+                self.container
+                    .validate_type(id, state_record.expected, state_record.expected_name)
+                    .map_err(|source_error| {
+                        ScopeError::from_storage(selected.clone(), source_error)
+                    })?;
+                let owner = self.owner_of(id)?;
+                if owner == *source {
+                    true
+                } else if self.is_ancestor_or_self(&owner, &parent) {
+                    false
+                } else {
+                    return Err(ScopeError::IllegalOwner {
+                        id: id.clone(),
+                        owner,
+                        boundary: source.clone(),
+                    });
+                }
+            }
+            RefTarget::CollectionItem { .. } => {
+                let (_, _, cap, _) = target.item().expect("item target matched by variant");
+                // 来源与目的都必须位于 cap 内。
+                self.require_in_cap(selected, cap, source)?;
+                self.require_in_cap(selected, cap, &parent)?;
+                self.check_item(
+                    selected,
+                    &target,
+                    state_record.expected,
+                    state_record.expected_name,
+                )?;
+                // item 没有独立 owner：不转移任何责任。
+                false
+            }
         };
 
         // 被替换的旧状态：只有仍由该控制器负责的值才进入待回收登记；imported 值保持
         // 原 owner。这里只做判定，不改状态。
-        let replaced_pending = match state_record.target.clone() {
-            Some(RefTarget::Data(old)) if old != *target.data_id() => {
+        let replaced_pending = match (state_record.target.clone(), target.data_id()) {
+            (Some(RefTarget::Data(old)), Some(new)) if old != *new => {
                 if self.owner_of(&old)? == parent {
                     Some(old)
                 } else {
@@ -1607,14 +2319,15 @@ impl ScopeCoordinator {
     /// 提交段没有可恢复失败分支：预检（含清理前提）已全部完成。
     fn commit_promote(&mut self, plan: PreparedPromote) -> Result<(), ScopeError> {
         if plan.transferred {
-            self.registry
-                .lookup_mut(&plan.source)?
-                .owned
-                .remove(plan.target.data_id());
+            let id = plan
+                .target
+                .data_id()
+                .expect("promote transfers responsibility only for complete Data targets");
+            self.registry.lookup_mut(&plan.source)?.owned.remove(id);
             self.registry
                 .lookup_mut(&plan.controller)?
                 .owned
-                .insert(plan.target.data_id().clone());
+                .insert(id.clone());
         }
         {
             let state = self
@@ -1675,25 +2388,31 @@ impl ScopeCoordinator {
                     scope: item.clone(),
                     position: selected.clone(),
                 })?;
+        let Some(data_id) = target.data_id().cloned() else {
+            // CollectionItem 不是完整 owned Data：在任何内部取值前拒绝。
+            return Err(ScopeError::NonCompleteTarget {
+                position: selected.clone(),
+            });
+        };
         self.container
             .validate_type(
-                target.data_id(),
+                &data_id,
                 collector_record.element_type,
                 collector_record.element_name,
             )
             .map_err(|source| ScopeError::from_storage(selected.clone(), source))?;
 
-        if !item_record.owned.contains(target.data_id()) {
+        if !item_record.owned.contains(&data_id) {
             return Err(ScopeError::IllegalOwner {
-                id: target.data_id().clone(),
-                owner: self.owner_of(target.data_id())?,
+                id: data_id.clone(),
+                owner: self.owner_of(&data_id)?,
                 boundary: item.clone(),
             });
         }
-        if self.owner_of(target.data_id())? != *item {
+        if self.owner_of(&data_id)? != *item {
             return Err(ScopeError::IllegalOwner {
-                id: target.data_id().clone(),
-                owner: self.owner_of(target.data_id())?,
+                id: data_id.clone(),
+                owner: self.owner_of(&data_id)?,
                 boundary: item.clone(),
             });
         }
@@ -1713,13 +2432,14 @@ impl ScopeCoordinator {
     /// 预检已确认目标为 ItemScope 唯一负责的完整 Data 且元素类型相符，因此移动段没有
     /// 可恢复失败分支；容器诊断只用于报告不变量破坏。
     fn commit_consume(&mut self, plan: PreparedConsume) -> Result<(), ScopeError> {
+        let data_id = plan
+            .target
+            .data_id()
+            .expect("prepare_consume only plans complete Data targets");
         self.container
-            .move_into_collector(&plan.collector, plan.target.data_id())
+            .move_into_collector(&plan.collector, data_id)
             .map_err(|source| ScopeError::Storage { source })?;
-        self.registry
-            .lookup_mut(&plan.item)?
-            .owned
-            .remove(plan.target.data_id());
+        self.registry.lookup_mut(&plan.item)?.owned.remove(data_id);
         self.close_scope(&plan.item)
     }
 
@@ -3401,6 +4121,19 @@ mod tests {
             match target {
                 RefTarget::Data(id) => {
                     let _: &DataId = id;
+                }
+                RefTarget::CollectionItem {
+                    collection,
+                    index,
+                    lifetime_cap,
+                    access,
+                } => {
+                    let _: &DataId = collection;
+                    let _: &usize = index;
+                    let _: &ScopeId = lifetime_cap;
+                    let _: &super::ItemAccess = access;
+                    let _: TypeId = access.element_type();
+                    let _: TypeId = access.collection_type();
                 }
             }
         }

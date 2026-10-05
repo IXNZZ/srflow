@@ -25,12 +25,10 @@ use super::runtime::RootExecution;
 use super::scope::ScopeState;
 use super::signature::{BuildError, Data, NodeFut, Out2, Unit};
 use super::test_support::{
-    RootInput, advance_to_pending, boundary_address_reset, boundary_address_snapshot,
-    boundary_child_scope_reset, boundary_creation_reset, boundary_creation_snapshot,
-    child_scope_reset, drive, drive_pinned, export_attempt_snapshot, gate_wait,
-    install_export_conflict, install_gate, match_failure_scope_snapshot, match_stage_snapshot,
-    record, release_gate, root_input, run_definition_in_root, run_definition_plain, take_events,
-    take_export_conflict, take_shared_events,
+    RootInput, advance_to_pending, boundary_address_snapshot, boundary_creation_snapshot, drive,
+    drive_pinned, export_attempt_snapshot, gate_wait, install_export_conflict, install_gate,
+    match_failure_scope_snapshot, match_stage_snapshot, record, release_gate, root_input,
+    run_definition_in_root, run_definition_plain, take_events, take_shared_events,
 };
 
 // ---- 业务夹具 ----
@@ -65,50 +63,11 @@ impl Drop for W {
     }
 }
 
-/// 业务事件是否出现。
-fn saw(events: &[String], event: &str) -> bool {
-    events.iter().any(|candidate| candidate == event)
-}
-
-/// 事件序列中第 `n` 次出现的位置；缺失即失败。
-fn nth(events: &[String], needle: &str, n: usize) -> usize {
-    events
-        .iter()
-        .enumerate()
-        .filter(|(_, event)| event.contains(needle))
-        .map(|(index, _)| index)
-        .nth(n)
-        .unwrap_or_else(|| panic!("event `{needle}` #{n} missing: {events:?}"))
-}
-
-/// 事件序列中的位置；缺失即失败（不允许用 `None` 比较次序）。
-fn at(events: &[String], needle: &str) -> usize {
-    events
-        .iter()
-        .position(|event| event.contains(needle))
-        .unwrap_or_else(|| panic!("event `{needle}` missing: {events:?}"))
-}
-
-/// 业务事件次数。
-fn count(events: &[String], event: &str) -> usize {
-    events
-        .iter()
-        .filter(|candidate| *candidate == event)
-        .count()
-}
+use super::test_support::{at, count, nth, saw};
 
 /// 每个样本在起点重置 gate／事件／观测记录。
 fn reset() {
-    take_events();
-    take_shared_events();
-    child_scope_reset();
-    boundary_child_scope_reset();
-    boundary_address_reset();
-    boundary_creation_reset();
-    match_failure_scope_snapshot();
-    export_attempt_snapshot();
-    take_export_conflict();
-    release_gate();
+    super::test_support::reset_observations();
 }
 
 // ---- 路由、branch 与后续 Step 夹具 ----

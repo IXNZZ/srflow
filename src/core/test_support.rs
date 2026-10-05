@@ -49,6 +49,169 @@ pub(crate) fn take_events() -> Vec<String> {
     EVENTS.with(|events| std::mem::take(&mut *events.borrow_mut()))
 }
 
+// ---- Consume prepare 拒绝、内部清理之前的窄只读快照 ----
+
+/// Consume 收口前后的完整只读观察（不吞观察错误、不修改状态）。
+///
+/// 记录两侧完整 target-aware refs／owned（含 Scope／DataId 身份）、collector 状态与
+/// 被选输出的责任方／存活；`Before` 与 `AfterReject` 成对比较，`None` 表示无该项观察。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ConsumePreCleanupSnapshot {
+    /// 观察阶段：`prepare` 之前 / prepare 拒绝之后（内部 cleanup 之前）。
+    pub(crate) phase: ConsumeSnapshotPhase,
+    /// Item 侧完整 refs（target-aware，含位置与目标身份）。
+    pub(crate) item_refs: Option<
+        Vec<(
+            crate::core::ref_id::RefId,
+            crate::core::scope::TargetSnapshot,
+        )>,
+    >,
+    /// Item 侧 owned 集合。
+    pub(crate) item_owned: Option<Vec<crate::core::identity::DataId>>,
+    /// 直接 parent（collector owner）侧完整 refs。
+    pub(crate) parent_refs: Option<
+        Vec<(
+            crate::core::ref_id::RefId,
+            crate::core::scope::TargetSnapshot,
+        )>,
+    >,
+    /// 直接 parent 侧 owned 集合。
+    pub(crate) parent_owned: Option<Vec<crate::core::identity::DataId>>,
+    /// 被选输出当时的责任方（目标为完整 Data 时）。
+    pub(crate) selected_data: Option<crate::core::identity::DataId>,
+    /// 被选输出当时的责任方。
+    pub(crate) selected_owner: Option<crate::core::identity::ScopeId>,
+    /// 被选输出当时是否仍存活。
+    pub(crate) selected_alive: bool,
+    /// collector 元素类型名。
+    pub(crate) collector_element: Option<&'static str>,
+    /// collector 已移动的元素个数。
+    pub(crate) collector_moves: Option<usize>,
+    /// collector 的责任 Scope。
+    pub(crate) collector_owner: Option<crate::core::identity::ScopeId>,
+    /// 观察失败时的显式说明（不静默降级为默认值）。
+    pub(crate) observation_error: Option<String>,
+}
+
+/// 观察阶段。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ConsumeSnapshotPhase {
+    /// `prepare_consume` 之前。
+    Before,
+    /// prepare 拒绝之后、内部 cleanup 之前。
+    AfterReject,
+}
+
+thread_local! {
+    static PRE_CLEANUP: RefCell<Vec<ConsumePreCleanupSnapshot>> =
+        const { RefCell::new(Vec::new()) };
+}
+
+/// 记录一次 Consume 收口观察。
+pub(crate) fn record_consume_pre_cleanup(snapshot: ConsumePreCleanupSnapshot) {
+    PRE_CLEANUP.with(|slots| slots.borrow_mut().push(snapshot));
+}
+
+/// 取走已记录的观察。
+pub(crate) fn take_consume_pre_cleanup() -> Vec<ConsumePreCleanupSnapshot> {
+    PRE_CLEANUP.with(|slots| std::mem::take(&mut *slots.borrow_mut()))
+}
+
+// ---- 首次终止内容的只读记录（独立通道，不进入共享事件序列） ----
+
+/// 一次 `terminate` 实际保存的首次终止内容（类型化只读副本）。
+#[derive(Debug, Clone)]
+pub(crate) struct SavedTermination {
+    /// 终止类别。
+    pub(crate) kind: super::context::TerminationKind,
+    /// 定位 Scope。
+    pub(crate) scope: Option<super::identity::ScopeId>,
+    /// 说明文本。
+    pub(crate) note: &'static str,
+    /// 原始 Scope 诊断。
+    pub(crate) scope_error: Option<super::internal_error::ScopeError>,
+}
+
+thread_local! {
+    static SAVED_TERMINATIONS: RefCell<Vec<SavedTermination>> =
+        const { RefCell::new(Vec::new()) };
+}
+
+/// 记录一次实际保存的首次终止（只读；不进入共享事件序列，避免影响其它样本的次序断言）。
+pub(crate) fn record_termination_saved(
+    kind: super::context::TerminationKind,
+    scope: Option<super::identity::ScopeId>,
+    note: &'static str,
+    scope_error: Option<super::internal_error::ScopeError>,
+) {
+    SAVED_TERMINATIONS.with(|slots| {
+        slots.borrow_mut().push(SavedTermination {
+            kind,
+            scope,
+            note,
+            scope_error,
+        })
+    });
+}
+
+/// 取走已记录的首次终止。
+pub(crate) fn take_termination_saved() -> Vec<SavedTermination> {
+    SAVED_TERMINATIONS.with(|slots| std::mem::take(&mut *slots.borrow_mut()))
+}
+
+// ---- 共享事件断言辅助（V21-07 的私有辅助提升，语义保持不变） ----
+
+/// 业务事件是否出现。
+pub(crate) fn saw(events: &[String], event: &str) -> bool {
+    events.iter().any(|candidate| candidate == event)
+}
+
+/// 事件序列中是否出现带该前缀的事件（用于 `x:` 之类的事件族；`saw` 只做精确匹配）。
+pub(crate) fn saw_prefix(events: &[String], prefix: &str) -> bool {
+    events.iter().any(|event| event.starts_with(prefix))
+}
+
+/// 事件序列中第 `n` 次出现的位置；缺失即失败。
+pub(crate) fn nth(events: &[String], needle: &str, n: usize) -> usize {
+    events
+        .iter()
+        .enumerate()
+        .filter(|(_, event)| event.contains(needle))
+        .map(|(index, _)| index)
+        .nth(n)
+        .unwrap_or_else(|| panic!("event `{needle}` #{n} missing: {events:?}"))
+}
+
+/// 事件序列中的位置；缺失即失败（不允许用 `None` 比较次序）。
+pub(crate) fn at(events: &[String], needle: &str) -> usize {
+    events
+        .iter()
+        .position(|event| event.contains(needle))
+        .unwrap_or_else(|| panic!("event `{needle}` missing: {events:?}"))
+}
+
+/// 事件出现次数（精确匹配）。
+pub(crate) fn count(events: &[String], event: &str) -> usize {
+    events
+        .iter()
+        .filter(|candidate| *candidate == event)
+        .count()
+}
+
+/// 每个样本在起点重置 gate／事件／观测记录。
+pub(crate) fn reset_observations() {
+    take_events();
+    take_shared_events();
+    child_scope_reset();
+    boundary_child_scope_reset();
+    boundary_address_reset();
+    boundary_creation_reset();
+    match_failure_scope_snapshot();
+    export_attempt_snapshot();
+    take_export_conflict();
+    release_gate();
+}
+
 // ---- 线程局部挂起点 ----
 
 thread_local! {

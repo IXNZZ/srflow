@@ -158,6 +158,14 @@ impl<I: FlowInputs> FlowBuilder<I> {
     }
 }
 
+#[cfg(test)]
+impl<I: FlowInputs> FlowBuilder<I> {
+    /// 测试观测：构建态 Definition 当前 Step 数量。
+    pub(crate) fn step_count_probe(&self) -> usize {
+        self.definition.step_count()
+    }
+}
+
 impl<I: FlowInputs> TypedCallBuilder for FlowBuilder<I> {
     fn then<C, M, A0>(&mut self, callable: C, args: A0) -> Result<C::BuildOutput, BuildError>
     where

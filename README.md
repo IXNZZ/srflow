@@ -2,7 +2,7 @@
 
 System Runtime Workflow（SRFlow）是面向强类型业务流程的 Rust 执行与编排框架。本工程独立维护其设计、实现、测试和示例。
 
-> 当前总规范为 [SRFlow Design v2.1](docs/SRFlow_Design_v2.1.md)。实施路线是在同一 crate 中从空工程重写 Core；V21-00～V21-07 已验收为 **COMPLETED**。[G21-A](docs/tasks/G21_A_Foundation_Review.md)／[G21-B](docs/tasks/G21_B_Typed_Flow_Review.md) 为 PASS；V21-07 的 R1～R7 全部关闭，223 项测试、33 个编译负例及六项工程检查通过，见[最终验收记录 §21](docs/tasks/V21_07_RESULTS.md#21-最终复审与验收2026-10-05)。后续阶段状态和任务书以[任务入口](docs/tasks/README.md)为准。
+> 当前总规范为 [SRFlow Design v2.1](docs/SRFlow_Design_v2.1.md)。实施路线是在同一 crate 中从空工程重写 Core；V21-00～V21-08 已验收为 **COMPLETED**。[G21-A](docs/tasks/G21_A_Foundation_Review.md)／[G21-B](docs/tasks/G21_B_Typed_Flow_Review.md) 为 PASS；V21-08 的 R1～R6 全部关闭，262 项测试、44 个编译负例及六项工程检查通过，见[最终验收记录 §19](docs/tasks/V21_08_RESULTS.md#19-最终独立复审与验收2026-10-05)。后续阶段状态和任务书以[任务入口](docs/tasks/README.md)为准。
 
 ## 当前工程状态
 
@@ -12,7 +12,9 @@ V21-04 已验收内部单 Context／Invocation 与三类退出设施：真实异
 
 V21-07 已验收内部完成态 Match：已有路由 Data 与显式业务输入、函数／结构体／Arc Node 或完整 Flow branch、三种共同输出、不可变分支登记与来源校验、单一路由及 default、真实 BranchScope 与两层 Export、imported alias、错误终止及 Future 取消清理。未选 branch 不创建 Scope 或执行业务；子调用失败不改选分支。
 
-当前 crate 仍**没有任何公开 API**：`core` 不对外导出，业务侧无法按整数构造 ID、取得存储入口或访问 Scope 内部。公开 Node／Orchestrator／Flow／Match API、Each／Loop 与完整 Root 移交由后续任务交付；不得据当前内部底座宣称这些保证已经成立。
+V21-08 已验收内部 Each：显式集合与可选 shared 输入、CollectionItem／ItemScope cap、真实 Node 或完成态 Flow body、按项顺序执行与直接 Consume、collector 一次完成并 Export 最终 Vec、imported 输出拒绝、正常错误与 Future 取消清理。Each 会话核对当前实际 Definition，构建失败保留合法状态；状态收口和诊断观察的验收缺口均已关闭。当前范围为单 owned 输出、可选一个 shared、单线程顺序执行。
+
+当前 crate 仍**没有任何公开 API**：`core` 不对外导出，业务侧无法按整数构造 ID、取得存储入口或访问 Scope 内部。公开 Node／Orchestrator／Flow／Match／Each API、真实 Loop 与完整 Root 移交由后续任务交付；当前内部能力的验收不等于公开入口或完整 Runtime 已完成。
 
 历史 T01～T08 和 G1～G3 的通过记录对应旧 v2.0，不表示新实现完成。[P01～P07 Probe](docs/SRFlow_Core_Compile_Probe_Results_v0.1.md) 是局部可行性证据，正式调用链仍需重新验收。
 

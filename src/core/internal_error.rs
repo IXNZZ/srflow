@@ -302,6 +302,43 @@ pub(crate) enum ScopeError {
         /// 本次操作要求的责任 Scope。
         expected_owner: ScopeId,
     },
+    /// 该入口需要完整 Data 目标，但位置绑定的是 CollectionItem。
+    NonCompleteTarget {
+        /// 引用该目标的位置。
+        position: RefId,
+    },
+    /// CollectionItem 的来源集合已失效（被移出或销毁）。
+    ItemCollectionNotAlive {
+        /// 引用该 item 的位置。
+        position: RefId,
+        /// 失效的来源集合。
+        collection: DataId,
+    },
+    /// CollectionItem 的请求方不在其 lifetime cap 内。
+    ItemOutsideCap {
+        /// 引用该 item 的位置。
+        position: RefId,
+        /// item 的 lifetime cap。
+        cap: ScopeId,
+        /// 越界的请求方。
+        requester: ScopeId,
+    },
+    /// CollectionItem 的 index 超出实际集合长度。
+    ItemIndexOutOfRange {
+        /// 引用该 item 的位置。
+        position: RefId,
+        /// 越界下标。
+        index: usize,
+    },
+    /// CollectionItem 不能跨出其 lifetime cap（转移目的在 cap 之外）。
+    ItemCapEscape {
+        /// 引用该 item 的位置。
+        position: RefId,
+        /// item 的 lifetime cap。
+        cap: ScopeId,
+        /// cap 之外的目的 Scope。
+        destination: ScopeId,
+    },
     /// 当前 Execution 已终止（执行失败或取消），普通业务与正常提交入口拒绝。
     Terminated {
         /// 首次终止类别。
@@ -455,6 +492,38 @@ impl fmt::Display for ScopeError {
                 "the execution context is terminated ({kind:?}); ordinary business and commit entries are closed"
             ),
             Self::Storage { source } => write!(f, "{source}"),
+            Self::NonCompleteTarget { position } => {
+                write!(
+                    f,
+                    "{position} is bound to a collection item, not a complete Data"
+                )
+            }
+            Self::ItemCollectionNotAlive {
+                position,
+                collection,
+            } => write!(
+                f,
+                "the collection {collection} behind {position} is no longer alive"
+            ),
+            Self::ItemOutsideCap {
+                position,
+                cap,
+                requester,
+            } => write!(
+                f,
+                "{requester} is outside the lifetime cap {cap} of {position}"
+            ),
+            Self::ItemIndexOutOfRange { position, index } => {
+                write!(f, "item index {index} of {position} is out of range")
+            }
+            Self::ItemCapEscape {
+                position,
+                cap,
+                destination,
+            } => write!(
+                f,
+                "{destination} is outside the lifetime cap {cap} of {position}"
+            ),
         }
     }
 }

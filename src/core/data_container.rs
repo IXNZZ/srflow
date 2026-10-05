@@ -167,6 +167,24 @@ impl DataContainer {
             })
     }
 
+    /// cfg(test) 只读观察：下一个将被分配的 `DataId` 序号（序列耗尽返回 None）。
+    ///
+    /// 只读计数器，不分配、不改状态；用于证明失败路径不消耗 `DataId` 序号。
+    #[cfg(test)]
+    pub(crate) fn next_data_id_probe(&self) -> Option<u64> {
+        self.ids.next_seq_probe().map_err(|_| ()).ok()
+    }
+
+    /// 擦除借用：只做归属与存活检查，返回真实存储值的 `&dyn Any`。
+    ///
+    /// 供 CollectionItem 的元素投影使用：实际 `Vec<T>` 类型由元素的 typed 访问描述
+    /// 在投影时 downcast 复核，因此这里**不**做类型断言，也不接受业务侧类型参数。
+    /// 借用期与容器只读借用相同；借用未结束时无法可变借用容器。
+    pub(crate) fn borrow_any(&self, id: &DataId) -> Result<&dyn Any, InternalError> {
+        let (_, entry) = self.entry(id)?;
+        Ok(entry.value.as_ref())
+    }
+
     /// 只校验归属、存活与类型，不借用也不移出值。
     ///
     /// 供以运行时 `TypeId` 驱动整组校验的 Scope 层复用：它走与 `borrow` 相同的

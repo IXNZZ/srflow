@@ -91,6 +91,12 @@ impl ExecutionIdentity {
     /// 计数是身份根内部唯一的序列来源，因此多个分配句柄交替取号不会重复。增量在
     /// 赋值前完成溢出检查：`next + 1` 会溢出时返回 [`InternalError::IdSpaceExhausted`]，
     /// 不 wrap；`u64::MAX` 本身不会被发出。
+    /// cfg(test) 只读：读取 `DataId` 计数器当前值（不推进）。
+    #[cfg(test)]
+    fn peek_data_seq(&self) -> Result<u64, InternalError> {
+        Ok(self.next_data_id.load(Ordering::SeqCst))
+    }
+
     fn bump(&self, counter: &AtomicU64, kind: IdKind) -> Result<u64, InternalError> {
         counter
             .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |next| {
@@ -252,6 +258,12 @@ impl DataIdAllocator {
     /// 以给定身份根建立分配句柄。
     pub(crate) fn new(identity: Arc<ExecutionIdentity>) -> Self {
         Self { identity }
+    }
+
+    /// cfg(test) 只读观察：下一个 `DataId` 序号（不分配）。
+    #[cfg(test)]
+    pub(crate) fn next_seq_probe(&self) -> Result<u64, InternalError> {
+        self.identity.peek_data_seq()
     }
 
     /// 从本 Execution 的 `DataId` 序列取下一个 ID。

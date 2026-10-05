@@ -26,7 +26,8 @@ use super::identity::{CollectorId, DataId, ExecutionIdentity, ScopeId};
 use super::internal_error::ScopeError;
 use super::ref_id::RefId;
 use super::scope::{
-    ControlStateId, ExportSlot, ImportSlot, ScopeCoordinator, ScopeState, StateImportSlot,
+    ConsumeOutcome, ControlStateId, ExportSlot, ImportSlot, ScopeCoordinator, ScopeState,
+    StateImportSlot,
 };
 /// 首次终止类别：执行失败或取消。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -111,6 +112,21 @@ pub(crate) enum InvocationKind {
     /// 沿用 caller Scope 的轻量叶子调用。
     Leaf,
 }
+/// Item 边界的私有接收许可：只授权"当前 Item frame 把自身完整 owned 输出消费进其
+/// 直接 parent（EachScope）的固定 collector"。
+///
+/// 来源是**结构性**的：它只由 Each 的受控会话在每个 Item 边界内构造，其中的
+/// `collector` 只能经 `EachScopeTransfer::begin_each_session` 建立。普通调用者既拿不
+/// 到可变 Context，也无法凭空取得合法 CollectorId；它不授予任何 ancestor 读取、abort
+/// 或修改能力，也不放宽 `require_call_scope`。
+#[derive(Debug, Clone)]
+pub(crate) struct ItemConsumePermit {
+    /// Each 调用的 Scope（collector 的 owner、Item frame 的调用父 Scope）。
+    pub(crate) each: ScopeId,
+    /// 本次 Each 的 collector。
+    pub(crate) collector: CollectorId,
+}
+
 /// 一个调用 frame 的元数据。
 #[derive(Debug)]
 #[allow(dead_code)] // 非 test 构建下无生产消费者；由 V21-04／V21-05 的验收样本与后续任务驱动
@@ -297,12 +313,20 @@ impl ExecutionContext {
         scope_error: Option<ScopeError>,
     ) {
         if self.termination.is_none() {
-            self.termination = Some(ExecutionTermination {
+            let termination = ExecutionTermination {
                 kind,
                 scope,
                 note,
                 scope_error,
-            });
+            };
+            #[cfg(test)]
+            super::test_support::record_termination_saved(
+                termination.kind(),
+                termination.scope().cloned(),
+                termination.note(),
+                termination.scope_error().cloned(),
+            );
+            self.termination = Some(termination);
         }
     }
 
@@ -522,6 +546,153 @@ impl ExecutionContext {
         // collector 的责任方（Item 的直接 parent）同样必须可见。
         self.require_call_scope(&self.coordinator.collector_owner(collector)?)?;
         self.coordinator.consume_item(item, selected, collector)
+    }
+
+    /// 窄只读观察：target-aware 的 refs／owned 快照（区分完整 Data 与 CollectionItem）。
+    #[cfg(test)]
+    pub(crate) fn snapshot_targets_probe(
+        &self,
+        scope: &ScopeId,
+    ) -> Result<super::scope::TargetSnapshotPair, ScopeError> {
+        self.coordinator.snapshot_targets_probe(scope)
+    }
+
+    /// 测试故障注入：替换某位置 CollectionItem 的访问描述／下标（只改元数据）。
+    #[cfg(test)]
+    pub(crate) fn corrupt_item_access_probe(
+        &mut self,
+        scope: &ScopeId,
+        position: &RefId,
+        access: super::scope::ItemAccess,
+        index: Option<usize>,
+    ) -> Result<(), ScopeError> {
+        self.coordinator
+            .corrupt_item_access_probe(scope, position, access, index)
+    }
+
+    /// cfg(test) 只读观察：下一个将被分配的 `DataId` 序号。
+    #[cfg(test)]
+    pub(crate) fn next_data_id_probe(&self) -> Option<u64> {
+        self.coordinator.next_data_id_probe()
+    }
+
+    /// 窄只读观察：某位置当前绑定的完整 Data 身份（item 目标返回空）。
+    #[cfg(test)]
+    pub(crate) fn target_data_id_probe(
+        &self,
+        scope: &ScopeId,
+        position: &RefId,
+    ) -> Result<Option<super::identity::DataId>, ScopeError> {
+        self.coordinator.target_data_id_probe(scope, position)
+    }
+
+    /// 测试故障注入：把一个 Scope 标记为 Finalizing（构造"controller 非 Active"）。
+    #[cfg(test)]
+    pub(crate) fn set_finalizing_probe(&mut self, scope: &ScopeId) -> Result<(), ScopeError> {
+        self.coordinator.set_finalizing_probe(scope)
+    }
+
+    /// 测试故障注入：直接销毁存储中的某个 Data entry（构造"清理前提失败"）。
+    ///
+    /// 只用于在最底层的真实收口入口制造后置前提故障；不提供业务数据旁路，也不修改
+    /// 前提检查本体。
+    #[cfg(test)]
+    pub(crate) fn destroy_probe(&mut self, id: &super::identity::DataId) {
+        self.coordinator.destroy_probe(id);
+    }
+
+    /// 窄只读观察：collector 已移动进建构区的元素个数（cfg(test) 证据用）。
+    ///
+    /// 不改变 collector 或计数；finish／清理会移除计数，证据须在移除前取得。
+    #[cfg(test)]
+    pub(crate) fn collector_moves_probe(
+        &self,
+        collector: &CollectorId,
+    ) -> Result<usize, ScopeError> {
+        self.coordinator.collector_moves_probe(collector)
+    }
+
+    /// 受控 Item 收口：把当前 Item 的完整 owned 输出消费进其直接 parent 的 collector。
+    ///
+    /// 与通用 [`Self::consume_item`] 不同，它不要求父 EachScope 落在 `require_call_scope`
+    /// 的可见范围内（Item frame 请求父 Scope 会被该门禁拒绝），而是要求调用方持有
+    /// [`ItemConsumePermit`]：当前 frame 必须是该 Item、其调用父 frame 的 Scope 必须是
+    /// 许可登记的 Each、collector 必须由该 Each 负责。许可只授予"本次收口写入固定
+    /// parent collector"，不授予任意读取、abort 或修改 ancestor 的能力，也不放宽通用门禁。
+    pub(crate) fn consume_in_item_boundary(
+        &mut self,
+        item: &ScopeId,
+        selected: &RefId,
+        permit: &ItemConsumePermit,
+    ) -> ConsumeOutcome {
+        if let Err(violated) = self.require_item_boundary(item, permit) {
+            return ConsumeOutcome::Rejected {
+                primary: violated,
+                cleanup_failure: None,
+            };
+        }
+        self.coordinator
+            .consume_item_report(item, selected, &permit.collector)
+    }
+
+    /// 受控 Item 创建：为刚建立的直接 child（ItemScope）绑定集合元素目标。
+    ///
+    /// 只允许当前调用 Scope 自己调用（调用方必须是 frame 栈顶的 Scope），只接受其本地
+    /// 已绑定的完整 `Vec<T>` 集合，不接受任意 DataId／ScopeId／owned item 注入。
+    pub(crate) fn bind_item_input<T: Any>(
+        &mut self,
+        item_scope: &ScopeId,
+        caller: &ScopeId,
+        source: &RefId,
+        target: &RefId,
+        index: usize,
+    ) -> Result<(), ScopeError> {
+        self.require_running()?;
+        if self.current_scope().as_ref() != Some(caller) {
+            return Err(ScopeError::OutsideInvocation {
+                scope: caller.clone(),
+                current: self.current_scope(),
+            });
+        }
+        self.require_call_scope(item_scope)?;
+        self.coordinator
+            .bind_item_input::<T>(item_scope, caller, source, target, index)
+    }
+
+    /// Item 收口的许可检查：当前 frame 就是该 Item，其父 frame 是许可登记的 Each，
+    /// collector 由该 Each 负责。
+    fn require_item_boundary(
+        &self,
+        item: &ScopeId,
+        permit: &ItemConsumePermit,
+    ) -> Result<(), ScopeError> {
+        self.require_running()?;
+        let Some(frame) = self.frames.last() else {
+            return Err(ScopeError::Invariant {
+                violated: "item consumption requires an active item frame",
+            });
+        };
+        if frame.scope.as_ref() != Some(item) {
+            return Err(ScopeError::Invariant {
+                violated: "item consumption requires the current frame to be the item scope",
+            });
+        }
+        let Some(parent_index) = frame.parent else {
+            return Err(ScopeError::Invariant {
+                violated: "item frame must have a caller frame",
+            });
+        };
+        if self.frames[parent_index].scope.as_ref() != Some(&permit.each) {
+            return Err(ScopeError::Invariant {
+                violated: "item frame caller is not the registered each scope",
+            });
+        }
+        if self.coordinator.collector_owner(&permit.collector)? != permit.each {
+            return Err(ScopeError::Invariant {
+                violated: "item permit collector is not owned by the registered each scope",
+            });
+        }
+        Ok(())
     }
 
     /// Promote：把来源 child 的选定结果保留到父控制器的控制状态。
