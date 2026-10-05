@@ -21,7 +21,8 @@ use super::node::{AsyncFn0, AsyncFn1, AsyncFn2, Fn0, Fn1, Fn2, Leaf0, Leaf1, Lea
 use super::node::{LeafOutput, NodeCall0, NodeCall1, NodeCall2, NodeSite, SharedNode};
 use super::orchestrator::{OrchCall, OrchSite, OrchestratorSite, PackFromPorts};
 use super::ref_id::{RefId, RefIdAllocator, RefIdSource};
-use super::runtime::{RootExecution, RootExit, run_root};
+#[cfg(test)]
+use super::runtime::RootExecution;
 use super::signature::{
     ArcNodeSig, AsyncFnSig, BuildError, Data, DeclaredPort, InputTypes, NodeSig, OrchSig, OutKind,
     SyncFnSig, WireInputs, Wiring,
@@ -425,20 +426,20 @@ pub(crate) async fn run_site(
     }
 }
 
-/// Root 驱动：以空声明输出收口，执行一个 Definition 的全部 Step。
+/// 旧裸 Definition Root 驱动（仅测试观察）。
 ///
-/// 这是本阶段的最小 adapter 集成入口，不是公开 `Runtime::execute`，也不提供 Root owned
-/// take；Root 输入由调用方在进入 body 后登记到 Definition 的声明输入位置。
-#[allow(dead_code)] // V21-06 接入完整 Flow／Root 驱动前，V21-05 的真实执行样本是唯一消费者
+/// V21-10 起非 test 构建的 Root 执行入口唯一为 `runtime::Runtime::execute`；本驱动不是
+/// 生产入口，也不再提供空输出收口的生产路径，只保留给测试观察 Definition 级执行。
+#[cfg(test)]
 pub(crate) async fn run_definition_root(
     execution: RootExecution,
     definition: &Definition,
-) -> RootExit {
-    run_root(execution, definition, definition_root_body).await
+) -> super::runtime::RootExit {
+    super::runtime::run_root(execution, definition, definition_root_body).await
 }
 
 /// Root 执行体：Definition 的声明输入位置由调用方预先写入 RootScope。
-#[allow(dead_code)] // V21-06 接入完整 Flow／Root 驱动前，V21-05 的真实执行样本是唯一消费者
+#[cfg(test)]
 async fn definition_root_body(
     ctx: &mut ExecutionContext,
     definition: &Definition,

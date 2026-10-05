@@ -179,6 +179,19 @@ pub(crate) enum ScopeError {
         /// Root Scope。
         scope: ScopeId,
     },
+    /// Root 的多个声明输出解析到同一物理 `DataId`。
+    ///
+    /// 与 [`Self::DuplicateOwner`] 区分：这里每个位置都合法、owner 唯一，只是同一实例被
+    /// 要求提取两次；Root 提取必须给 Application 两份互不重复的 owned 值，因此在任何
+    /// take 之前整体拒绝，不隐式 `Clone`。
+    DuplicateRootDataId {
+        /// 声明顺序中首个解析到该实例的位置。
+        first_ref: RefId,
+        /// 重复解析到同一实例的位置。
+        duplicate_ref: RefId,
+        /// 被重复选择的物理实例。
+        data_id: DataId,
+    },
     /// 本地位置尚未绑定。
     RefNotBound {
         /// 所在 Scope。
@@ -396,6 +409,16 @@ impl fmt::Display for ScopeError {
                 write!(
                     f,
                     "{scope} is the internal RootScope and declares no output"
+                )
+            }
+            Self::DuplicateRootDataId {
+                first_ref,
+                duplicate_ref,
+                data_id,
+            } => {
+                write!(
+                    f,
+                    "root outputs {first_ref} and {duplicate_ref} resolve to the same {data_id}"
                 )
             }
             Self::RefNotBound { scope, position } => {

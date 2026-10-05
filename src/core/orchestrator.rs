@@ -622,6 +622,43 @@ where
     }
 }
 
+/// Root 装配入口：在真实 RootScope 上直接运行完成态 Orchestrator。
+///
+/// 与 nested 调用边界不同，它**不**建立 child Scope、不做 Import／Export：
+/// - Root 输入由 `Runtime::execute` 用正式 `register_owned` 绑定到 RootScope；
+/// - Root 的声明输出由 Root 自身 Step／child 调用边界在 body 运行期间绑定到 RootScope；
+/// - 本入口只做擦除后的 pack 防御校验，再按 `OrchCall::run` 运行编排体。
+///
+/// `OrchScope` 字段保持模块私有：装配与借用只在这里发生，`runtime.rs` 不直接构造它。
+#[allow(dead_code)] // 非 test 构建的唯一消费者是 runtime::Runtime::execute
+pub(crate) async fn run_root_call<'a, O, I, K>(
+    ctx: &'a mut ExecutionContext,
+    root: &'a O,
+    root_scope: &'a ScopeId,
+) -> Result<(), BodyError>
+where
+    O: OrchCall<I, K>,
+    I: 'static + InputTypes,
+    K: OutKind,
+{
+    let inner = root.definition();
+    let pack: O::Pack = <O::Pack as PackFromPorts>::from_ports(inner.inputs())?;
+    {
+        // pack 里是本次 RootScope 的声明输入位置：走与 nested 相同的
+        // "Scope 访问关系与容器归属 → 存活 → 实际 TypeId" 校验。
+        let shared: &ExecutionContext = ctx;
+        pack.validate(shared, root_scope)?;
+    }
+    let scope = OrchScope::<O::Pack, K> {
+        ctx,
+        child: root_scope,
+        pack: &pack,
+        inner,
+        marker: PhantomData,
+    };
+    root.run(scope).await
+}
+
 /// 编排体运行：先做擦除后的防御校验，再在自身 Scope 中运行 body。
 #[allow(dead_code)] // V21-06 接入完整 Flow／Root 驱动前，V21-05 的真实执行样本是唯一消费者
 async fn run_orchestrator_body<O, I, K>(

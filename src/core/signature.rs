@@ -433,6 +433,18 @@ pub(crate) enum BuildError {
     },
     /// `RefId` 序号空间耗尽：整组分配失败，本次调用不消耗任何序号。
     OutputPositionExhausted,
+    /// Root Signature 的声明输出端口与 `K` 的数量或类型不一致。
+    ///
+    /// 数量不符时 `index` 是较短一方的长度，`expected`／`actual` 中缺端口的一方记为
+    /// `"<no port>"`；类型不符时 `index` 是声明顺序下标。
+    RootOutputSignatureMismatch {
+        /// 不一致的声明序号。
+        index: usize,
+        /// `K` 声明的类型名（或缺端口标记）。
+        expected: &'static str,
+        /// Definition 声明端口的类型名（或缺端口标记）。
+        actual: &'static str,
+    },
 }
 
 impl BuildError {
@@ -470,6 +482,9 @@ impl BuildError {
                 "a registered branch output type does not match the common output signature"
             }
             Self::OutputPositionExhausted => "ref id sequence space exhausted",
+            Self::RootOutputSignatureMismatch { .. } => {
+                "root output ports do not match the root output signature"
+            }
         }
     }
 }
@@ -494,6 +509,15 @@ impl fmt::Display for BuildError {
             | Self::SecondLoopBody
             | Self::LoopBodyMissing
             | Self::LoopWrapperShape => write!(f, "{}", self.note()),
+            Self::RootOutputSignatureMismatch {
+                index,
+                expected,
+                actual,
+            } => write!(
+                f,
+                "{}: port {index} expects `{expected}`, definition declares `{actual}`",
+                self.note()
+            ),
             Self::InputCountMismatch { expected, supplied } => {
                 write!(
                     f,

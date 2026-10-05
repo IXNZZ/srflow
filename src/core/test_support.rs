@@ -449,6 +449,8 @@ pub(crate) fn count(events: &[String], event: &str) -> usize {
 
 /// 每个样本在起点重置 gate／事件／观测记录。
 pub(crate) fn reset_observations() {
+    closed_scope_reset();
+    root_snapshots_reset();
     take_events();
     take_shared_events();
     child_scope_reset();
@@ -499,6 +501,190 @@ pub(crate) async fn gate_wait() {
         })
         .await;
     }
+}
+
+// ---- V21-10：Root 提取观察、Scope 关闭记录与故障注入 ----
+
+thread_local! {
+    static CLOSED_SCOPES: RefCell<Vec<super::identity::ScopeId>> = const { RefCell::new(Vec::new()) };
+}
+
+/// 记录一个刚刚关闭的 Scope（只读观测，不改变关闭语义）。
+pub(crate) fn record_scope_closed(scope: super::identity::ScopeId) {
+    CLOSED_SCOPES.with(|closed| closed.borrow_mut().push(scope));
+}
+
+/// 已关闭 Scope 的顺序快照（逐层 Closed 证据）。
+pub(crate) fn closed_scope_snapshot() -> Vec<super::identity::ScopeId> {
+    CLOSED_SCOPES.with(|closed| closed.borrow().clone())
+}
+
+/// 复位已关闭 Scope 记录。
+pub(crate) fn closed_scope_reset() {
+    CLOSED_SCOPES.with(|closed| closed.borrow_mut().clear());
+}
+
+/// Root 提取观察点。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RootSnapshotPhase {
+    /// 同步提交完成、关闭开始之前。
+    AfterCommit,
+    /// 关闭尾段完成后（Root 已 Closed）。
+    AfterClose,
+    /// 提取预检拒绝后、失败清理之前。
+    PreflightRejected,
+    /// 失败清理（guard 退出）完成后。
+    AfterFailureCleanup,
+}
+
+/// Root 提取的只读快照：只含元数据与物理身份，不携带业务值。
+#[derive(Debug, Clone)]
+pub(crate) struct RootSnapshot {
+    /// 观察点。
+    pub(crate) phase: RootSnapshotPhase,
+    /// 预检计划的提取数。
+    pub(crate) planned_takes: usize,
+    /// 计划中的实例是否仍在 Container 中存活。
+    pub(crate) taken_alive: Vec<bool>,
+    /// 计划中的实例当前的责任方（`None` = 已不属于任何 Scope）。
+    pub(crate) taken_owned_by: Vec<Option<super::identity::ScopeId>>,
+    /// Root 的本地引用（位置，target）。
+    pub(crate) root_refs: Vec<(RefId, super::scope::TargetSnapshot)>,
+    /// Root 的 owned 集合。
+    pub(crate) root_owned: Vec<super::identity::DataId>,
+    /// Root 当前状态。
+    pub(crate) root_state: super::scope::ScopeState,
+    /// 下一个将被分配的 DataId 序号。
+    pub(crate) next_data_id: Option<u64>,
+    /// 该观察点上的首次终止类别（`None` = 本次执行未终止）。
+    pub(crate) terminated: Option<super::context::TerminationKind>,
+}
+
+thread_local! {
+    static ROOT_SNAPSHOTS: RefCell<Vec<RootSnapshot>> = const { RefCell::new(Vec::new()) };
+}
+
+/// 记录一个 Root 提取观察点。
+pub(crate) fn record_root_snapshot(snapshot: RootSnapshot) {
+    ROOT_SNAPSHOTS.with(|snapshots| snapshots.borrow_mut().push(snapshot));
+}
+
+/// 取出全部 Root 提取观察点。
+pub(crate) fn take_root_snapshots() -> Vec<RootSnapshot> {
+    ROOT_SNAPSHOTS.with(|snapshots| std::mem::take(&mut *snapshots.borrow_mut()))
+}
+
+/// 复位 Root 提取观察点。
+pub(crate) fn root_snapshots_reset() {
+    ROOT_SNAPSHOTS.with(|snapshots| snapshots.borrow_mut().clear());
+}
+
+/// 读取真实状态构造一个观察点（只读，不改变任何状态）。
+pub(crate) fn root_snapshot(
+    ctx: &super::context::ExecutionContext,
+    root: &super::identity::ScopeId,
+    phase: RootSnapshotPhase,
+    planned_takes: usize,
+    taken: &[super::identity::DataId],
+) -> RootSnapshot {
+    let root_refs = ctx
+        .snapshot_targets_probe(root)
+        .map(|(refs, _)| refs)
+        .unwrap_or_default();
+    let root_owned = ctx
+        .snapshot_targets_probe(root)
+        .map(|(_, owned)| owned)
+        .unwrap_or_default();
+    RootSnapshot {
+        phase,
+        planned_takes,
+        taken_alive: taken.iter().map(|id| ctx.alive_probe(id)).collect(),
+        taken_owned_by: taken.iter().map(|id| ctx.owner_probe(id).ok()).collect(),
+        root_refs,
+        root_owned,
+        root_state: ctx.state(root).unwrap_or(super::scope::ScopeState::Closed),
+        next_data_id: ctx.next_data_id_probe(),
+        terminated: ctx.termination().map(|termination| termination.kind()),
+    }
+}
+
+/// Root 阶段的 test-only 故障：只改变前置元数据，不改变生产判断路径。
+#[derive(Debug)]
+pub(crate) enum RootFault {
+    /// 用给定列表替换本次 Root 的声明输出端口（可表达数量／类型／重复／未绑定位置）。
+    ReplacePorts(Vec<super::signature::DeclaredPort>),
+    /// 在真实声明输出端口列表的第 `index` 项之后复制一份（同 RefId 重复）。
+    DuplicatePort(usize),
+    /// 在真实声明输出端口列表末尾追加一个端口（数量不符）。
+    AppendPort(super::signature::DeclaredPort),
+    /// 登记输入前，在第 `index` 个声明输入位置上预占一个值（后项装配失败）。
+    PrebindInput(usize),
+    /// body 结束后、预检前，销毁 RootScope 第 `index` 个 owned entry（清理前提损坏）。
+    DestroyRootOwned(usize),
+    /// body 结束后、预检前，把 RootScope 第 `index` 个 owned 的责任移到一个已关闭 Scope。
+    RelocateOwnedToClosedScope(usize),
+    /// body 结束后、预检前，把第 `index` 个声明输出位置的目标改成指定 target。
+    InjectOutputTarget {
+        /// 声明输出端口下标。
+        index: usize,
+        /// 注入的 target。
+        target: super::scope::RefTarget,
+    },
+    /// body 结束后、预检前，把第 `index` 个声明输出位置的目标改成第 `input` 个声明输入的
+    /// 目标（构造"声明类型与目标实际类型不符"的反例）。
+    RetargetOutputFromInput {
+        /// 声明输出端口下标。
+        index: usize,
+        /// 声明输入下标。
+        input: usize,
+    },
+}
+
+thread_local! {
+    static ROOT_FAULT: RefCell<Option<RootFault>> = const { RefCell::new(None) };
+}
+
+/// 安装一个 Root 阶段故障（在下一次匹配阶段消费）。
+pub(crate) fn install_root_fault(fault: RootFault) {
+    ROOT_FAULT.with(|slot| *slot.borrow_mut() = Some(fault));
+}
+
+fn take_root_fault_if(predicate: impl Fn(&RootFault) -> bool) -> Option<RootFault> {
+    ROOT_FAULT.with(|slot| {
+        if slot.borrow().as_ref().is_some_and(&predicate) {
+            slot.borrow_mut().take()
+        } else {
+            None
+        }
+    })
+}
+
+/// 取出口径故障（端口列表类）。
+pub(crate) fn take_root_ports_fault() -> Option<RootFault> {
+    take_root_fault_if(|fault| {
+        matches!(
+            fault,
+            RootFault::ReplacePorts(_) | RootFault::DuplicatePort(_) | RootFault::AppendPort(_)
+        )
+    })
+}
+
+/// 取出指定下标的输入装配故障（其它下标不消费）。
+pub(crate) fn take_root_input_fault_at(index: usize) -> Option<RootFault> {
+    take_root_fault_if(|fault| matches!(fault, RootFault::PrebindInput(at) if *at == index))
+}
+
+/// 取出 body 之后、预检之前的故障。
+pub(crate) fn take_root_post_body_fault() -> Option<RootFault> {
+    take_root_fault_if(|fault| {
+        matches!(
+            fault,
+            RootFault::DestroyRootOwned(_)
+                | RootFault::RelocateOwnedToClosedScope(_)
+                | RootFault::InjectOutputTarget { .. }
+                | RootFault::RetargetOutputFromInput { .. }
+        )
+    })
 }
 
 // ---- Future 驱动 ----

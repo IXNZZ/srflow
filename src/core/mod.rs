@@ -10,7 +10,8 @@
 //! Orchestrator 协议、强类型异构 CallSite 及真实 Context 双路径分派；V21-06 交付完整
 //! 内部 Flow 与 SubFlow；V21-07 交付 Match；V21-08 交付顺序 Each、CollectionItem cap
 //! 与真实 Item 直接 Consume；V21-09 交付 Loop 的 Retry／Iter 正式推进与 Round 收口。
-//! 公开 API 与完整 Root 输出移交仍由后续任务接续。
+//! 公开 API 由后续任务接续。V21-10 交付非 `cfg(test)` 的内部 Root 入口
+//! `Runtime::execute`：owned Root 输入、真实 Orchestrator body 与完整输出移交。
 
 pub(crate) mod builder;
 pub(crate) mod context;
@@ -29,6 +30,7 @@ pub(crate) mod match_orchestrator;
 pub(crate) mod node;
 pub(crate) mod orchestrator;
 pub(crate) mod ref_id;
+pub(crate) mod root_signature;
 pub(crate) mod runtime;
 pub(crate) mod scope;
 pub(crate) mod signature;
@@ -57,3 +59,7 @@ mod v21_09_tests_failures;
 mod v21_09_tests_revision;
 #[cfg(test)]
 mod v21_09_tests_revision2;
+#[cfg(test)]
+mod v21_10_tests;
+#[cfg(test)]
+mod v21_10_tests_defence;

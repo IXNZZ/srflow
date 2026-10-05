@@ -26,8 +26,8 @@ use super::identity::{CollectorId, DataId, ExecutionIdentity, ScopeId};
 use super::internal_error::ScopeError;
 use super::ref_id::RefId;
 use super::scope::{
-    ConsumeOutcome, ControlStateId, DiscardOutcome, ExportSlot, ImportSlot, PromoteOutcome,
-    ScopeCoordinator, ScopeState, StateImportSlot,
+    ConsumeOutcome, ControlStateId, DiscardOutcome, ExportSlot, ImportSlot, PreparedRootExtraction,
+    PromoteOutcome, ScopeCoordinator, ScopeState, StateImportSlot,
 };
 /// 首次终止类别：执行失败或取消。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -516,6 +516,23 @@ impl ExecutionContext {
         self.coordinator.register_owned(scope, position, value)
     }
 
+    /// 登记一个已擦除的 owned Data 并绑定本地输出位置（Root 输入登记的正式入口）。
+    ///
+    /// 与 [`Self::register_owned`] 同一终止与调用范围检查；擦除值只在本次 Execution 的
+    /// Container 中存活，`type_name` 用于后续类型诊断。
+    pub(crate) fn register_owned_erased(
+        &mut self,
+        scope: &ScopeId,
+        position: &RefId,
+        type_name: &'static str,
+        value: Box<dyn Any>,
+    ) -> Result<DataId, ScopeError> {
+        self.require_running()?;
+        self.require_call_scope(scope)?;
+        self.coordinator
+            .register_owned_erased(scope, position, type_name, value)
+    }
+
     /// 整组 Import（本地引用来源）。
     pub(crate) fn import_batch(
         &mut self,
@@ -594,6 +611,31 @@ impl ExecutionContext {
     #[cfg(test)]
     pub(crate) fn next_data_id_probe(&self) -> Option<u64> {
         self.coordinator.next_data_id_probe()
+    }
+
+    /// 测试故障注入：把一个 target 直接写入 RootScope 的声明输出位置（只改元数据）。
+    ///
+    /// 只用于构造"类型不符／alias／CollectionItem／foreign Execution"的 Root 防御反例；
+    /// 不提供业务旁路，也不改变提取预检的判断路径。
+    #[cfg(test)]
+    pub(crate) fn inject_root_target_probe(
+        &mut self,
+        scope: &ScopeId,
+        position: &RefId,
+        target: super::scope::RefTarget,
+    ) {
+        self.coordinator
+            .inject_target_probe(scope, position, target);
+    }
+
+    /// 测试故障注入：把一份 owned 实例的责任移到指定 Scope（构造"非 Root owner"反例）。
+    #[cfg(test)]
+    pub(crate) fn relocate_ownership_probe(
+        &mut self,
+        id: &DataId,
+        to: &ScopeId,
+    ) -> Result<(), ScopeError> {
+        self.coordinator.relocate_ownership_probe(id, to)
     }
 
     /// 窄只读观察：某位置当前绑定的完整 Data 身份（item 目标返回空）。
@@ -1164,6 +1206,77 @@ impl InvocationGuard<'_> {
     #[cfg(test)]
     pub(crate) fn exit_for_probe(self) {}
 
+    /// Root 收口权限：只允许当前未终止的 Root frame 在本 Context 的 RootScope 上发起。
+    ///
+    /// 判据彼此独立：身份（本 Execution 的 RootScope）、终止状态、调用类别（必须是
+    /// Root frame；Boundary／Leaf 即使拿着 RootScope 身份也拒绝）、无未结束的 child／
+    /// Leaf 调用、以及本 guard 确实承担 RootScope 的退出责任。它不放宽
+    /// `require_call_scope`：可见性许可是读取范围，不是提取权。
+    fn require_root_close(&self, root: &ScopeId) -> Result<(), ScopeError> {
+        self.require_running()?;
+        if *root != self.context.root_scope() {
+            return Err(ScopeError::ForeignExecution {
+                scope: root.clone(),
+            });
+        }
+        let Some(frame) = self.context.frames.get(self.frame_index) else {
+            return Err(ScopeError::Invariant {
+                violated: "a root close needs its own invocation frame",
+            });
+        };
+        if frame.kind() != InvocationKind::Root {
+            return Err(ScopeError::OutsideInvocation {
+                scope: root.clone(),
+                current: self.context.current_scope(),
+            });
+        }
+        if self.context.frame_depth() != self.frame_index + 1 {
+            return Err(ScopeError::Invariant {
+                violated: "a root close requires no live child invocation",
+            });
+        }
+        if !self.responsible.iter().any(|known| known == root) {
+            return Err(ScopeError::Invariant {
+                violated: "a root close requires the root frame's own responsibility",
+            });
+        }
+        Ok(())
+    }
+
+    /// Root 收口第一步：冻结 Root（Active → Finalizing，仅一次）并整组预检全部输出。
+    ///
+    /// 权限、冻结与预检都发生在任何 take 之前；失败时 Root 保持已冻结状态，由调用方
+    /// 进入受控失败清理（不恢复为可继续业务执行的 Active）。
+    pub(crate) fn prepare_root_extraction(
+        &mut self,
+        root: &ScopeId,
+        ports: &[super::signature::DeclaredPort],
+    ) -> Result<PreparedRootExtraction, ScopeError> {
+        self.require_root_close(root)?;
+        self.coordinator.freeze_root(root)?;
+        self.coordinator.prepare_root_extraction(root, ports)
+    }
+
+    /// Root 收口提交：同步 take 全组并在同一边界解除 Root 责任；无可恢复失败分支。
+    ///
+    /// 返回按声明顺序的擦除值与关闭阶段仍需销毁的剩余 owned。
+    pub(crate) fn commit_root_extraction(
+        &mut self,
+        root: &ScopeId,
+        plan: PreparedRootExtraction,
+    ) -> (Vec<Box<dyn Any>>, Vec<DataId>) {
+        self.coordinator.commit_root_extraction(root, plan)
+    }
+
+    /// Root 收口关闭尾段：整组失效引用、销毁预检过的剩余 owned、保留 tombstone。
+    pub(crate) fn close_root(
+        &mut self,
+        root: &ScopeId,
+        targets: Vec<DataId>,
+    ) -> Result<(), ScopeError> {
+        self.coordinator.close_root_validated(root, targets)
+    }
+
     /// 解除对某个已正常关闭（或已由 Promote／Consume 关闭）来源的责任。
     pub(crate) fn release_responsibility(&mut self, scope: &ScopeId) {
         self.responsible.retain(|known| known != scope);
@@ -1268,6 +1381,19 @@ impl Drop for InvocationGuard<'_> {
             }
             if let Some((scope, error)) = failure {
                 self.context.record_cleanup_failure(scope, error);
+            }
+            #[cfg(test)]
+            if let Some(scope) = frame_scope.clone()
+                && self.context.frames[self.frame_index].kind() == InvocationKind::Root
+            {
+                let snapshot = super::test_support::root_snapshot(
+                    self.context,
+                    &scope,
+                    super::test_support::RootSnapshotPhase::AfterFailureCleanup,
+                    0,
+                    &[],
+                );
+                super::test_support::record_root_snapshot(snapshot);
             }
         }
 

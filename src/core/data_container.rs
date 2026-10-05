@@ -150,6 +150,45 @@ impl DataContainer {
         Ok(id)
     }
 
+    /// 登记一个已擦除的 owned 业务值：与 [`Self::insert_owned`] 同一分配与拒绝规则。
+    ///
+    /// 供 Root 输入登记使用：输入的静态类型已知（`RootInputs` 的映射），但在登记边界
+    /// 只保留擦除值。`type_name` 必须是该值真实类型的名字，`()` 与序号耗尽同样在写入
+    /// entry 之前被拒绝。
+    pub(crate) fn insert_owned_erased(
+        &mut self,
+        type_name: &'static str,
+        value: Box<dyn Any>,
+    ) -> Result<DataId, InternalError> {
+        // 注意：`Box<dyn Any>` 自身的 `Any` impl 会给出 `Box<dyn Any>` 的 `TypeId`；
+        // 必须先取到底层 `dyn Any` 再比较，与 `validate_type` 同一注意事项。
+        if value.as_ref().type_id() == TypeId::of::<()>() {
+            return Err(InternalError::UnitNotStorable);
+        }
+
+        let id = self.ids.allocate()?;
+        self.entries
+            .insert(id.seq(), DataEntry { type_name, value });
+        Ok(id)
+    }
+
+    /// 提交段专用：已验证身份与存活后移出单值，返回擦除的 owned 值。
+    ///
+    /// 只供 Root 提取提交使用：调用方必须已在同一不可观察提交边界之前证明该 `DataId`
+    /// 属于本 Execution 且 entry 存活（`prepare_root_extraction`）。这个入口不做可恢复
+    /// 校验，`expect` 表达"预检已覆盖"的不变量而不是普通错误路径；旧 `DataId` 在移动后
+    /// 失效。
+    pub(crate) fn take_verified(&mut self, id: &DataId) -> Box<dyn Any> {
+        debug_assert!(
+            Arc::ptr_eq(&self.execution, id.execution()),
+            "root take requires an id from this execution"
+        );
+        self.entries
+            .remove(&id.seq())
+            .expect("root take requires an entry proven alive by the preflight")
+            .value
+    }
+
     /// 返回与容器借用期关联的只读借用。
     ///
     /// 校验顺序为归属、存活、类型；任何一步失败都不改变 entry。允许同时存在多个借用，

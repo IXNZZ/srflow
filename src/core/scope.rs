@@ -529,6 +529,33 @@ struct PreparedExport {
     transferred: Vec<DataId>,
 }
 
+/// Root 提取的预检结果。
+///
+/// 只由 [`ScopeCoordinator::prepare_root_extraction`] 生成，并在 `freeze_root` 之后的同一
+/// 退出流程内被 `commit_root_extraction` 单次消费。它只含元数据——声明位置、已解析的
+/// 物理实例与关闭时的清理集合——不携带业务值、不跨 Execution、不缓存到 Definition，
+/// 不能重放。字段私有：外部只能整体传递，不能挑选或改写其中条目。
+#[derive(Debug)]
+pub(crate) struct PreparedRootExtraction {
+    /// 按 Root Signature 声明顺序的（声明位置，物理实例）。
+    selections: Vec<(RefId, DataId)>,
+    /// 关闭 Root 时需要销毁的剩余 owned（已在预检时整组校验，不含已选实例）。
+    close_targets: Vec<DataId>,
+}
+
+impl PreparedRootExtraction {
+    /// 本次计划要提取的实例数（Unit 为 0）。
+    pub(crate) fn take_count(&self) -> usize {
+        self.selections.len()
+    }
+
+    /// 计划中按声明顺序的物理实例（只读观测；不授予 take 权）。
+    #[cfg(test)]
+    pub(crate) fn taken_ids(&self) -> Vec<DataId> {
+        self.selections.iter().map(|(_, id)| id.clone()).collect()
+    }
+}
+
 /// Scope 协调组件：同一 owner 中的 registry 与唯一 Container。
 ///
 /// 它提供受控的登记、导入、resolve、导出与退出入口，不启动业务调用、不创建 Invocation，
@@ -603,6 +630,23 @@ impl ScopeCoordinator {
             .expect("fixture scope exists")
             .refs
             .insert(position.clone(), target);
+    }
+
+    /// 测试故障注入：把一份 owned 实例的责任移到指定 Scope。
+    ///
+    /// 只用于构造"Root 输出 target 由非 Root Scope 负责"的防御反例（`to` 可以是已关闭
+    /// Scope 的 tombstone 身份）；不改变任何判断路径，也不成为生产入口。
+    #[cfg(test)]
+    pub(crate) fn relocate_ownership_probe(
+        &mut self,
+        id: &DataId,
+        to: &ScopeId,
+    ) -> Result<(), ScopeError> {
+        for record in self.registry.scopes.values_mut() {
+            record.owned.remove(id);
+        }
+        self.registry.lookup_mut(to)?.owned.insert(id.clone());
+        Ok(())
     }
 
     /// 测试观测：一个 Scope 的 owned 数量。
@@ -751,6 +795,42 @@ impl ScopeCoordinator {
         let id = self
             .container
             .insert_owned(value)
+            .map_err(|source| ScopeError::Storage { source })?;
+
+        let record = self.registry.lookup_mut(scope)?;
+        record
+            .refs
+            .insert(position.clone(), RefTarget::Data(id.clone()));
+        record.owned.insert(id.clone());
+        Ok(id)
+    }
+
+    /// 登记一个已擦除的 owned Data，并把它绑定到本地输出位置。
+    ///
+    /// 与 [`Self::register_owned`] 同一顺序与拒绝规则：状态与位置占用检查 → Container 插入
+    /// → 登记唯一责任与绑定。`type_name` 必须是擦除值真实类型的名字，供后续类型诊断使用。
+    /// 供 Root 输入登记使用：业务的静态类型由 `RootInputs` 形状固定，登记边界只保留擦除值。
+    pub(crate) fn register_owned_erased(
+        &mut self,
+        scope: &ScopeId,
+        position: &RefId,
+        type_name: &'static str,
+        value: Box<dyn Any>,
+    ) -> Result<DataId, ScopeError> {
+        {
+            let record = self.registry.lookup(scope)?;
+            record.require_active()?;
+            if record.refs.contains_key(position) {
+                return Err(ScopeError::RefAlreadyBound {
+                    scope: scope.clone(),
+                    position: position.clone(),
+                });
+            }
+        }
+
+        let id = self
+            .container
+            .insert_owned_erased(type_name, value)
             .map_err(|source| ScopeError::Storage { source })?;
 
         let record = self.registry.lookup_mut(scope)?;
@@ -2160,6 +2240,148 @@ impl ScopeCoordinator {
         self.cleanup_subtree(scope)
     }
 
+    // ---- Root owned 提取（V21-10）：冻结 → 整组预检 → 同步提交 → 复用关闭尾段 ----
+
+    /// 冻结 Root：Active → Finalizing，且只允许一次。
+    ///
+    /// 与 `finalize` 的先决条件一致：仍活跃的 descendant 必须先结束；已 Finalizing 或
+    /// Closed 的 Root 不能再次冻结（K17 重入拒绝）。冻结只改变状态，不改 refs／owned／
+    /// target／分配序号；失败（含"仍有 descendant"）不改变状态，由调用方进入受控失败清理。
+    pub(crate) fn freeze_root(&mut self, root: &ScopeId) -> Result<(), ScopeError> {
+        self.registry.lookup(root)?.require_active()?;
+        if self.has_live_descendants(root)? {
+            return Err(ScopeError::ActiveDescendants {
+                scope: root.clone(),
+            });
+        }
+        self.registry.lookup_mut(root)?.state = ScopeState::Finalizing;
+        Ok(())
+    }
+
+    /// Root 提取的整组预检（只读，任何 take 之前）。
+    ///
+    /// 判据顺序固定，避免多判据互相遮蔽：
+    /// 1. 声明位置已绑定，且是完整 `Data`（`CollectionItem` 在此拒绝，不借用元素）；
+    /// 2. 物理实例的身份 → 存活 → 与声明端口类型（复用容器既有诊断与映射）；
+    /// 3. 唯一生命周期责任，且责任方就是本 Root；
+    /// 4. 声明顺序中全部物理实例互不重复（同一位置重复与不同位置 alias 同一实例都拒绝）；
+    /// 5. Root 关闭前提：剩余 owned 与 collector／state 登记的可恢复前提整组校验。
+    ///
+    /// 只接受 Active 或 Finalizing（后者说明调用方已冻结）；Closed 拒绝。全部检查通过后
+    /// 返回只含元数据的计划；任一项失败都不改变 refs／owned／target／分配序号。
+    pub(crate) fn prepare_root_extraction(
+        &self,
+        root: &ScopeId,
+        ports: &[super::signature::DeclaredPort],
+    ) -> Result<PreparedRootExtraction, ScopeError> {
+        let record = self.registry.lookup(root)?;
+        match record.state {
+            ScopeState::Active | ScopeState::Finalizing => {}
+            ScopeState::Closed => {
+                return Err(ScopeError::ScopeClosed {
+                    scope: root.clone(),
+                });
+            }
+        }
+        if self.has_live_descendants(root)? {
+            return Err(ScopeError::ActiveDescendants {
+                scope: root.clone(),
+            });
+        }
+
+        let mut selections: Vec<(RefId, DataId)> = Vec::with_capacity(ports.len());
+        for port in ports {
+            let position = port.position();
+            let target = record
+                .refs
+                .get(position)
+                .ok_or_else(|| ScopeError::RefNotBound {
+                    scope: root.clone(),
+                    position: position.clone(),
+                })?;
+            // 完整 Data 才可提取；CollectionItem 即使元素类型相同、cap 仍存活也拒绝。
+            let id = target.require_data(position)?;
+            self.container
+                .validate_type(id, port.expected(), port.expected_name())
+                .map_err(|source| ScopeError::from_storage(position.clone(), source))?;
+            let owner = self.owner_of(id)?;
+            if owner != *root {
+                return Err(ScopeError::IllegalOwner {
+                    id: id.clone(),
+                    owner,
+                    boundary: root.clone(),
+                });
+            }
+            if let Some((first_ref, _)) = selections.iter().find(|(_, selected)| selected == id) {
+                return Err(ScopeError::DuplicateRootDataId {
+                    first_ref: first_ref.clone(),
+                    duplicate_ref: position.clone(),
+                    data_id: id.clone(),
+                });
+            }
+            selections.push((position.clone(), id.clone()));
+        }
+
+        // 关闭前提在提取之前整组校验：预检结束时已不再需要重新计算清理集合。
+        let close_targets: Vec<DataId> = self
+            .cleanup_targets(root)?
+            .into_iter()
+            .filter(|id| !selections.iter().any(|(_, selected)| selected == id))
+            .collect();
+
+        Ok(PreparedRootExtraction {
+            selections,
+            close_targets,
+        })
+    }
+
+    /// Root 提取的同步提交：take 全组 owned 值并在同一不可观察边界解除 Root 责任。
+    ///
+    /// 计划必须来自本次 Root 的 `prepare_root_extraction`，调用前 Root 已冻结（Finalizing）。
+    /// 每份值只移动一次；take 与 `RootScope.owned` 移除之间没有可恢复分支（身份与存活已由
+    /// 预检证明），因此不会出现"已取走但仍有 owner"或"已解除 owner 但值仍在"的中间状态。
+    /// 返回按声明顺序的擦除值，以及关闭 Root 时仍需销毁的剩余 owned（预检时的整组结果）。
+    pub(crate) fn commit_root_extraction(
+        &mut self,
+        root: &ScopeId,
+        plan: PreparedRootExtraction,
+    ) -> (Vec<Box<dyn Any>>, Vec<DataId>) {
+        debug_assert!(
+            matches!(
+                self.registry
+                    .scopes
+                    .get(&root.seq())
+                    .map(|record| record.state),
+                Some(ScopeState::Finalizing)
+            ),
+            "root extraction commits only after freezing the root"
+        );
+        let mut values = Vec::with_capacity(plan.selections.len());
+        for (_, id) in &plan.selections {
+            values.push(self.container.take_verified(id));
+            let record = self
+                .registry
+                .scopes
+                .get_mut(&root.seq())
+                .expect("root scope record exists until it closes");
+            record.owned.remove(id);
+        }
+        (values, plan.close_targets)
+    }
+
+    /// Root 提取后的关闭尾段：复用已验收的整组清理与关闭语义。
+    ///
+    /// `targets` 必须来自本次预检（`PreparedRootExtraction`），因此关闭阶段不再有可恢复
+    /// 的普通失败：本地引用整组失效、剩余 owned 与未完成 collector／state 撤销一次、
+    /// 保留 tombstone。已移交 Application 的实例不在 `targets` 中，不会被再次销毁。
+    pub(crate) fn close_root_validated(
+        &mut self,
+        root: &ScopeId,
+        targets: Vec<DataId>,
+    ) -> Result<(), ScopeError> {
+        self.close_validated(root, targets)
+    }
+
     /// Export 预检：核对声明元数据与本次 slot，并验证全部可恢复条件；不做任何状态变更。
     fn prepare_export(
         &self,
@@ -3198,6 +3420,8 @@ impl ScopeCoordinator {
             record.children.clear();
             record.state = ScopeState::Closed;
         }
+        #[cfg(test)]
+        super::test_support::record_scope_closed(scope.clone());
         if let Some(parent) = parent
             && let Some(parent_record) = self.registry.scopes.get_mut(&parent.seq())
         {
