@@ -2,7 +2,7 @@
 
 System Runtime Workflow（SRFlow）是面向强类型业务流程的 Rust 执行与编排框架。本工程独立维护其设计、实现、测试和示例。
 
-> 当前总规范为 [SRFlow Design v2.1](docs/SRFlow_Design_v2.1.md)。实施路线是在同一 crate 中从空工程重写 Core；V21-00～V21-08 已验收为 **COMPLETED**。[G21-A](docs/tasks/G21_A_Foundation_Review.md)／[G21-B](docs/tasks/G21_B_Typed_Flow_Review.md) 为 PASS；V21-08 的 R1～R6 全部关闭，262 项测试、44 个编译负例及六项工程检查通过，见[最终验收记录 §19](docs/tasks/V21_08_RESULTS.md#19-最终独立复审与验收2026-10-05)。后续阶段状态和任务书以[任务入口](docs/tasks/README.md)为准。
+> 当前总规范为 [SRFlow Design v2.1](docs/SRFlow_Design_v2.1.md)。实施路线是在同一 crate 中从空工程重写 Core；V21-00～V21-09 已验收为 **COMPLETED**，V21-09 最终结果见[验收记录](docs/tasks/V21_09_RESULTS.md#14-最终独立复审与验收2026-10-05)。[G21-A](docs/tasks/G21_A_Foundation_Review.md)／[G21-B](docs/tasks/G21_B_Typed_Flow_Review.md) 为 PASS；当前内部实现333项测试、51个编译负例及工程检查通过。G21-C／G21-D仍OPEN，后续以[任务入口](docs/tasks/README.md)为准。
 
 ## 当前工程状态
 
@@ -14,7 +14,9 @@ V21-07 已验收内部完成态 Match：已有路由 Data 与显式业务输入�
 
 V21-08 已验收内部 Each：显式集合与可选 shared 输入、CollectionItem／ItemScope cap、真实 Node 或完成态 Flow body、按项顺序执行与直接 Consume、collector 一次完成并 Export 最终 Vec、imported 输出拒绝、正常错误与 Future 取消清理。Each 会话核对当前实际 Definition，构建失败保留合法状态；状态收口和诊断观察的验收缺口均已关闭。当前范围为单 owned 输出、可选一个 shared、单线程顺序执行。
 
-当前 crate 仍**没有任何公开 API**：`core` 不对外导出，业务侧无法按整数构造 ID、取得存储入口或访问 Scope 内部。公开 Node／Orchestrator／Flow／Match／Each API、真实 Loop 与完整 Root 移交由后续任务交付；当前内部能力的验收不等于公开入口或完整 Runtime 已完成。
+V21-09 已交付内部 Loop：Retry（每轮重新导入原始输入，Continue 丢弃本轮结果、Finish 保留到最终结果状态并导出）与 Iter（current-state 每轮经 `StateImportSlot` 导入，继续／完成都把选定 `S` 经窄许可 Promote 到 current-state，旧值在引用失效后受控回收）两种正式推进策略；RoundScope 是 LoopScope 的直接 child，body 一律是完成态包装 Flow 的唯一 Step（Node 为 Round leaf，Orchestrator 建 child 并先 Export 给 Round）。收口新增 `PromoteOutcome`／`DiscardOutcome` 共享报告（旧 `promote` 保持"清理失败优先"映射），Round frame 不能经通用 `promote` 越权提交 parent state（运行期 `OutsideInvocation`），`ScopeRole::Loop`／`Round` 只在真实创建点记录。当前范围为单／双业务输入、单份 `Data<O>`／`Data<S>` 输出、可选一个 shared、单线程顺序执行；无轮次上限与耗尽规则（仍为开放项）。
+
+当前 crate 仍**没有任何公开 API**：`core` 不对外导出，业务侧无法按整数构造 ID、取得存储入口或访问 Scope 内部。公开 Node／Orchestrator／Flow／Match／Each／Loop API 与完整 Root 移交由后续任务交付；当前内部能力的验收不等于公开入口或完整 Runtime 已完成。
 
 历史 T01～T08 和 G1～G3 的通过记录对应旧 v2.0，不表示新实现完成。[P01～P07 Probe](docs/SRFlow_Core_Compile_Probe_Results_v0.1.md) 是局部可行性证据，正式调用链仍需重新验收。
 

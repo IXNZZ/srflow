@@ -26,8 +26,8 @@ use super::identity::{CollectorId, DataId, ExecutionIdentity, ScopeId};
 use super::internal_error::ScopeError;
 use super::ref_id::RefId;
 use super::scope::{
-    ConsumeOutcome, ControlStateId, ExportSlot, ImportSlot, ScopeCoordinator, ScopeState,
-    StateImportSlot,
+    ConsumeOutcome, ControlStateId, DiscardOutcome, ExportSlot, ImportSlot, PromoteOutcome,
+    ScopeCoordinator, ScopeState, StateImportSlot,
 };
 /// 首次终止类别：执行失败或取消。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -125,6 +125,26 @@ pub(crate) struct ItemConsumePermit {
     pub(crate) each: ScopeId,
     /// 本次 Each 的 collector。
     pub(crate) collector: CollectorId,
+}
+
+/// Round 边界的私有收口许可：只授权"当前 Round frame 把**登记包装的唯一声明输出**
+/// 提交到固定 parent Loop 的固定控制状态"（Promote），或"丢弃本轮结果并关闭该 Round"。
+///
+/// 来源是**结构性**的：它只由 Loop 的受控会话在每个 Round 边界内构造，其中
+/// `state` 只能由该会话在固定 Loop 上登记得到，`wrapper_output` 只能取自登记包装的
+/// 唯一输出位置。普通调用者既拿不到可变 Context，也无法凭空取得合法 `ControlStateId`
+/// （该句柄没有 `pub(crate)` 按字段构造器）；它不授予任何 ancestor 读取、abort、owned
+/// 注入或替换其它 state 的能力，也不放宽 `require_call_scope`。
+#[derive(Clone)]
+pub(crate) struct RoundCollectPermit {
+    /// Loop 调用的 Scope（目标 state 的 owner、Round frame 的调用父 Scope）。
+    pub(crate) loop_scope: ScopeId,
+    /// 本次收口固定的控制状态。
+    pub(crate) state: ControlStateId,
+    /// 本次 Round 的 Scope。
+    pub(crate) round: ScopeId,
+    /// 登记包装的唯一声明输出位置。
+    pub(crate) wrapper_output: RefId,
 }
 
 /// 一个调用 frame 的元数据。
@@ -635,6 +655,108 @@ impl ExecutionContext {
             .consume_item_report(item, selected, &permit.collector)
     }
 
+    /// 受控 Round 收口：把当前 Round 登记包装的声明输出提交到固定 parent Loop 的控制状态。
+    ///
+    /// 与通用 [`Self::promote`] 不同，它不要求父 LoopScope 落在 `require_call_scope` 的
+    /// 可见范围内（Round frame 请求父 Scope 会被该门禁拒绝），而是要求调用方持有
+    /// [`RoundCollectPermit`]：当前 frame 必须是该 Round、其调用父 frame 的 Scope 必须是
+    /// 许可登记的 Loop、Round 必须是该 Loop 的直接 child、目标 state owner 必须是该 Loop、
+    /// 且被选位置必须等于登记包装的唯一声明输出。许可只授予"本次收口写入固定 parent
+    /// state"，不授予任意读取、abort、owned 注入或替换其它 state 的能力，也不放宽通用门禁。
+    pub(crate) fn promote_in_round_boundary(
+        &mut self,
+        round: &ScopeId,
+        selected: &RefId,
+        permit: &RoundCollectPermit,
+    ) -> PromoteOutcome {
+        if let Err(violated) = self.require_round_boundary(round, permit) {
+            return PromoteOutcome::Rejected {
+                primary: violated,
+                cleanup_failure: None,
+            };
+        }
+        if selected != &permit.wrapper_output {
+            return PromoteOutcome::Rejected {
+                primary: ScopeError::Invariant {
+                    violated: "round promote requires the registered wrapper's only declared output",
+                },
+                cleanup_failure: None,
+            };
+        }
+        self.coordinator
+            .promote_report(round, selected, &permit.state)
+    }
+
+    /// 受控 Round 丢弃：关闭当前 Round 并处置其 owned，不绑定任何输出、不更新控制状态。
+    pub(crate) fn discard_in_round_boundary(
+        &mut self,
+        round: &ScopeId,
+        permit: &RoundCollectPermit,
+    ) -> DiscardOutcome {
+        if let Err(violated) = self.require_round_boundary(round, permit) {
+            return DiscardOutcome::Rejected {
+                primary: violated,
+                cleanup_failure: None,
+            };
+        }
+        // 来源与固定 state 都已由许可核对；观察参数只用于 cfg(test) 快照。
+        #[cfg(test)]
+        let selected = permit.wrapper_output.clone();
+        self.coordinator.discard_report(
+            round,
+            #[cfg(test)]
+            Some(&selected),
+            #[cfg(test)]
+            Some(&permit.state),
+        )
+    }
+
+    /// Round 收口的许可检查：当前 frame 就是该 Round，其父 frame 是许可登记的 Loop，
+    /// Round 是该 Loop 的直接 child，目标 state 由该 Loop 负责。
+    fn require_round_boundary(
+        &self,
+        round: &ScopeId,
+        permit: &RoundCollectPermit,
+    ) -> Result<(), ScopeError> {
+        self.require_running()?;
+        if round != &permit.round {
+            return Err(ScopeError::Invariant {
+                violated: "round collect requires the permitted round scope",
+            });
+        }
+        let Some(frame) = self.frames.last() else {
+            return Err(ScopeError::Invariant {
+                violated: "round collection requires an active round frame",
+            });
+        };
+        if frame.scope.as_ref() != Some(round) {
+            return Err(ScopeError::Invariant {
+                violated: "round collection requires the current frame to be the round scope",
+            });
+        }
+        let Some(parent_index) = frame.parent else {
+            return Err(ScopeError::Invariant {
+                violated: "round frame must have a caller frame",
+            });
+        };
+        if self.frames[parent_index].scope.as_ref() != Some(&permit.loop_scope) {
+            return Err(ScopeError::Invariant {
+                violated: "round frame caller is not the registered loop scope",
+            });
+        }
+        if self.coordinator.parent_of(round)? != Some(permit.loop_scope.clone()) {
+            return Err(ScopeError::Invariant {
+                violated: "round is not a direct child of the registered loop scope",
+            });
+        }
+        if self.coordinator.state_owner(&permit.state)? != permit.loop_scope {
+            return Err(ScopeError::Invariant {
+                violated: "round permit state is not owned by the registered loop scope",
+            });
+        }
+        Ok(())
+    }
+
     /// 受控 Item 创建：为刚建立的直接 child（ItemScope）绑定集合元素目标。
     ///
     /// 只允许当前调用 Scope 自己调用（调用方必须是 frame 栈顶的 Scope），只接受其本地
@@ -835,6 +957,137 @@ impl ExecutionContext {
         scope: &ScopeId,
     ) -> Result<super::scope::ScopeSnapshot, ScopeError> {
         self.coordinator.snapshot_probe(scope)
+    }
+
+    /// cfg(test) Round 收口 Before 观察（独立通道）。
+    #[cfg(test)]
+    pub(crate) fn record_round_collect_before_probe(
+        &self,
+        operation: super::test_support::RoundCollectOperation,
+        source: &ScopeId,
+        selected: Option<&RefId>,
+        state: Option<&ControlStateId>,
+    ) {
+        self.coordinator.record_round_collect_probe(
+            super::test_support::RoundCollectSnapshotPhase::Before,
+            operation,
+            source,
+            selected,
+            state,
+        );
+    }
+
+    /// cfg(test) Round 收口 AfterReject 观察（prepare 拒绝后、cleanup 前）。
+    #[cfg(test)]
+    pub(crate) fn record_round_collect_after_reject_probe(
+        &self,
+        operation: super::test_support::RoundCollectOperation,
+        source: &ScopeId,
+        selected: Option<&RefId>,
+        state: Option<&ControlStateId>,
+    ) {
+        self.coordinator.record_round_collect_probe(
+            super::test_support::RoundCollectSnapshotPhase::AfterReject,
+            operation,
+            source,
+            selected,
+            state,
+        );
+    }
+
+    /// cfg(test) 最终绑定 Before 观察（独立通道）。
+    #[cfg(test)]
+    pub(crate) fn record_final_bind_before_probe(
+        &self,
+        controller: &ScopeId,
+        state: &ControlStateId,
+        position: &RefId,
+    ) {
+        self.coordinator.record_final_bind_probe(
+            super::test_support::FinalBindSnapshotPhase::Before,
+            controller,
+            state,
+            position,
+        );
+    }
+
+    /// cfg(test) 最终绑定 AfterReject 观察（拒绝后、guard cleanup 前）。
+    #[cfg(test)]
+    pub(crate) fn record_final_bind_after_reject_probe(
+        &self,
+        controller: &ScopeId,
+        state: &ControlStateId,
+        position: &RefId,
+    ) {
+        self.coordinator.record_final_bind_probe(
+            super::test_support::FinalBindSnapshotPhase::AfterReject,
+            controller,
+            state,
+            position,
+        );
+    }
+
+    /// cfg(test) 只读：控制器当前登记的待回收旧值。
+    #[cfg(test)]
+    pub(crate) fn pending_probe(
+        &self,
+        controller: &ScopeId,
+    ) -> Option<Vec<super::identity::DataId>> {
+        self.coordinator.pending_probe(controller)
+    }
+
+    /// cfg(test) 窄故障：把控制状态改回"未初始化"。
+    #[cfg(test)]
+    pub(crate) fn uninitialize_state_probe(
+        &mut self,
+        state: &ControlStateId,
+    ) -> Result<(), ScopeError> {
+        self.coordinator.uninitialize_state_probe(state)
+    }
+
+    /// cfg(test) 窄故障：写入坏 state metadata（声明类型）。
+    #[cfg(test)]
+    pub(crate) fn corrupt_state_type_probe(
+        &mut self,
+        state: &ControlStateId,
+        expected: std::any::TypeId,
+        expected_name: &'static str,
+    ) -> Result<(), ScopeError> {
+        self.coordinator
+            .corrupt_state_type_probe(state, expected, expected_name)
+    }
+
+    /// cfg(test) 窄故障：替换某个本地位置上 item target 的 cap Scope。
+    #[cfg(test)]
+    pub(crate) fn corrupt_item_cap_probe(
+        &mut self,
+        scope: &ScopeId,
+        position: &RefId,
+        cap: ScopeId,
+    ) -> Result<(), ScopeError> {
+        self.coordinator
+            .corrupt_item_cap_probe(scope, position, cap)
+    }
+
+    /// cfg(test) 窄故障：替换 state target 的 cap Scope。
+    #[cfg(test)]
+    pub(crate) fn corrupt_state_cap_probe(
+        &mut self,
+        state: &ControlStateId,
+        cap: ScopeId,
+    ) -> Result<(), ScopeError> {
+        self.coordinator.corrupt_state_cap_probe(state, cap)
+    }
+
+    /// cfg(test) 窄构造：把一个存活 DataId 绑定为该 Scope 的真实本地 alias。
+    #[cfg(test)]
+    pub(crate) fn bind_alias_probe(
+        &mut self,
+        scope: &ScopeId,
+        position: &RefId,
+        id: &super::identity::DataId,
+    ) -> Result<(), ScopeError> {
+        self.coordinator.bind_alias_probe(scope, position, id)
     }
 
     /// 测试观测：某 DataId 是否仍在本 Execution 内存活（只读诊断，不授予读取权）。
@@ -1420,6 +1673,24 @@ pub(crate) mod creation_counts {
     /// guard 退出清理的累计次数。
     pub(crate) fn guard_cleanups() -> usize {
         GUARD_CLEANUPS.with(Cell::get)
+    }
+
+    /// 已创建的 ExecutionContext 次数。
+    #[cfg(test)]
+    pub(crate) fn contexts() -> usize {
+        CONTEXTS.with(Cell::get)
+    }
+
+    /// 已创建的 Coordinator 次数。
+    #[cfg(test)]
+    pub(crate) fn coordinators() -> usize {
+        COORDINATORS.with(Cell::get)
+    }
+
+    /// 已创建的 Container 次数。
+    #[cfg(test)]
+    pub(crate) fn containers() -> usize {
+        CONTAINERS.with(Cell::get)
     }
 
     pub(crate) fn count_context() {

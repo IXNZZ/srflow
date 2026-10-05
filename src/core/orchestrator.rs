@@ -47,6 +47,10 @@ pub(crate) enum ScopeRole {
     Each,
     /// Each 内部每个 item 建立的 child Scope（ItemScope）。
     Item,
+    /// Loop 调用建立的 child Scope（LoopScope）。
+    Loop,
+    /// Loop 内部每轮建立的 child Scope（RoundScope）。
+    Round,
 }
 
 #[allow(dead_code)] // 标签供 cfg(test) 记录与断言引用
@@ -59,6 +63,8 @@ impl ScopeRole {
             Self::Branch => "branch",
             Self::Each => "each",
             Self::Item => "item",
+            Self::Loop => "loop",
+            Self::Round => "round",
         }
     }
 }
@@ -370,6 +376,54 @@ where
             each.registered_wrapper(),
             collector,
             each.final_position().clone(),
+        ))
+    }
+}
+
+/// Loop 调用点专用的受控转交。
+///
+/// 只对与 Loop 形状匹配的 `OrchScope`（`Pack = Sh::Pack`、`K = Data<Sh::Value>`）实现，
+/// 并且**以正在执行的 Loop 为准**：转交前核对 `scope.inner` 就是该 Loop 的 Definition，
+/// 包装、唯一声明输出位置与最终输出位置也只从该 Loop 的登记中取。转交在内部构造
+/// [`LoopSession`](super::loop_orchestrator::LoopSession)，不把 `&mut ExecutionContext`
+/// 交出；因此另一个 Definition 的 body 即便拿到形状相同的 Scope，也不能借它执行 foreign
+/// 包装。
+pub(crate) trait LoopScopeTransfer<'a, Sh: super::loop_orchestrator::LoopShape> {
+    /// 核对实际 Definition 并建立受控 Loop 会话。
+    fn begin_loop_session(
+        self,
+        orchestrator: &'a super::loop_orchestrator::Loop<Sh>,
+    ) -> Result<super::loop_orchestrator::LoopSession<'a, Sh>, BodyError>;
+}
+
+impl<'a, Sh> LoopScopeTransfer<'a, Sh> for OrchScope<'a, Sh::Pack, Data<Sh::Value>>
+where
+    Sh: super::loop_orchestrator::LoopShape + 'static,
+    Sh::I: InputTypes,
+    <<Sh as super::loop_orchestrator::LoopShape>::Wrapper as super::flow::FlowInputs>::Handles:
+        WireInputs + Clone,
+{
+    fn begin_loop_session(
+        self,
+        orchestrator: &'a super::loop_orchestrator::Loop<Sh>,
+    ) -> Result<super::loop_orchestrator::LoopSession<'a, Sh>, BodyError> {
+        // 本次实际执行的 Definition 必须就是该 Loop 自身；否则在 state／Round／body 之前拒绝。
+        if self.inner as *const Definition as *const ()
+            != orchestrator.definition() as *const Definition as *const ()
+        {
+            return Err(BodyError::new(
+                "loop session requires the running definition to be the loop orchestrator",
+            ));
+        }
+        orchestrator.verify_registration()?;
+        Ok(super::loop_orchestrator::LoopSession::new(
+            self.ctx,
+            self.child,
+            self.inner,
+            self.pack,
+            orchestrator.registered_wrapper(),
+            orchestrator.wrapper_output_position().clone(),
+            orchestrator.final_position().clone(),
         ))
     }
 }

@@ -403,6 +403,12 @@ pub(crate) enum BuildError {
     SecondEachBody,
     /// 完成 Each 之前必须登记唯一 body。
     EachBodyMissing,
+    /// 已经登记过 Loop body，不能再登记第二个。
+    SecondLoopBody,
+    /// 完成 Loop 之前必须登记唯一 body。
+    LoopBodyMissing,
+    /// 登记包装的形状不满足 Loop 约束（恰好一个 Step、恰好一个声明输出）。
+    LoopWrapperShape,
     /// 登记的 branch 输出数量与本次完成的共同 Output Signature 不一致。
     ///
     /// 结构上 branch 与 Match 共用同一个 `K`，本拒绝是完成装配的防御性整组校验。
@@ -452,6 +458,11 @@ impl BuildError {
             Self::SecondDefault => "a match default is already registered",
             Self::SecondEachBody => "an each body is already registered",
             Self::EachBodyMissing => "an each body must be registered before finish",
+            Self::SecondLoopBody => "a loop body is already registered",
+            Self::LoopBodyMissing => "a loop body must be registered before finish",
+            Self::LoopWrapperShape => {
+                "a loop body wrapper must declare exactly one step and one output"
+            }
             Self::BranchOutputArity { .. } => {
                 "a registered branch output count does not match the common output signature"
             }
@@ -478,7 +489,11 @@ impl fmt::Display for BuildError {
                 self.note()
             ),
             Self::DuplicateOutputPosition(position) => write!(f, "{}: {position}", self.note()),
-            Self::SecondEachBody | Self::EachBodyMissing => write!(f, "{}", self.note()),
+            Self::SecondEachBody
+            | Self::EachBodyMissing
+            | Self::SecondLoopBody
+            | Self::LoopBodyMissing
+            | Self::LoopWrapperShape => write!(f, "{}", self.note()),
             Self::InputCountMismatch { expected, supplied } => {
                 write!(
                     f,

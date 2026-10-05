@@ -314,6 +314,41 @@ pub(crate) enum ConsumeOutcome {
     },
 }
 
+/// Promote 的结果报告：原始拒绝与其后的清理诊断分别保留。
+///
+/// 与 [`ConsumeOutcome`] 同形：早期拒绝（来源非 Active、仍有活 descendant、查表失败）
+/// 发生在冻结之前，不假装已经清理；prepare 拒绝后按既有纪律执行清理，其失败作为
+/// `cleanup_failure` 独立报告，不覆盖 `primary`。
+#[derive(Debug)]
+pub(crate) enum PromoteOutcome {
+    /// 保留成功：状态 target 已更新、责任已按需转移、来源 Scope 已关闭。
+    Promoted,
+    /// 拒绝：`primary` 是原始原因，`cleanup_failure` 是其后的清理失败（若有）。
+    Rejected {
+        /// 原始拒绝原因。
+        primary: ScopeError,
+        /// prepare 拒绝后清理来源的诊断（若有）。
+        cleanup_failure: Option<ScopeError>,
+    },
+}
+
+/// Round discard 的结果报告：不绑定任何输出，只关闭并清理来源。
+///
+/// 与 [`ConsumeOutcome`]／[`PromoteOutcome`] 同形；用于 Iter 之外的 Retry Continue 与
+/// 内部丢弃路径。
+#[derive(Debug)]
+pub(crate) enum DiscardOutcome {
+    /// 已关闭：本地引用失效、owned 处置、留 tombstone。
+    Discarded,
+    /// 拒绝：`primary` 是原始原因，`cleanup_failure` 是其后的清理失败（若有）。
+    Rejected {
+        /// 原始拒绝原因。
+        primary: ScopeError,
+        /// prepare 拒绝后清理来源的诊断（若有）。
+        cleanup_failure: Option<ScopeError>,
+    },
+}
+
 /// 测试观测用的 Scope 元数据快照：本地引用集合与责任集合（均按本地序号排序）。
 #[cfg(test)]
 pub(crate) type ScopeSnapshot = (Vec<(RefId, DataId)>, Vec<DataId>);
@@ -1214,11 +1249,9 @@ impl ScopeCoordinator {
 
     /// Promote：把来源 child 选定的完整 Data 结果保留到父控制器的控制状态。
     ///
-    /// 不绑定父 Scope 的 Definition RefId，也不消耗 Definition RefId 序列。次序为：
-    /// 来源 Active 且无活跃 descendant → 冻结 → 预检（状态归属与类型、target 存活与
-    /// 唯一 owner、剩余 owned 清理前提）→ commit（更新状态、必要时转移责任）→ 失效
-    /// 来源引用、清理其未保留 owned、关闭来源 → 登记旧状态待回收。Prepear 失败走正式
-    /// 失败退出：先清理来源自身再返回原诊断；清理也失败时优先传播清理诊断。
+    /// 不绑定父 Scope 的 Definition RefId，也不消耗 Definition RefId 序列。本入口是
+    /// [`Self::promote_report`] 的薄兼容映射：成功为 `Ok(())`，拒绝时保持既有"清理失败
+    /// 优先"规则（`Err(cleanup_failure.unwrap_or(primary))`）。
     #[allow(dead_code)] // V21-09 接入真实 Loop 前只由驱动与测试使用
     pub(crate) fn promote(
         &mut self,
@@ -1226,24 +1259,149 @@ impl ScopeCoordinator {
         selected: &RefId,
         state: &ControlStateId,
     ) -> Result<(), ScopeError> {
-        {
-            let record = self.registry.lookup(source)?;
-            record.require_active()?;
-            if self.has_live_descendants(source)? {
-                return Err(ScopeError::ActiveDescendants {
-                    scope: source.clone(),
-                });
-            }
+        match self.promote_report(source, selected, state) {
+            PromoteOutcome::Promoted => Ok(()),
+            PromoteOutcome::Rejected {
+                primary,
+                cleanup_failure,
+            } => Err(cleanup_failure.unwrap_or(primary)),
         }
-        self.registry.lookup_mut(source)?.state = ScopeState::Finalizing;
+    }
 
+    /// Promote 的报告形状：与 [`Self::promote`] 复用同一 prepare／commit／cleanup 实现，
+    /// 但把**原始拒绝**与其后的**清理失败**分别保留。
+    ///
+    /// 次序为：来源 Active 且无活跃 descendant → 冻结 → 预检（状态归属与类型、target
+    /// 存活与唯一 owner、剩余 owned／collector 清理前提）→ commit（更新状态、必要时转移
+    /// 责任、关闭来源、登记待回收旧状态）。早期拒绝不冻结；prepare 拒绝按既有纪律执行
+    /// `cleanup_subtree`，其失败独立报告。
+    #[allow(dead_code)] // V21-09 接入真实 Loop 前只由驱动与测试使用
+    pub(crate) fn promote_report(
+        &mut self,
+        source: &ScopeId,
+        selected: &RefId,
+        state: &ControlStateId,
+    ) -> PromoteOutcome {
+        if let Err(primary) = self.collect_source_early_check(source) {
+            return PromoteOutcome::Rejected {
+                primary,
+                cleanup_failure: None,
+            };
+        }
+        if let Err(primary) = self
+            .registry
+            .lookup_mut(source)
+            .map(|record| record.state = ScopeState::Finalizing)
+        {
+            return PromoteOutcome::Rejected {
+                primary,
+                cleanup_failure: None,
+            };
+        }
+        #[cfg(test)]
+        self.record_round_collect_probe(
+            super::test_support::RoundCollectSnapshotPhase::Before,
+            super::test_support::RoundCollectOperation::Promote,
+            source,
+            Some(selected),
+            Some(state),
+        );
         match self.prepare_promote(source, selected, state) {
-            Ok(plan) => self.commit_promote(plan),
-            Err(error) => {
-                self.cleanup_subtree(source)?;
-                Err(error)
+            Ok(plan) => match self.commit_promote(plan) {
+                Ok(()) => PromoteOutcome::Promoted,
+                Err(primary) => PromoteOutcome::Rejected {
+                    primary,
+                    cleanup_failure: None,
+                },
+            },
+            Err(primary) => {
+                #[cfg(test)]
+                self.record_round_collect_probe(
+                    super::test_support::RoundCollectSnapshotPhase::AfterReject,
+                    super::test_support::RoundCollectOperation::Promote,
+                    source,
+                    Some(selected),
+                    Some(state),
+                );
+                PromoteOutcome::Rejected {
+                    primary,
+                    cleanup_failure: self.cleanup_subtree(source).err(),
+                }
             }
         }
+    }
+
+    /// Round discard：在无可绑定输出的收口里关闭来源并处置其 owned。
+    ///
+    /// 与 Promote 共用同一早检与清理纪律，但**不更新任何控制状态、不转移责任、不绑定
+    /// Definition RefId**；用于 Retry 的 Continue（本轮结果随 Round 结束丢弃）。返回
+    /// 报告形状，供真实 Round runner 区分"已关闭"与"拒绝"。
+    #[allow(dead_code)] // V21-09 接入真实 Loop 前只由驱动与测试使用
+    pub(crate) fn discard_report(
+        &mut self,
+        source: &ScopeId,
+        #[cfg(test)] selected: Option<&RefId>,
+        #[cfg(test)] state: Option<&ControlStateId>,
+    ) -> DiscardOutcome {
+        if let Err(primary) = self.collect_source_early_check(source) {
+            return DiscardOutcome::Rejected {
+                primary,
+                cleanup_failure: None,
+            };
+        }
+        if let Err(primary) = self
+            .registry
+            .lookup_mut(source)
+            .map(|record| record.state = ScopeState::Finalizing)
+        {
+            return DiscardOutcome::Rejected {
+                primary,
+                cleanup_failure: None,
+            };
+        }
+        #[cfg(test)]
+        self.record_round_collect_probe(
+            super::test_support::RoundCollectSnapshotPhase::Before,
+            super::test_support::RoundCollectOperation::Discard,
+            source,
+            selected,
+            state,
+        );
+        let prepared = self.cleanup_targets(source);
+        match prepared {
+            Ok(targets) => match self.close_validated(source, targets) {
+                Ok(()) => DiscardOutcome::Discarded,
+                Err(primary) => DiscardOutcome::Rejected {
+                    primary,
+                    cleanup_failure: None,
+                },
+            },
+            Err(primary) => {
+                #[cfg(test)]
+                self.record_round_collect_probe(
+                    super::test_support::RoundCollectSnapshotPhase::AfterReject,
+                    super::test_support::RoundCollectOperation::Discard,
+                    source,
+                    selected,
+                    state,
+                );
+                DiscardOutcome::Rejected {
+                    primary,
+                    cleanup_failure: self.cleanup_subtree(source).err(),
+                }
+            }
+        }
+    }
+
+    /// 收口早检：来源存在、Active、且没有仍存活的 descendant。不做任何状态变更。
+    fn collect_source_early_check(&self, source: &ScopeId) -> Result<(), ScopeError> {
+        self.registry.lookup(source)?.require_active()?;
+        if self.has_live_descendants(source)? {
+            return Err(ScopeError::ActiveDescendants {
+                scope: source.clone(),
+            });
+        }
+        Ok(())
     }
 
     /// 受控回收：检查该控制器负责的待回收旧状态，满足条件即销毁。
@@ -1568,6 +1726,127 @@ impl ScopeCoordinator {
             .and_then(|target| target.data_id().cloned()))
     }
 
+    /// cfg(test) 完整只读观察（Round 收口）：`Before` 在冻结之后的 prepare 之前，
+    /// `AfterReject` 在 prepare 拒绝之后、内部 cleanup 之前。
+    ///
+    /// 记录来源侧与控制器侧的完整 target-aware refs／owned、来源状态、被选输出身份／
+    /// 责任方／存活、控制状态 target／pending 与下一个 `DataId` 序号；观察失败以
+    /// `observation_error` 显式记录，不静默降级为默认值。
+    #[cfg(test)]
+    pub(crate) fn record_round_collect_probe(
+        &self,
+        phase: super::test_support::RoundCollectSnapshotPhase,
+        operation: super::test_support::RoundCollectOperation,
+        source: &ScopeId,
+        selected: Option<&RefId>,
+        state: Option<&ControlStateId>,
+    ) {
+        let mut error: Option<String> = None;
+        let mut note = |message: String| {
+            if error.is_none() {
+                error = Some(message);
+            }
+        };
+        let source_state = self.registry.lookup(source).ok().map(|record| record.state);
+        let (source_refs, source_owned) = match self.snapshot_targets_probe(source) {
+            Ok((refs, owned)) => (Some(refs), Some(owned)),
+            Err(err) => {
+                note(format!("source snapshot: {err:?}"));
+                (None, None)
+            }
+        };
+        let controller = state.map(|state| state.owner().clone()).or_else(|| {
+            self.registry
+                .lookup(source)
+                .ok()
+                .and_then(|record| record.parent.clone())
+        });
+        let (controller_refs, controller_owned) = match controller.as_ref() {
+            Some(controller) => match self.snapshot_targets_probe(controller) {
+                Ok((refs, owned)) => (Some(refs), Some(owned)),
+                Err(err) => {
+                    note(format!("controller snapshot: {err:?}"));
+                    (None, None)
+                }
+            },
+            None => (None, None),
+        };
+        let selected_target_value = selected.and_then(|selected| {
+            self.registry
+                .lookup(source)
+                .ok()
+                .and_then(|record| record.refs.get(selected).cloned())
+        });
+        let selected_target = selected_target_value.as_ref().map(TargetSnapshot::of);
+        let selected_collection_owner = match selected_target.as_ref() {
+            Some(TargetSnapshot::CollectionItem { collection, .. }) => {
+                self.owner_of(collection).ok()
+            }
+            _ => None,
+        };
+        let (selected_data, selected_owner, selected_alive) = match selected {
+            Some(selected) => match self
+                .registry
+                .lookup(source)
+                .ok()
+                .and_then(|record| record.refs.get(selected).cloned())
+            {
+                Some(RefTarget::Data(id)) => (
+                    Some(id.clone()),
+                    self.owner_of(&id).ok(),
+                    self.container.borrow_any(&id).is_ok(),
+                ),
+                Some(RefTarget::CollectionItem { .. }) => (None, None, false),
+                None => {
+                    note(format!(
+                        "selected position {:?} is not bound",
+                        selected.seq()
+                    ));
+                    (None, None, false)
+                }
+            },
+            None => (None, None, false),
+        };
+        let (state_target, state_pending) = match state {
+            Some(state) => match self.lookup_state(state) {
+                Ok(record) => (
+                    record
+                        .target
+                        .clone()
+                        .map(|target| TargetSnapshot::of(&target)),
+                    Some(record.pending.clone()),
+                ),
+                Err(err) => {
+                    note(format!("state lookup: {err:?}"));
+                    (None, None)
+                }
+            },
+            None => (None, None),
+        };
+        super::test_support::record_round_collect_pre_cleanup(
+            super::test_support::RoundCollectPreCleanupSnapshot {
+                phase,
+                operation,
+                source: Some(source.clone()),
+                source_state,
+                source_refs,
+                source_owned,
+                controller,
+                controller_refs,
+                controller_owned,
+                selected_data,
+                selected_target,
+                selected_collection_owner,
+                selected_owner,
+                selected_alive,
+                state_target,
+                state_pending,
+                next_data_id: self.next_data_id_probe(),
+                observation_error: error,
+            },
+        );
+    }
+
     /// cfg(test) 完整只读观察：`phase = Before` 在 prepare 之前，`AfterReject` 在 prepare
     /// 拒绝之后、内部 cleanup 之前。记录两侧完整 target-aware refs／owned（含身份）、
     /// collector 状态与被选输出责任方；观察失败以 `observation_error` 显式记录，不静默降级。
@@ -1809,6 +2088,13 @@ impl ScopeCoordinator {
             });
         }
         self.registry.lookup_mut(scope)?.state = ScopeState::Finalizing;
+        #[cfg(test)]
+        self.record_export_probe(
+            super::test_support::ExportSnapshotPhase::Before,
+            scope,
+            declared,
+            outputs,
+        );
 
         self.complete_exit(scope, declared, outputs)
     }
@@ -1834,6 +2120,13 @@ impl ScopeCoordinator {
             Some(caller) => match self.prepare_export(scope, &caller, declared, &slots) {
                 Ok(plan) => Some(plan),
                 Err(error) => {
+                    #[cfg(test)]
+                    self.record_export_probe(
+                        super::test_support::ExportSnapshotPhase::AfterReject,
+                        scope,
+                        declared,
+                        &slots,
+                    );
                     // 失败退出：清理前先做整组责任校验。若清理本身失败（例如 owned 中
                     // 已有失效 entry，或责任集合被破坏），必须让调用方看到清理诊断——
                     // 它表示清理**未完成**、来源 Scope 仍是 Finalizing；此时优先传播
@@ -2193,6 +2486,296 @@ impl ScopeCoordinator {
             },
         );
         Ok(ControlStateId { owner, seq })
+    }
+
+    /// cfg(test) Export 收口的完整前后观察：来源／caller 双侧 refs／owned、slot 身份、
+    /// caller 冲突位置的目标／owner／存活、caller 状态与下一个 `DataId`。
+    #[cfg(test)]
+    pub(crate) fn record_export_probe(
+        &self,
+        phase: super::test_support::ExportSnapshotPhase,
+        child: &ScopeId,
+        declared: &[RefId],
+        outputs: &[ExportSlot],
+    ) {
+        let mut error: Option<String> = None;
+        let mut note = |message: String| {
+            if error.is_none() {
+                error = Some(message);
+            }
+        };
+        let caller = self
+            .registry
+            .lookup(child)
+            .ok()
+            .and_then(|r| r.parent.clone());
+        let (child_refs, child_owned) = match self.snapshot_targets_probe(child) {
+            Ok((refs, owned)) => (Some(refs), Some(owned)),
+            Err(err) => {
+                note(format!("child snapshot: {err:?}"));
+                (None, None)
+            }
+        };
+        let (caller_refs, caller_owned) = match caller.as_ref() {
+            Some(caller) => match self.snapshot_targets_probe(caller) {
+                Ok((refs, owned)) => (Some(refs), Some(owned)),
+                Err(err) => {
+                    note(format!("caller snapshot: {err:?}"));
+                    (None, None)
+                }
+            },
+            None => (None, None),
+        };
+        let slots: Vec<(RefId, RefId, &'static str)> = outputs
+            .iter()
+            .map(|slot| (slot.child.clone(), slot.caller.clone(), slot.expected_name))
+            .collect();
+        let conflict = outputs
+            .iter()
+            .find(|slot| {
+                caller
+                    .as_ref()
+                    .and_then(|caller| self.registry.lookup(caller).ok())
+                    .is_some_and(|record| record.refs.contains_key(&slot.caller))
+            })
+            .map(|slot| slot.caller.clone());
+        let conflict_target = match conflict.as_ref() {
+            Some(position) => caller
+                .as_ref()
+                .and_then(|caller| self.registry.lookup(caller).ok())
+                .and_then(|record| record.refs.get(position).cloned())
+                .map(|target| TargetSnapshot::of(&target)),
+            None => None,
+        };
+        let (conflict_owner, conflict_alive) = match conflict_target.as_ref() {
+            Some(TargetSnapshot::Data(id)) => (
+                self.owner_of(id).ok(),
+                self.container.borrow_any(id).is_ok(),
+            ),
+            _ => (None, false),
+        };
+        let caller_state = caller
+            .as_ref()
+            .and_then(|caller| self.registry.lookup(caller).ok())
+            .map(|record| record.state);
+        super::test_support::record_export_pre_cleanup(
+            super::test_support::ExportPreCleanupSnapshot {
+                phase,
+                child: Some(child.clone()),
+                caller,
+                child_refs,
+                child_owned,
+                caller_refs,
+                caller_owned,
+                slots,
+                conflict_target,
+                conflict_owner,
+                conflict_alive,
+                caller_state,
+                next_data_id: self.next_data_id_probe(),
+                observation_error: error,
+            },
+        );
+        let _ = declared;
+    }
+
+    /// cfg(test) 只读：控制器所有控制状态的待回收旧值（按登记顺序合并）。
+    #[cfg(test)]
+    pub(crate) fn pending_probe(&self, controller: &ScopeId) -> Option<Vec<DataId>> {
+        let mut pending: Vec<DataId> = Vec::new();
+        for state in self.registry.states.values() {
+            if state.owner == *controller {
+                pending.extend(state.pending.iter().cloned());
+            }
+        }
+        Some(pending)
+    }
+
+    /// cfg(test) 最终绑定的完整前后观察：控制器 refs／owned／状态、控制状态 target／pending、
+    /// 目标位置当前身份／owner／存活与下一个 `DataId` 序号；观察失败显式记录。
+    #[cfg(test)]
+    pub(crate) fn record_final_bind_probe(
+        &self,
+        phase: super::test_support::FinalBindSnapshotPhase,
+        controller: &ScopeId,
+        state: &ControlStateId,
+        position: &RefId,
+    ) {
+        let mut error: Option<String> = None;
+        let mut note = |message: String| {
+            if error.is_none() {
+                error = Some(message);
+            }
+        };
+        let controller_state = self
+            .registry
+            .lookup(controller)
+            .ok()
+            .map(|record| record.state);
+        let (controller_refs, controller_owned) = match self.snapshot_targets_probe(controller) {
+            Ok((refs, owned)) => (Some(refs), Some(owned)),
+            Err(err) => {
+                note(format!("controller snapshot: {err:?}"));
+                (None, None)
+            }
+        };
+        let (state_target, state_pending) = match self.lookup_state(state) {
+            Ok(record) => (
+                record
+                    .target
+                    .clone()
+                    .map(|target| TargetSnapshot::of(&target)),
+                Some(record.pending.clone()),
+            ),
+            Err(err) => {
+                note(format!("state lookup: {err:?}"));
+                (None, None)
+            }
+        };
+        let bound = self
+            .registry
+            .lookup(controller)
+            .ok()
+            .and_then(|record| record.refs.get(position).cloned());
+        let position_target = bound.as_ref().map(TargetSnapshot::of);
+        let (position_data, position_owner, position_alive) = match bound {
+            Some(RefTarget::Data(id)) => (
+                Some(id.clone()),
+                self.owner_of(&id).ok(),
+                self.container.borrow_any(&id).is_ok(),
+            ),
+            Some(RefTarget::CollectionItem { .. }) => (None, None, false),
+            None => (None, None, false),
+        };
+        super::test_support::record_final_bind_pre_cleanup(
+            super::test_support::FinalBindPreCleanupSnapshot {
+                phase,
+                controller: Some(controller.clone()),
+                controller_state,
+                controller_refs,
+                controller_owned,
+                state_target,
+                state_pending,
+                position_data,
+                position_target,
+                position_owner,
+                position_alive,
+                next_data_id: self.next_data_id_probe(),
+                observation_error: error,
+            },
+        );
+    }
+
+    /// cfg(test) 窄故障：把控制状态改回"未初始化"（最终绑定前置反例）。
+    #[cfg(test)]
+    pub(crate) fn uninitialize_state_probe(
+        &mut self,
+        state: &ControlStateId,
+    ) -> Result<(), ScopeError> {
+        let key = (state.owner().seq(), state.seq());
+        let record =
+            self.registry
+                .states
+                .get_mut(&key)
+                .ok_or_else(|| ScopeError::StateNotRegistered {
+                    state: state.clone(),
+                })?;
+        record.target = None;
+        Ok(())
+    }
+
+    /// cfg(test) 窄故障：把控制状态 target 的声明类型改为指定元数据。
+    #[cfg(test)]
+    pub(crate) fn corrupt_state_type_probe(
+        &mut self,
+        state: &ControlStateId,
+        expected: TypeId,
+        expected_name: &'static str,
+    ) -> Result<(), ScopeError> {
+        let key = (state.owner().seq(), state.seq());
+        let record =
+            self.registry
+                .states
+                .get_mut(&key)
+                .ok_or_else(|| ScopeError::StateNotRegistered {
+                    state: state.clone(),
+                })?;
+        record.expected = expected;
+        record.expected_name = expected_name;
+        Ok(())
+    }
+
+    /// cfg(test) 窄故障：把一个**本地位置**上的 item target 的 cap 换成指定 Scope。
+    #[cfg(test)]
+    pub(crate) fn corrupt_item_cap_probe(
+        &mut self,
+        scope: &ScopeId,
+        position: &RefId,
+        cap: ScopeId,
+    ) -> Result<(), ScopeError> {
+        let record = self.registry.lookup_mut(scope)?;
+        match record.refs.get_mut(position) {
+            Some(RefTarget::CollectionItem { lifetime_cap, .. }) => {
+                *lifetime_cap = cap;
+                Ok(())
+            }
+            _ => Err(ScopeError::Invariant {
+                violated: "item cap fault requires a collection item target",
+            }),
+        }
+    }
+
+    /// cfg(test) 窄故障：把控制状态 item target 的 cap 换成指定 Scope。
+    #[cfg(test)]
+    pub(crate) fn corrupt_state_cap_probe(
+        &mut self,
+        state: &ControlStateId,
+        cap: ScopeId,
+    ) -> Result<(), ScopeError> {
+        let key = (state.owner().seq(), state.seq());
+        let record =
+            self.registry
+                .states
+                .get_mut(&key)
+                .ok_or_else(|| ScopeError::StateNotRegistered {
+                    state: state.clone(),
+                })?;
+        match record.target.as_mut() {
+            Some(RefTarget::CollectionItem { lifetime_cap, .. }) => {
+                *lifetime_cap = cap;
+                Ok(())
+            }
+            _ => Err(ScopeError::Invariant {
+                violated: "state cap fault requires a collection item target",
+            }),
+        }
+    }
+
+    /// cfg(test) 窄构造：把一个已存活 DataId 作为**真实本地 alias** 绑定到该 Scope 的位置。
+    ///
+    /// 只用于构造"旧值仍被合法别名引用"的延迟回收条件；要求该 DataId 的 owner 是本 Scope
+    /// 的祖先或自身，否则拒绝（不制造跨边界 alias）。
+    #[cfg(test)]
+    pub(crate) fn bind_alias_probe(
+        &mut self,
+        scope: &ScopeId,
+        position: &RefId,
+        id: &DataId,
+    ) -> Result<(), ScopeError> {
+        self.registry.lookup(scope)?.require_active()?;
+        let owner = self.owner_of(id)?;
+        if !self.is_ancestor_or_self(&owner, scope) {
+            return Err(ScopeError::IllegalOwner {
+                id: id.clone(),
+                owner,
+                boundary: scope.clone(),
+            });
+        }
+        self.registry
+            .lookup_mut(scope)?
+            .refs
+            .insert(position.clone(), RefTarget::Data(id.clone()));
+        Ok(())
     }
 
     /// 测试夹具：把一个控制器 Scope 的状态位置序号设为近上限起点。

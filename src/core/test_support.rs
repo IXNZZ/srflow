@@ -117,6 +117,255 @@ pub(crate) fn take_consume_pre_cleanup() -> Vec<ConsumePreCleanupSnapshot> {
     PRE_CLEANUP.with(|slots| std::mem::take(&mut *slots.borrow_mut()))
 }
 
+// ---- Round 收口（Promote／discard）的完整前后观察（独立 typed 通道） ----
+
+/// Round 收口的观察操作类型。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RoundCollectOperation {
+    /// 保留到父控制器状态。
+    Promote,
+    /// 丢弃本轮结果并关闭来源。
+    Discard,
+}
+
+/// Round 收口的观察阶段。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RoundCollectSnapshotPhase {
+    /// 冻结之后、`prepare` 之前。
+    Before,
+    /// `prepare` 拒绝之后、内部 cleanup 之前。
+    AfterReject,
+}
+
+/// Round 收口的完整前后快照（只读；`None` 表示该项观察失败，见 `observation_error`）。
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct RoundCollectPreCleanupSnapshot {
+    /// 观察阶段。
+    pub(crate) phase: RoundCollectSnapshotPhase,
+    /// 本次操作类型。
+    pub(crate) operation: RoundCollectOperation,
+    /// 来源 Scope（Round）。
+    pub(crate) source: Option<crate::core::identity::ScopeId>,
+    /// 来源 Scope 的可见状态。
+    pub(crate) source_state: Option<crate::core::scope::ScopeState>,
+    /// 来源侧完整 refs（target-aware）。
+    pub(crate) source_refs: Option<
+        Vec<(
+            crate::core::ref_id::RefId,
+            crate::core::scope::TargetSnapshot,
+        )>,
+    >,
+    /// 来源侧 owned 集合。
+    pub(crate) source_owned: Option<Vec<crate::core::identity::DataId>>,
+    /// 控制器（状态 / Round 的直接 parent）Scope。
+    pub(crate) controller: Option<crate::core::identity::ScopeId>,
+    /// 控制器侧完整 refs。
+    pub(crate) controller_refs: Option<
+        Vec<(
+            crate::core::ref_id::RefId,
+            crate::core::scope::TargetSnapshot,
+        )>,
+    >,
+    /// 控制器侧 owned 集合。
+    pub(crate) controller_owned: Option<Vec<crate::core::identity::DataId>>,
+    /// 被选输出当时的完整 Data 身份（item 目标为空）。
+    pub(crate) selected_data: Option<crate::core::identity::DataId>,
+    /// 被选输出当时的完整目标（target-aware；item 别名不为空）。
+    pub(crate) selected_target: Option<crate::core::scope::TargetSnapshot>,
+    /// 被选输出若为 item：其来源集合的实际 owner。
+    pub(crate) selected_collection_owner: Option<crate::core::identity::ScopeId>,
+    /// 被选输出当时的责任方。
+    pub(crate) selected_owner: Option<crate::core::identity::ScopeId>,
+    /// 被选输出当时是否仍存活。
+    pub(crate) selected_alive: bool,
+    /// 控制状态当前 target（target-aware）。
+    pub(crate) state_target: Option<crate::core::scope::TargetSnapshot>,
+    /// 控制状态待回收旧值。
+    pub(crate) state_pending: Option<Vec<crate::core::identity::DataId>>,
+    /// 观察时的下一个 `DataId` 序号。
+    pub(crate) next_data_id: Option<u64>,
+    /// 观察失败时的显式说明（不静默降级为默认值）。
+    pub(crate) observation_error: Option<String>,
+}
+
+thread_local! {
+    static ROUND_COLLECT_PRE_CLEANUP: RefCell<Vec<RoundCollectPreCleanupSnapshot>> =
+        const { RefCell::new(Vec::new()) };
+}
+
+/// 记录一次 Round 收口观察（独立通道；不进入共享事件序列）。
+pub(crate) fn record_round_collect_pre_cleanup(snapshot: RoundCollectPreCleanupSnapshot) {
+    ROUND_COLLECT_PRE_CLEANUP.with(|slots| slots.borrow_mut().push(snapshot));
+}
+
+/// 取走已记录的 Round 收口观察。
+pub(crate) fn take_round_collect_pre_cleanup() -> Vec<RoundCollectPreCleanupSnapshot> {
+    ROUND_COLLECT_PRE_CLEANUP.with(|slots| std::mem::take(&mut *slots.borrow_mut()))
+}
+
+// ---- Orchestrator Export 收口的完整前后观察（独立 typed 通道） ----
+
+/// Export 收口的观察阶段。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ExportSnapshotPhase {
+    /// 冻结之后、prepare_export 之前。
+    Before,
+    /// prepare_export 拒绝之后、来源清理之前。
+    AfterReject,
+}
+
+/// Export 收口的完整前后快照（只读；`None` 表示观察失败）。
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct ExportPreCleanupSnapshot {
+    /// 观察阶段。
+    pub(crate) phase: ExportSnapshotPhase,
+    /// 来源（child）Scope。
+    pub(crate) child: Option<crate::core::identity::ScopeId>,
+    /// caller Scope。
+    pub(crate) caller: Option<crate::core::identity::ScopeId>,
+    /// 来源侧完整 refs（target-aware）。
+    pub(crate) child_refs: Option<
+        Vec<(
+            crate::core::ref_id::RefId,
+            crate::core::scope::TargetSnapshot,
+        )>,
+    >,
+    /// 来源侧 owned 集合。
+    pub(crate) child_owned: Option<Vec<crate::core::identity::DataId>>,
+    /// caller 侧完整 refs。
+    pub(crate) caller_refs: Option<
+        Vec<(
+            crate::core::ref_id::RefId,
+            crate::core::scope::TargetSnapshot,
+        )>,
+    >,
+    /// caller 侧 owned 集合。
+    pub(crate) caller_owned: Option<Vec<crate::core::identity::DataId>>,
+    /// 本次 slot 的 child／caller 位置与声明类型名。
+    pub(crate) slots: Vec<(
+        crate::core::ref_id::RefId,
+        crate::core::ref_id::RefId,
+        &'static str,
+    )>,
+    /// caller 冲突位置当前的目标（target-aware）。
+    pub(crate) conflict_target: Option<crate::core::scope::TargetSnapshot>,
+    /// caller 冲突位置当前目标的 owner。
+    pub(crate) conflict_owner: Option<crate::core::identity::ScopeId>,
+    /// caller 冲突位置当前目标是否存活。
+    pub(crate) conflict_alive: bool,
+    /// caller 侧状态。
+    pub(crate) caller_state: Option<crate::core::scope::ScopeState>,
+    /// 观察时的下一个 `DataId` 序号。
+    pub(crate) next_data_id: Option<u64>,
+    /// 观察失败时的显式说明。
+    pub(crate) observation_error: Option<String>,
+}
+
+thread_local! {
+    static EXPORT_PRE_CLEANUP: RefCell<Vec<ExportPreCleanupSnapshot>> =
+        const { RefCell::new(Vec::new()) };
+}
+
+/// 记录一次 Export 收口观察（独立通道；不进入共享事件序列）。
+pub(crate) fn record_export_pre_cleanup(snapshot: ExportPreCleanupSnapshot) {
+    EXPORT_PRE_CLEANUP.with(|slots| slots.borrow_mut().push(snapshot));
+}
+
+/// 取走已记录的 Export 收口观察。
+pub(crate) fn take_export_pre_cleanup() -> Vec<ExportPreCleanupSnapshot> {
+    EXPORT_PRE_CLEANUP.with(|slots| std::mem::take(&mut *slots.borrow_mut()))
+}
+
+/// 通用 promote 探针的结构化结果（独立通道）。
+#[derive(Debug, Clone)]
+pub(crate) struct GenericPromoteProbeResult {
+    /// 通用 `Context::promote` 的返回值。
+    pub(crate) outcome: Option<crate::core::internal_error::ScopeError>,
+}
+
+thread_local! {
+    static GENERIC_PROMOTE_PROBE: RefCell<Vec<GenericPromoteProbeResult>> =
+        const { RefCell::new(Vec::new()) };
+}
+
+/// 记录一次结构化通用 promote 探针结果。
+pub(crate) fn record_generic_promote_probe(
+    outcome: Option<crate::core::internal_error::ScopeError>,
+) {
+    GENERIC_PROMOTE_PROBE.with(|slots| {
+        slots
+            .borrow_mut()
+            .push(GenericPromoteProbeResult { outcome })
+    });
+}
+
+/// 取走结构化通用 promote 探针结果。
+pub(crate) fn take_generic_promote_probe() -> Vec<GenericPromoteProbeResult> {
+    GENERIC_PROMOTE_PROBE.with(|slots| std::mem::take(&mut *slots.borrow_mut()))
+}
+
+// ---- 最终绑定（bind_state_output）的完整前后观察（独立 typed 通道） ----
+
+/// 最终绑定的观察阶段。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FinalBindSnapshotPhase {
+    /// 故障已注入、目标操作之前。
+    Before,
+    /// 拒绝之后、guard cleanup 之前。
+    AfterReject,
+}
+
+/// 最终绑定的完整前后快照（只读；`None` 表示该项观察失败，见 `observation_error`）。
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct FinalBindPreCleanupSnapshot {
+    /// 观察阶段。
+    pub(crate) phase: FinalBindSnapshotPhase,
+    /// 控制器（Loop）Scope。
+    pub(crate) controller: Option<crate::core::identity::ScopeId>,
+    /// 控制器状态。
+    pub(crate) controller_state: Option<crate::core::scope::ScopeState>,
+    /// 控制器侧完整 refs（target-aware）。
+    pub(crate) controller_refs: Option<
+        Vec<(
+            crate::core::ref_id::RefId,
+            crate::core::scope::TargetSnapshot,
+        )>,
+    >,
+    /// 控制器侧 owned 集合。
+    pub(crate) controller_owned: Option<Vec<crate::core::identity::DataId>>,
+    /// 控制状态 target（target-aware）。
+    pub(crate) state_target: Option<crate::core::scope::TargetSnapshot>,
+    /// 控制状态待回收旧值。
+    pub(crate) state_pending: Option<Vec<crate::core::identity::DataId>>,
+    /// 最终声明输出位置当前的完整 Data 身份（未绑定为空）。
+    pub(crate) position_data: Option<crate::core::identity::DataId>,
+    /// 最终声明输出位置当前的目标（target-aware；item 别名不为空）。
+    pub(crate) position_target: Option<crate::core::scope::TargetSnapshot>,
+    /// 该位置当前目标的 owner。
+    pub(crate) position_owner: Option<crate::core::identity::ScopeId>,
+    /// 该位置当前目标是否存活。
+    pub(crate) position_alive: bool,
+    /// 观察时的下一个 `DataId` 序号。
+    pub(crate) next_data_id: Option<u64>,
+    /// 观察失败时的显式说明。
+    pub(crate) observation_error: Option<String>,
+}
+
+thread_local! {
+    static FINAL_BIND_PRE_CLEANUP: RefCell<Vec<FinalBindPreCleanupSnapshot>> =
+        const { RefCell::new(Vec::new()) };
+}
+
+/// 记录一次最终绑定观察（独立通道；不进入共享事件序列）。
+pub(crate) fn record_final_bind_pre_cleanup(snapshot: FinalBindPreCleanupSnapshot) {
+    FINAL_BIND_PRE_CLEANUP.with(|slots| slots.borrow_mut().push(snapshot));
+}
+
+/// 取走已记录的最终绑定观察。
+pub(crate) fn take_final_bind_pre_cleanup() -> Vec<FinalBindPreCleanupSnapshot> {
+    FINAL_BIND_PRE_CLEANUP.with(|slots| std::mem::take(&mut *slots.borrow_mut()))
+}
+
 // ---- 首次终止内容的只读记录（独立通道，不进入共享事件序列） ----
 
 /// 一次 `terminate` 实际保存的首次终止内容（类型化只读副本）。
@@ -209,6 +458,11 @@ pub(crate) fn reset_observations() {
     match_failure_scope_snapshot();
     export_attempt_snapshot();
     take_export_conflict();
+    take_round_collect_pre_cleanup();
+    take_final_bind_pre_cleanup();
+    take_export_pre_cleanup();
+    take_generic_promote_probe();
+    take_termination_saved();
     release_gate();
 }
 
