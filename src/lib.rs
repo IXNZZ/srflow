@@ -6,7 +6,8 @@
 //! 错误。全部能力经 crate 根的 re-export 使用，`core` 模块本身不对外。
 //!
 //! 支持范围（与任务验收一致）：
-//! - 单／双非空 Root 与 Flow 输入；[`Unit`]／[`Data<O>`](Data)／[`Out2<O1, O2>`](Out2) 输出；
+//! - 1～16 个非空 Root 与 Flow 输入，统一用 tuple 表达（单输入为 `(A,)`）；
+//!   [`Unit`]／[`Data<O>`](Data)／[`Out2<O1, O2>`](Out2) 输出；
 //! - 普通函数（同步／异步，0／1／2 输入，只产生 Data）、实现 [`NodeCall0`]／
 //!   [`NodeCall1`]／[`NodeCall2`] 的具体结构体 Node、`Arc<具体 Node>`；
 //! - Flow、Match、Each、Loop 的当前组合能力。
@@ -27,11 +28,11 @@
 //!     Ok(Amount(amount.0 * 2))
 //! }
 //!
-//! let (mut body, amount) = FlowBuilder::<Amount>::start()?;
+//! let (mut body, amount) = FlowBuilder::<(Amount,)>::start()?;
 //! let doubled: DataRef<Amount> = body
 //!     .then::<_, SyncFnSig<(Amount,), Data<Amount>>, _>(double as fn(&Amount) -> Result<Amount, BodyError>, amount)?;
 //! let flow: Flow<(Amount,), Data<Amount>> = body.finish::<Data<Amount>, _>(doubled)?;
-//! let out = block_on(Runtime::execute(&flow, Amount(21)))?;
+//! let out = block_on(Runtime::execute(&flow, (Amount(21),)))?;
 //! assert_eq!(out, Amount(42));
 //! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
@@ -46,19 +47,18 @@ mod api;
 mod core;
 
 pub use crate::api::{
-    BuildError, EachBuilder, FlowBuilder, FlowBuilder2, LoopBuilder, MatchBuilder, RunError,
-    RunErrorKind, RunErrorStage, Runtime,
+    BuildError, EachBuilder, FlowBuilder, LoopBuilder, MatchBuilder, RunError, RunErrorKind,
+    RunErrorStage, Runtime,
 };
 pub use crate::core::context::BodyError;
 pub use crate::core::data_ref::DataRef;
 pub use crate::core::each::{Each, EachOnly, EachShared};
-pub use crate::core::flow::{Flow, FlowInputs};
+pub use crate::core::flow::Flow;
 pub use crate::core::loop_orchestrator::{
     Iter1, Iter2, Loop, LoopControl, LoopDecision, LoopShape, Retry1, Retry2,
 };
 pub use crate::core::match_orchestrator::Match;
 pub use crate::core::node::{NodeCall0, NodeCall1, NodeCall2};
 pub use crate::core::signature::{
-    ArcNodeSig, AsyncFnSig, Data, InputTypes, NodeFut, NodeSig, OrchSig, Out2, OutputKind,
-    SyncFnSig, Unit,
+    ArcNodeSig, AsyncFnSig, Data, NodeFut, NodeSig, OrchSig, Out2, OutputKind, SyncFnSig, Unit,
 };

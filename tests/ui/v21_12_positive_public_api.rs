@@ -20,7 +20,7 @@ fn double(value: &Value) -> Result<Value, BodyError> {
 }
 
 fn main() {
-    let (mut body, value) = FlowBuilder::<Value>::start().expect("start");
+    let (mut body, value) = FlowBuilder::<(Value,)>::start().expect("start");
     let doubled: DataRef<Value> = body
         .then::<_, SyncFnSig<(Value,), Data<Value>>, _>(
             double as fn(&Value) -> Result<Value, BodyError>,
@@ -28,7 +28,7 @@ fn main() {
         )
         .expect("step");
     let flow: Flow<(Value,), Data<Value>> = body.finish::<Data<Value>, _>(doubled).expect("finish");
-    let out = block_on(Runtime::execute(&flow, Value(21))).expect("execute");
+    let out = block_on(Runtime::execute(&flow, (Value(21),))).expect("execute");
     assert_eq!(out, Value(42));
     println!("ok: {}", out.0);
 }

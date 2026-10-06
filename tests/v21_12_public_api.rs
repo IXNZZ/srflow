@@ -8,9 +8,9 @@ use std::sync::Arc;
 use futures::executor::block_on;
 use srflow::{
     ArcNodeSig, AsyncFnSig, BodyError, BuildError, Data, DataRef, Each, EachBuilder, EachOnly,
-    EachShared, Flow, FlowBuilder, FlowBuilder2, Iter1, Loop, LoopBuilder, LoopControl,
-    LoopDecision, Match, MatchBuilder, NodeCall0, NodeCall1, NodeCall2, NodeFut, OrchSig, Out2,
-    Retry1, RunErrorKind, RunErrorStage, Runtime, SyncFnSig, Unit,
+    EachShared, Flow, FlowBuilder, Iter1, Loop, LoopBuilder, LoopControl, LoopDecision, Match,
+    MatchBuilder, NodeCall0, NodeCall1, NodeCall2, NodeFut, OrchSig, Out2, Retry1, RunErrorKind,
+    RunErrorStage, Runtime, SyncFnSig, Unit,
 };
 
 // ---------------------------------------------------------------- 业务类型
@@ -86,7 +86,7 @@ fn a02_function_async_struct_and_arc_nodes_produce_owned_outputs() {
         }
     }
 
-    let (mut flow, payload) = FlowBuilder::<Payload>::start().expect("start");
+    let (mut flow, payload) = FlowBuilder::<(Payload,)>::start().expect("start");
     let bumped: DataRef<Payload> = flow
         .then(bump as fn(&Payload) -> Result<Payload, BodyError>, payload)
         .expect("bump");
@@ -115,10 +115,10 @@ fn a02_function_async_struct_and_arc_nodes_produce_owned_outputs() {
 
     let (sum, frozen) = block_on(Runtime::execute(
         &flow,
-        Payload {
+        (Payload {
             id: 3,
             history: Vec::new(),
-        },
+        },),
     ))
     .expect("execute");
     assert_eq!(sum, 16);
@@ -127,7 +127,7 @@ fn a02_function_async_struct_and_arc_nodes_produce_owned_outputs() {
 
 #[test]
 fn a02_definition_reuse_creates_independent_executions() {
-    let (mut flow, payload) = FlowBuilder::<Payload>::start().expect("start");
+    let (mut flow, payload) = FlowBuilder::<(Payload,)>::start().expect("start");
     let bumped: DataRef<u32> = flow
         .then::<_, SyncFnSig<(Payload,), Data<u32>>, _>(
             (|payload: &Payload| Ok(payload.id + 1)) as fn(&Payload) -> Result<u32, BodyError>,
@@ -139,10 +139,10 @@ fn a02_definition_reuse_creates_independent_executions() {
     for id in [1u32, 7, 42] {
         let out = block_on(Runtime::execute(
             &flow,
-            Payload {
+            (Payload {
                 id,
                 history: Vec::new(),
-            },
+            },),
         ))
         .expect("execute");
         assert_eq!(out, id + 1);
@@ -160,7 +160,7 @@ fn a03_plain_unit_functions_are_rejected_at_definition_build() {
         Ok(())
     }
 
-    let (mut flow, input) = FlowBuilder::<u32>::start().expect("start");
+    let (mut flow, input) = FlowBuilder::<(u32,)>::start().expect("start");
     let rejected = flow.then(unit_one as fn(&u32) -> Result<(), BodyError>, input);
     assert_eq!(
         rejected.unwrap_err(),
@@ -190,7 +190,7 @@ fn a03_struct_node_unit_output_and_async_node_are_supported() {
         }
     }
 
-    let (mut flow, (a, b)) = FlowBuilder2::<u32, u32>::start().expect("start");
+    let (mut flow, (a, b)) = FlowBuilder::<(u32, u32)>::start().expect("start");
     let sum: DataRef<u32> = flow
         .then::<_, ArcNodeSig<(u32, u32), Data<u32>>, _>(Arc::new(AddUp), (a, b))
         .expect("add up");
@@ -205,7 +205,7 @@ fn a03_struct_node_unit_output_and_async_node_are_supported() {
 #[test]
 fn a04_shape_matrix_unit_data_out2_and_rejections() {
     // Data 输出
-    let (mut data_flow, input) = FlowBuilder::<u32>::start().expect("start");
+    let (mut data_flow, input) = FlowBuilder::<(u32,)>::start().expect("start");
     let data: DataRef<u32> = data_flow
         .then::<_, SyncFnSig<(u32,), Data<u32>>, _>(
             (|v: &u32| Ok(v + 1)) as fn(&u32) -> Result<u32, BodyError>,
@@ -214,18 +214,18 @@ fn a04_shape_matrix_unit_data_out2_and_rejections() {
         .expect("data step");
     let data_flow: Flow<(u32,), Data<u32>> =
         data_flow.finish::<Data<u32>, _>(data).expect("finish");
-    assert_eq!(block_on(Runtime::execute(&data_flow, 1u32)).unwrap(), 2);
+    assert_eq!(block_on(Runtime::execute(&data_flow, (1u32,))).unwrap(), 2);
 
     // 显式 Unit 输出
-    let (mut unit_flow, input) = FlowBuilder::<u32>::start().expect("start");
+    let (mut unit_flow, input) = FlowBuilder::<(u32,)>::start().expect("start");
     unit_flow
         .then::<_, srflow::NodeSig<(u32,), Unit>, _>(UnitNode, input)
         .expect("unit step");
     let unit_flow: Flow<(u32,), Unit> = unit_flow.finish::<Unit, _>(()).expect("finish");
-    assert_eq!(block_on(Runtime::execute(&unit_flow, 1u32)).unwrap(), ());
+    assert_eq!(block_on(Runtime::execute(&unit_flow, (1u32,))).unwrap(), ());
 
     // 重复选择同一 RefId 为多个输出：Definition 构建期拒绝
-    let (mut dup_flow, input) = FlowBuilder::<u32>::start().expect("start");
+    let (mut dup_flow, input) = FlowBuilder::<(u32,)>::start().expect("start");
     let duplicated: DataRef<u32> = dup_flow
         .then::<_, SyncFnSig<(u32,), Data<u32>>, _>(
             (|v: &u32| Ok(v + 1)) as fn(&u32) -> Result<u32, BodyError>,
@@ -258,7 +258,7 @@ fn a05_each_node_body_and_shared_input() {
     )
     .expect("each body");
     let each: Each<EachOnly<ItemResult>, ItemResult> = each.finish().expect("finish");
-    let (mut root, items) = FlowBuilder::<Vec<ItemResult>>::start().expect("root");
+    let (mut root, items) = FlowBuilder::<(Vec<ItemResult>,)>::start().expect("root");
     let collected: DataRef<Vec<ItemResult>> = root
         .then::<_, OrchSig<Vec<ItemResult>, Data<Vec<ItemResult>>>, _>(each, items)
         .expect("each step");
@@ -266,7 +266,11 @@ fn a05_each_node_body_and_shared_input() {
         .finish::<Data<Vec<ItemResult>>, _>(collected)
         .expect("root finish");
     assert_eq!(
-        block_on(Runtime::execute(&root, vec![ItemResult(1), ItemResult(2)])).unwrap(),
+        block_on(Runtime::execute(
+            &root,
+            (vec![ItemResult(1), ItemResult(2)],)
+        ))
+        .unwrap(),
         vec![ItemResult(2), ItemResult(3)]
     );
 
@@ -282,7 +286,7 @@ fn a05_each_node_body_and_shared_input() {
     let shared_each: Each<EachShared<ItemResult, Shared>, ItemResult> =
         shared_each.finish().expect("finish");
     let (mut shared_root, (items, shared)) =
-        FlowBuilder2::<Vec<ItemResult>, Shared>::start().expect("root");
+        FlowBuilder::<(Vec<ItemResult>, Shared)>::start().expect("root");
     let collected: DataRef<Vec<ItemResult>> = shared_root
         .then::<_, OrchSig<(Vec<ItemResult>, Shared), Data<Vec<ItemResult>>>, _>(
             shared_each,
@@ -317,13 +321,13 @@ fn a05_loop_iter_multi_round_and_retry_finish() {
         )
         .expect("iter body");
     let iter_loop: Loop<Iter1<Counter>> = iter_builder.finish().expect("loop finish");
-    let (mut root, input) = FlowBuilder::<Counter>::start().expect("root");
+    let (mut root, input) = FlowBuilder::<(Counter,)>::start().expect("root");
     let out: DataRef<Counter> = root
         .then::<_, OrchSig<Counter, Data<Counter>>, _>(iter_loop, input)
         .expect("loop step");
     let root: Flow<(Counter,), Data<Counter>> =
         root.finish::<Data<Counter>, _>(out).expect("root finish");
-    let final_state = block_on(Runtime::execute(&root, Counter { base: 0, rounds: 0 })).unwrap();
+    let final_state = block_on(Runtime::execute(&root, (Counter { base: 0, rounds: 0 },))).unwrap();
     assert_eq!(final_state, Counter { base: 2, rounds: 2 });
 
     // Retry：第一轮输出即 Finish（每轮复用原始输入）
@@ -336,7 +340,7 @@ fn a05_loop_iter_multi_round_and_retry_finish() {
         .expect("retry body");
     let retry_loop: Loop<Retry1<Counter, AlreadyDone>> =
         retry_builder.finish().expect("loop finish");
-    let (mut root, input) = FlowBuilder::<Counter>::start().expect("root");
+    let (mut root, input) = FlowBuilder::<(Counter,)>::start().expect("root");
     let out: DataRef<AlreadyDone> = root
         .then::<_, OrchSig<Counter, Data<AlreadyDone>>, _>(retry_loop, input)
         .expect("loop step");
@@ -344,7 +348,7 @@ fn a05_loop_iter_multi_round_and_retry_finish() {
         .finish::<Data<AlreadyDone>, _>(out)
         .expect("root finish");
     assert_eq!(
-        block_on(Runtime::execute(&root, Counter { base: 0, rounds: 0 })).unwrap(),
+        block_on(Runtime::execute(&root, (Counter { base: 0, rounds: 0 },))).unwrap(),
         AlreadyDone
     );
 }
@@ -367,7 +371,7 @@ fn a05_match_branch_default_and_no_match_error() {
         matcher.finish().expect("finish")
     }
 
-    let (mut root, (route, input)) = FlowBuilder2::<u32, u32>::start().expect("root");
+    let (mut root, (route, input)) = FlowBuilder::<(u32, u32)>::start().expect("root");
     let routed: DataRef<u32> = root
         .then::<_, OrchSig<(u32, u32), Data<u32>>, _>(build_match(), (route, input))
         .expect("match step");
@@ -385,7 +389,7 @@ fn a05_match_branch_default_and_no_match_error() {
         )
         .expect("branch");
     let matcher = matcher.finish().expect("finish");
-    let (mut root, (route, input)) = FlowBuilder2::<u32, u32>::start().expect("root");
+    let (mut root, (route, input)) = FlowBuilder::<(u32, u32)>::start().expect("root");
     let routed: DataRef<u32> = root
         .then::<_, OrchSig<(u32, u32), Data<u32>>, _>(matcher, (route, input))
         .expect("match step");
@@ -422,7 +426,7 @@ fn a05_cross_controller_chain_each_then_match() {
         .expect("default");
     let matcher: Match<u32, Vec<ItemResult>, Data<u32>> = matcher.finish().expect("finish");
 
-    let (mut root, (payloads, route)) = FlowBuilder2::<Vec<Payload>, u32>::start().expect("root");
+    let (mut root, (payloads, route)) = FlowBuilder::<(Vec<Payload>, u32)>::start().expect("root");
     let collected: DataRef<Vec<ItemResult>> = root
         .then::<_, OrchSig<Vec<Payload>, Data<Vec<ItemResult>>>, _>(each, payloads)
         .expect("each step");
@@ -474,11 +478,11 @@ fn a05_cross_controller_chain_each_then_match() {
 
 #[test]
 fn a06_unit_root_takes_no_business_output() {
-    let (mut root, input) = FlowBuilder::<u32>::start().expect("root");
+    let (mut root, input) = FlowBuilder::<(u32,)>::start().expect("root");
     root.then::<_, srflow::NodeSig<(u32,), Unit>, _>(UnitNode, input)
         .expect("unit step");
     let root: Flow<(u32,), Unit> = root.finish::<Unit, _>(()).expect("finish");
-    assert_eq!(block_on(Runtime::execute(&root, 3u32)).unwrap(), ());
+    assert_eq!(block_on(Runtime::execute(&root, (3u32,))).unwrap(), ());
 }
 
 #[test]
@@ -487,7 +491,7 @@ fn a06_business_error_is_observable_and_returns_no_partial_output() {
         Err(BodyError::new("business failure"))
     }
 
-    let (mut root, input) = FlowBuilder::<u32>::start().expect("root");
+    let (mut root, input) = FlowBuilder::<(u32,)>::start().expect("root");
     let failed: DataRef<u32> = root
         .then::<_, SyncFnSig<(u32,), Data<u32>>, _>(
             fail as fn(&u32) -> Result<u32, BodyError>,
@@ -496,7 +500,7 @@ fn a06_business_error_is_observable_and_returns_no_partial_output() {
         .expect("fail step");
     let root: Flow<(u32,), Data<u32>> = root.finish::<Data<u32>, _>(failed).expect("finish");
 
-    let error = block_on(Runtime::execute(&root, 1u32)).expect_err("business failure");
+    let error = block_on(Runtime::execute(&root, (1u32,))).expect_err("business failure");
     assert_eq!(error.stage(), RunErrorStage::Body);
     assert_eq!(error.kind(), RunErrorKind::BusinessTerminated);
     assert_eq!(error.business_note(), Some("business failure"));
@@ -513,11 +517,11 @@ fn a06_business_error_is_observable_and_returns_no_partial_output() {
 fn a06_duplicate_root_data_id_is_rejected_before_any_take() {
     /// identity 子 Flow：只再导出 imported 输入（同一物理 DataId）。
     fn identity_flow() -> Flow<(u32,), Data<u32>> {
-        let (flow, input) = FlowBuilder::<u32>::start().expect("identity");
+        let (flow, input) = FlowBuilder::<(u32,)>::start().expect("identity");
         flow.finish::<Data<u32>, _>(input).expect("identity finish")
     }
     fn alias_subflow() -> Flow<(u32,), Out2<u32, u32>> {
-        let (mut sub, input) = FlowBuilder::<u32>::start().expect("alias");
+        let (mut sub, input) = FlowBuilder::<(u32,)>::start().expect("alias");
         let first: DataRef<u32> = sub
             .then::<_, OrchSig<u32, Data<u32>>, _>(identity_flow(), input.clone())
             .expect("alias a");
@@ -528,7 +532,7 @@ fn a06_duplicate_root_data_id_is_rejected_before_any_take() {
             .expect("alias finish")
     }
 
-    let (mut root, input) = FlowBuilder::<u32>::start().expect("root");
+    let (mut root, input) = FlowBuilder::<(u32,)>::start().expect("root");
     let (first, second) = root
         .then::<_, OrchSig<u32, Out2<u32, u32>>, _>(alias_subflow(), input)
         .expect("alias step");
@@ -536,12 +540,66 @@ fn a06_duplicate_root_data_id_is_rejected_before_any_take() {
         .finish::<Out2<u32, u32>, _>((first, second))
         .expect("root finish");
 
-    let error = block_on(Runtime::execute(&root, 5u32)).expect_err("duplicate data id");
+    let error = block_on(Runtime::execute(&root, (5u32,))).expect_err("duplicate data id");
     assert_eq!(error.stage(), RunErrorStage::Preflight);
     assert_eq!(error.kind(), RunErrorKind::DuplicateRootDataId);
     // 预检在任何 take 之前整体拒绝：不产生部分正常输出，公开诊断逐字段固定且不含内部身份。
     assert_eq!(
         format!("{error:?}"),
         "RunError { stage: Preflight, kind: DuplicateRootDataId, message: \"root output preflight rejected\", business_note: None, cleanup_failed: false, close_failed: false }"
+    );
+}
+
+#[test]
+fn tuple_flow_inputs_support_three_and_sixteen_positions() {
+    let (child, (_first, _second, third)) =
+        FlowBuilder::<(u8, u16, u32)>::start().expect("three-input child");
+    let child: Flow<(u8, u16, u32), Data<u32>> =
+        child.finish::<Data<u32>, _>(third).expect("child finish");
+
+    let (mut root, (first_ref, second_ref, third_ref)) =
+        FlowBuilder::<(u8, u16, u32)>::start().expect("three-input root");
+    let result: DataRef<u32> = root
+        .then::<_, OrchSig<(u8, u16, u32), Data<u32>>, _>(child, (first_ref, second_ref, third_ref))
+        .expect("three-input subflow");
+    let root: Flow<(u8, u16, u32), Data<u32>> =
+        root.finish::<Data<u32>, _>(result).expect("root finish");
+    assert_eq!(
+        block_on(Runtime::execute(&root, (7u8, 8u16, 9u32))).unwrap(),
+        9
+    );
+
+    let (
+        flow,
+        (_r0, _r1, _r2, _r3, _r4, _r5, _r6, _r7, _r8, _r9, _r10, _r11, _r12, _r13, _r14, r15),
+    ) = FlowBuilder::<(
+        u8,
+        u8,
+        u8,
+        u8,
+        u8,
+        u8,
+        u8,
+        u8,
+        u8,
+        u8,
+        u8,
+        u8,
+        u8,
+        u8,
+        u8,
+        u8,
+    )>::start()
+    .expect("sixteen-input flow");
+    let flow = flow
+        .finish::<Data<u8>, _>(r15)
+        .expect("sixteen-input finish");
+    assert_eq!(
+        block_on(Runtime::execute(
+            &flow,
+            (0u8, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15),
+        ))
+        .unwrap(),
+        15
     );
 }

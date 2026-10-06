@@ -29,6 +29,7 @@ pub(crate) trait PackFor<I: 'static>: PackFromPorts {}
 
 impl<A: 'static> PackFor<(A,)> for Targets1<A> {}
 impl<A: 'static, B: 'static> PackFor<(A, B)> for Targets2<A, B> {}
+impl<I: 'static + InputTypes> PackFor<I> for TargetsN<I> {}
 
 /// 调用语义中的 Scope 角色（只读诊断用标签，不是新的身份种类）。
 ///
@@ -104,6 +105,12 @@ pub struct Targets2<A, B> {
     first: RefId,
     second: RefId,
     marker: PhantomData<fn() -> (A, B)>,
+}
+
+/// 三至十六输入 pack：按 Signature 顺序保存位置，并以 `I` 固定各位置类型。
+pub struct TargetsN<I> {
+    positions: Vec<RefId>,
+    marker: PhantomData<fn() -> I>,
 }
 
 impl<A: 'static> Targets1<A> {
@@ -211,6 +218,38 @@ impl<A: 'static, B: 'static> PackFromPorts for Targets2<A, B> {
             TypeId::of::<B>(),
             std::any::type_name::<B>(),
         )
+    }
+}
+
+impl<I: 'static + InputTypes> PackFromPorts for TargetsN<I> {
+    fn from_ports(ports: &[DeclaredPort]) -> Result<Self, BuildError> {
+        let expected = I::input_types();
+        if ports.len() != expected.len() {
+            return Err(BuildError::InputCountMismatch {
+                expected: expected.len(),
+                supplied: ports.len(),
+            });
+        }
+        for (port, (expected_name, expected_type)) in ports.iter().zip(expected) {
+            if port.expected() != expected_type {
+                return Err(BuildError::InputTypeMismatch {
+                    position: port.position().clone(),
+                    expected: expected_name,
+                    actual: port.expected_name(),
+                });
+            }
+        }
+        Ok(Self {
+            positions: ports.iter().map(|port| port.position().clone()).collect(),
+            marker: PhantomData,
+        })
+    }
+
+    fn validate(&self, ctx: &ExecutionContext, child: &ScopeId) -> Result<(), ScopeError> {
+        for (position, (type_name, type_id)) in self.positions.iter().zip(I::input_types()) {
+            ctx.validate_position(child, position, type_id, type_name)?;
+        }
+        Ok(())
     }
 }
 

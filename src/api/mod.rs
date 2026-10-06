@@ -432,19 +432,20 @@ impl std::error::Error for RunError {}
 
 // ------------------------------------------------------------------ Flow 构建器
 
-/// 单输入 Flow 构建器：类型参数直接表示唯一输入的业务类型。
+/// Flow 构建器：类型参数是非空输入类型 tuple，支持 1～16 个位置。
 ///
 /// 未完成的 Builder 既不能被执行，也不能作为 child 接线；只有 [`FlowBuilder::finish`]
 /// 产出 [`Flow`] 之后才成立。
-pub struct FlowBuilder<I: 'static> {
-    inner: crate::core::flow::FlowBuilder<(I,)>,
+pub struct FlowBuilder<I> {
+    inner: crate::core::builder::Definition,
+    marker: std::marker::PhantomData<fn() -> I>,
 }
 
-impl<I: 'static> FlowBuilder<I> {
-    /// 建立单输入 Flow，并返回该输入位置的句柄。
-    pub fn start() -> Result<(Self, DataRef<I>), BuildError>
+impl<I> FlowBuilder<I> {
+    /// 建立 Flow，并返回输入位置句柄；单输入句柄为 `DataRef<A>`，多输入句柄为 tuple。
+    pub fn start() -> Result<(Self, <Self as FlowStartOp>::Handles), BuildError>
     where
-        Self: FlowStartOp<Handles = DataRef<I>>,
+        Self: FlowStartOp,
     {
         Self::start_op()
     }
@@ -477,9 +478,9 @@ impl<I: 'static> FlowBuilder<I> {
     }
 }
 
-/// 单输入构建器起始协议：由 crate 实现，调用方只调用 [`FlowBuilder::start`]。
+/// Flow 构建器起始协议：由 crate 为 1～16 输入 tuple 实现。
 pub trait FlowStartOp {
-    /// 单输入位置句柄。
+    /// 输入位置句柄。
     type Handles;
 
     /// 由 [`FlowBuilder::start`] 调用；调用者不直接调用。
@@ -488,75 +489,21 @@ pub trait FlowStartOp {
         Self: Sized;
 }
 
-impl<A: 'static> FlowStartOp for FlowBuilder<A>
-where
-    (A,): crate::core::flow::FlowInputsDeclare + FlowInputs<Handles = DataRef<A>>,
+impl<I: crate::core::flow::FlowInputs + crate::core::flow::FlowInputsDeclare> FlowStartOp
+    for FlowBuilder<I>
 {
-    type Handles = DataRef<A>;
+    type Handles = I::Handles;
 
     fn start_op() -> Result<(Self, Self::Handles), BuildError> {
         let (inner, handles) =
-            crate::core::flow::FlowBuilder::<(A,)>::start().map_err(BuildError::from_internal)?;
-        Ok((Self { inner }, handles))
-    }
-}
-
-/// 双输入 Flow 构建器：两个输入类型作为独立泛型参数。
-pub struct FlowBuilder2<A: 'static, B: 'static> {
-    inner: crate::core::flow::FlowBuilder<(A, B)>,
-}
-
-impl<A: 'static, B: 'static> FlowBuilder2<A, B> {
-    /// 建立双输入 Flow，并返回两个输入位置的句柄。
-    pub fn start() -> Result<(Self, <Self as FlowStart2Op>::Handles), BuildError>
-    where
-        Self: FlowStart2Op<Handles = (DataRef<A>, DataRef<B>)>,
-    {
-        Self::start_op()
-    }
-
-    /// 追加一个调用点：参数形态与输出形态由编译期类型检查，构建期拒绝另行报告。
-    pub fn then<C, M, A0>(
-        &mut self,
-        callable: C,
-        args: A0,
-    ) -> Result<<Self as ThenOp<C, M, A0>>::BuildOutput, BuildError>
-    where
-        Self: ThenOp<C, M, A0>,
-    {
-        self.then_op(callable, args)
-    }
-
-    /// 完成 Flow：整组校验输出选择，再声明输出端口并形成不可变完成态。
-    pub fn finish<K, C>(self, choice: C) -> Result<<Self as FlowFinishOp<K, C>>::Output, BuildError>
-    where
-        Self: FlowFinishOp<K, C>,
-    {
-        self.finish_op(choice)
-    }
-}
-
-/// 双输入构建器起始协议：由 crate 实现，调用方只调用 [`FlowBuilder2::start`]。
-pub trait FlowStart2Op {
-    /// 双输入位置句柄。
-    type Handles;
-
-    /// 由 [`FlowBuilder2::start`] 调用；调用者不直接调用。
-    fn start_op() -> Result<(Self, Self::Handles), BuildError>
-    where
-        Self: Sized;
-}
-
-impl<A: 'static, B: 'static> FlowStart2Op for FlowBuilder2<A, B>
-where
-    (A, B): crate::core::flow::FlowInputsDeclare + FlowInputs<Handles = (DataRef<A>, DataRef<B>)>,
-{
-    type Handles = (DataRef<A>, DataRef<B>);
-
-    fn start_op() -> Result<(Self, Self::Handles), BuildError> {
-        let (inner, handles) =
-            crate::core::flow::FlowBuilder::<(A, B)>::start().map_err(BuildError::from_internal)?;
-        Ok((Self { inner }, handles))
+            crate::core::flow::FlowBuilder::<I>::start().map_err(BuildError::from_internal)?;
+        Ok((
+            Self {
+                inner: inner.into_definition(),
+                marker: std::marker::PhantomData,
+            },
+            handles,
+        ))
     }
 }
 
@@ -571,26 +518,6 @@ pub trait ThenOp<C, M, A0> {
 
 impl<I, C, M, A0> ThenOp<C, M, A0> for FlowBuilder<I>
 where
-    I: 'static,
-    C: crate::core::builder::BuildSite<M, A0>,
-    M: crate::core::signature::Wiring,
-    A0: crate::core::signature::WireInputs,
-    C: crate::core::builder::IntoCallSite<M, A0, BuildOutput = M::BuildOutput>,
-{
-    type BuildOutput = C::BuildOutput;
-
-    fn then_op(&mut self, callable: C, args: A0) -> Result<Self::BuildOutput, BuildError> {
-        use crate::core::builder::TypedCallBuilder;
-        self.inner
-            .then(callable, args)
-            .map_err(BuildError::from_internal)
-    }
-}
-
-impl<A, B, C, M, A0> ThenOp<C, M, A0> for FlowBuilder2<A, B>
-where
-    A: 'static,
-    B: 'static,
     C: crate::core::builder::BuildSite<M, A0>,
     M: crate::core::signature::Wiring,
     A0: crate::core::signature::WireInputs,
@@ -617,30 +544,14 @@ pub trait FlowFinishOp<K, C> {
 
 impl<I, K, C> FlowFinishOp<K, C> for FlowBuilder<I>
 where
-    I: 'static,
+    I: crate::core::flow::FlowInputs,
     K: crate::core::signature::OutKind,
     C: crate::core::flow::FlowOutput<K>,
 {
-    type Output = Flow<(I,), K>;
+    type Output = Flow<I, K>;
 
     fn finish_op(self, choice: C) -> Result<Self::Output, BuildError> {
-        self.inner
-            .finish::<K, C>(choice)
-            .map_err(BuildError::from_internal)
-    }
-}
-
-impl<A, B, K, C> FlowFinishOp<K, C> for FlowBuilder2<A, B>
-where
-    A: 'static,
-    B: 'static,
-    K: crate::core::signature::OutKind,
-    C: crate::core::flow::FlowOutput<K>,
-{
-    type Output = Flow<(A, B), K>;
-
-    fn finish_op(self, choice: C) -> Result<Self::Output, BuildError> {
-        self.inner
+        crate::core::flow::FlowBuilder::<I>::from_definition(self.inner)
             .finish::<K, C>(choice)
             .map_err(BuildError::from_internal)
     }
@@ -933,7 +844,8 @@ pub struct Runtime;
 impl Runtime {
     /// 执行一个完成态 Root Orchestrator，成功时把声明输出全部移交 Application。
     ///
-    /// 支持范围：单／双非空 owned 输入与 [`crate::Unit`]／[`crate::Data<O>`](crate::Data)
+    /// 支持范围：1～16 个非空 owned 输入，以 tuple 传入（单输入写 `(value,)`）；输出为
+    /// [`crate::Unit`]／[`crate::Data<O>`](crate::Data)
     /// ／[`crate::Out2<O1, O2>`](crate::Out2) 输出。顺序为"Signature 预检 → 登记输入 →
     /// 运行 body → 冻结／整组预检 → 同步 take 并解除 Root 责任 → 关闭 Root"；
     /// 任何一步失败都不返回部分 owned 输出。
@@ -954,7 +866,7 @@ pub trait RunRoot<O, I, K> {
     /// 成功时交给 Application 的 owned 结果类型。
     type Owned;
 
-    /// Application 侧输入形状：单输入直接传值，双输入传两个值组成的 tuple。
+    /// Application 侧输入形状：1～16 个位置一律使用 tuple，单输入为单元素 tuple。
     type Input;
 
     /// 由 [`Runtime::execute`] 调用；调用者不直接调用。

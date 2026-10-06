@@ -826,3 +826,39 @@ where
         )))
     }
 }
+
+impl<
+    O: 'static,
+    I: 'static + InputTypes,
+    K: OutKind,
+    A0: super::signature::MultiWireInputs<Types = I>,
+> IntoCallSite<OrchSig<I, K>, A0> for O
+where
+    O: OrchCall<I, K>,
+{
+    type BuildOutput = K::BuildOutput;
+}
+
+impl<
+    O: 'static,
+    I: 'static + InputTypes,
+    K: OutKind,
+    A0: super::signature::MultiWireInputs<Types = I>,
+> BuildSite<OrchSig<I, K>, A0> for O
+where
+    O: OrchCall<I, K>,
+{
+    fn precheck(&self, _definition: &Definition, args: &A0) -> Result<(), BuildError> {
+        let positions = args.positions();
+        check_orchestrator_inputs::<O, I, K>(self, &positions)
+    }
+
+    fn site(self, args: A0, out_positions: &[RefId]) -> CallSite {
+        CallSite::Orchestrator(Box::new(OrchSite::<O, I, K>::new(
+            self,
+            args.positions().into_iter().cloned().collect(),
+            out_positions.to_vec(),
+            O::ROLE,
+        )))
+    }
+}

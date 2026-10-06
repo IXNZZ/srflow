@@ -6,12 +6,12 @@
 //! 单独定义：
 //!
 //! - [`RootInputs<I>`]：把 `Runtime::execute` 收到的 owned 输入按 Signature 顺序交给登记
-//!   边界（擦除值 + 真实类型名）；单输入在公开入口直接传值，双输入传 pair，内部统一
-//!   适配成按 Signature 排列的 tuple，tuple 包装本身不额外分配 DataId；
+//!   边界（擦除值 + 真实类型名）；单至十六输入在公开入口均以相同顺序的 tuple 传入，
+//!   tuple 包装本身不额外分配 DataId；
 //! - [`RootOutputs<K>`]：按 `K` 给出 owned 结果类型与提取次数，并把已按声明顺序 take 的
 //!   擦除值组装成 Application 结果。
 //!
-//! 两者都是 sealed：只有本模块的三种形状可以有实现，新增形状必须同时在这里与
+//! 两者都是 sealed：Root 输入支持 1～16 个位置；输出只支持三种形状，新增形状必须同时在这里与
 //! `Runtime::execute` 的支持范围内明确定义，不能由调用方自定义映射绕过提取预检。
 
 use std::any::Any;
@@ -25,7 +25,7 @@ mod sealed {
 
 /// Root 输入形状：`Self = I`，把 owned 输入按 Signature 顺序交给登记边界。
 pub trait RootInputs<I: 'static>: sealed::Sealed {
-    /// Application 侧传给 `Runtime::execute` 的输入形状：单输入直接传值，双输入传 tuple。
+    /// Application 侧传给 `Runtime::execute` 的输入形状：1～16 个位置一律传 tuple。
     type ApplicationInput;
 
     /// 将 Application 侧输入适配为内部按 Signature 顺序登记的 tuple。
@@ -38,10 +38,10 @@ pub trait RootInputs<I: 'static>: sealed::Sealed {
 impl<X: 'static> sealed::Sealed for (X,) {}
 
 impl<X: 'static> RootInputs<(X,)> for (X,) {
-    type ApplicationInput = X;
+    type ApplicationInput = (X,);
 
-    fn into_internal(input: X) -> (X,) {
-        (input,)
+    fn into_internal(input: (X,)) -> (X,) {
+        input
     }
 
     fn into_values(self) -> Vec<(&'static str, Box<dyn Any>)> {
@@ -65,6 +65,39 @@ impl<X: 'static, Y: 'static> RootInputs<(X, Y)> for (X, Y) {
         ]
     }
 }
+
+macro_rules! impl_root_inputs {
+    ($($type:ident:$index:tt),+ $(,)?) => {
+        impl<$($type: 'static),+> sealed::Sealed for ($($type,)+) {}
+
+        impl<$($type: 'static),+> RootInputs<($($type,)+)> for ($($type,)+) {
+            type ApplicationInput = ($($type,)+);
+
+            fn into_internal(input: Self::ApplicationInput) -> ($($type,)+) {
+                input
+            }
+
+            fn into_values(self) -> Vec<(&'static str, Box<dyn Any>)> {
+                vec![$((std::any::type_name::<$type>(), Box::new(self.$index) as Box<dyn Any>)),+]
+            }
+        }
+    };
+}
+
+impl_root_inputs!(A:0, B:1, C:2);
+impl_root_inputs!(A:0, B:1, C:2, D:3);
+impl_root_inputs!(A:0, B:1, C:2, D:3, E:4);
+impl_root_inputs!(A:0, B:1, C:2, D:3, E:4, F:5);
+impl_root_inputs!(A:0, B:1, C:2, D:3, E:4, F:5, G:6);
+impl_root_inputs!(A:0, B:1, C:2, D:3, E:4, F:5, G:6, H:7);
+impl_root_inputs!(A:0, B:1, C:2, D:3, E:4, F:5, G:6, H:7, I:8);
+impl_root_inputs!(A:0, B:1, C:2, D:3, E:4, F:5, G:6, H:7, I:8, J:9);
+impl_root_inputs!(A:0, B:1, C:2, D:3, E:4, F:5, G:6, H:7, I:8, J:9, K:10);
+impl_root_inputs!(A:0, B:1, C:2, D:3, E:4, F:5, G:6, H:7, I:8, J:9, K:10, L:11);
+impl_root_inputs!(A:0, B:1, C:2, D:3, E:4, F:5, G:6, H:7, I:8, J:9, K:10, L:11, M:12);
+impl_root_inputs!(A:0, B:1, C:2, D:3, E:4, F:5, G:6, H:7, I:8, J:9, K:10, L:11, M:12, N:13);
+impl_root_inputs!(A:0, B:1, C:2, D:3, E:4, F:5, G:6, H:7, I:8, J:9, K:10, L:11, M:12, N:13, O:14);
+impl_root_inputs!(A:0, B:1, C:2, D:3, E:4, F:5, G:6, H:7, I:8, J:9, K:10, L:11, M:12, N:13, O:14, P:15);
 
 /// Root owned 输出映射：`Self = K`，给出 owned 结果类型与提取次数。
 ///

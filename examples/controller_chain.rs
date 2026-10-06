@@ -7,9 +7,8 @@
 
 use futures::executor::block_on;
 use srflow::{
-    BodyError, BuildError, Data, DataRef, Each, EachBuilder, EachOnly, Flow, FlowBuilder,
-    FlowBuilder2, Iter1, Loop, LoopBuilder, LoopControl, LoopDecision, Match, MatchBuilder,
-    Runtime,
+    BodyError, BuildError, Data, DataRef, Each, EachBuilder, EachOnly, Flow, FlowBuilder, Iter1,
+    Loop, LoopBuilder, LoopControl, LoopDecision, Match, MatchBuilder, Runtime,
 };
 
 #[derive(Debug, PartialEq, Eq)]
@@ -63,7 +62,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let matcher: Match<u32, Vec<Length>, Data<u32>> = matcher.finish()?;
 
     // 组合链：Root(Vec<Span>, u32) → Each → Match
-    let (mut root, (spans, route)) = FlowBuilder2::<Vec<Span>, u32>::start()?;
+    let (mut root, (spans, route)) = FlowBuilder::<(Vec<Span>, u32)>::start()?;
     let lengths: DataRef<Vec<Length>> = root.then(each, spans)?;
     let routed: DataRef<u32> = root.then(matcher, (route, lengths))?;
     let root: Flow<(Vec<Span>, u32), Data<u32>> = root.finish::<Data<u32>, _>(routed)?;
@@ -79,16 +78,16 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let mut loop_builder = LoopBuilder::<Iter1<Budget>>::start()?;
     loop_builder.then_body(spend)?;
     let looped: Loop<Iter1<Budget>> = loop_builder.finish()?;
-    let (mut loop_root, budget) = FlowBuilder::<Budget>::start()?;
+    let (mut loop_root, budget) = FlowBuilder::<(Budget,)>::start()?;
     let final_budget: DataRef<Budget> = loop_root.then(looped, budget)?;
     let loop_root: Flow<(Budget,), Data<Budget>> =
         loop_root.finish::<Data<Budget>, _>(final_budget)?;
     let final_budget = Runtime::execute(
         &loop_root,
-        Budget {
+        (Budget {
             spent: 0,
             rounds: 0,
-        },
+        },),
     )
     .await?;
     assert_eq!(
@@ -101,7 +100,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     println!("budget: {final_budget:?}");
 
     // 构建期拒绝可观察：普通 unit 函数不产生业务 Data。
-    let (mut rejected, input) = FlowBuilder::<Span>::start()?;
+    let (mut rejected, input) = FlowBuilder::<(Span,)>::start()?;
     let outcome = rejected.then(
         (|span: &Span| {
             let _ = span;

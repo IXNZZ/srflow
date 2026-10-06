@@ -44,17 +44,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 async fn run() -> Result<(), Box<dyn std::error::Error>> {
-    let (mut body, order) = FlowBuilder::<Order>::start()?;
+    let (mut body, order) = FlowBuilder::<(Order,)>::start()?;
     let validated: DataRef<Order> = body.then(validate, order)?;
     let receipt: DataRef<Receipt> = body.then(settle, validated)?;
     let flow: Flow<(Order,), Data<Receipt>> = body.finish(receipt)?;
 
-    let receipt = Runtime::execute(&flow, Order { id: 7, amount: 21 }).await?;
+    let receipt = Runtime::execute(&flow, (Order { id: 7, amount: 21 },)).await?;
     assert_eq!(receipt, Receipt { id: 7, total: 42 });
     println!("receipt: {receipt:?}");
 
     // 失败不返回部分输出：业务错误经公开分类可观察。
-    match Runtime::execute(&flow, Order { id: 8, amount: 0 }).await {
+    match Runtime::execute(&flow, (Order { id: 8, amount: 0 },)).await {
         Ok(_) => return Err("invalid order unexpectedly succeeded".into()),
         Err(error) => println!("rejected: {error}"),
     }

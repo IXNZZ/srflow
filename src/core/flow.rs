@@ -6,8 +6,9 @@
 //! 父 Flow 的 child（SubFlow）。
 //!
 //! 关键边界：
-//! - **输入**：只有单／双非空位置两种形状（[`FlowInputs`]），没有 `()` 输入；零输入
-//!   Node 仍可接入非空 Flow。输入位置在构建初始化时分配，句柄即 `DataRef`。
+//! - **输入**：非空输入以 tuple 声明，支持 1～16 个位置；没有 `()` 输入。零输入
+//!   Node 仍可接入非空 Flow。输入位置在构建初始化时分配，句柄为对应的 `DataRef` tuple
+//!   （单输入为了兼容单值接线仍直接返回一个 `DataRef`）。
 //! - **输出**：三种完成选择——`()`（显式 unit，不占 Ref 或 DataId）、一个 `DataRef<O>`
 //!   （`Data<O>`）、两个 `DataRef` 的 tuple（`Out2<O1, O2>`）。未完成 Builder 没有
 //!   Orchestrator 协议，不能被执行或组合。
@@ -24,13 +25,13 @@ use std::sync::Arc;
 
 use super::builder::{BuildSite, Definition, IntoCallSite, TypedCallBuilder};
 use super::data_ref::DataRef;
-use super::orchestrator::{OrchCall, OrchScope, PackFor, Targets1, Targets2};
+use super::orchestrator::{OrchCall, OrchScope, PackFor, Targets1, Targets2, TargetsN};
 use super::signature::{
     BuildError, Data, DeclaredPort, InputTypes, NodeFut, Out2, OutKind, Unit, WireInputs, Wiring,
 };
 
 // V21-06 交付的内部能力：当前消费者是 V21-06 验收样本；公开入口由 V21-10 接续
-/// Flow 输入 Signature：单／双非空位置。
+/// Flow 输入 Signature：以 tuple 表达的 1～16 个非空位置。
 ///
 /// `Handles` 是构建方拿到的位置句柄（`DataRef<A>` 或两个位置的 tuple）；`Pack` 是与此
 /// Signature 绑定的内部输入 pack 类型（接线协议使用，调用方无需命名）。
@@ -73,6 +74,38 @@ impl<A: 'static, B: 'static> FlowInputsDeclare for (A, B) {
         ))
     }
 }
+
+macro_rules! impl_flow_inputs {
+    ($($type:ident),+ $(,)?) => {
+        impl<$($type: 'static),+> FlowInputs for ($($type,)+) {
+            type Pack = TargetsN<($($type,)+)>;
+            type Handles = ($(DataRef<$type>,)+);
+        }
+
+        impl<$($type: 'static),+> FlowInputsDeclare for ($($type,)+) {
+            fn declare(definition: &mut Definition) -> Result<Self::Handles, BuildError> {
+                Ok(($(
+                    definition.declare_input::<$type>("input")?,
+                )+))
+            }
+        }
+    };
+}
+
+impl_flow_inputs!(A, B, C);
+impl_flow_inputs!(A, B, C, D);
+impl_flow_inputs!(A, B, C, D, E);
+impl_flow_inputs!(A, B, C, D, E, F);
+impl_flow_inputs!(A, B, C, D, E, F, G);
+impl_flow_inputs!(A, B, C, D, E, F, G, H);
+impl_flow_inputs!(A, B, C, D, E, F, G, H, I);
+impl_flow_inputs!(A, B, C, D, E, F, G, H, I, J);
+impl_flow_inputs!(A, B, C, D, E, F, G, H, I, J, K);
+impl_flow_inputs!(A, B, C, D, E, F, G, H, I, J, K, L);
+impl_flow_inputs!(A, B, C, D, E, F, G, H, I, J, K, L, M);
+impl_flow_inputs!(A, B, C, D, E, F, G, H, I, J, K, L, M, N);
+impl_flow_inputs!(A, B, C, D, E, F, G, H, I, J, K, L, M, N, O);
+impl_flow_inputs!(A, B, C, D, E, F, G, H, I, J, K, L, M, N, O, P);
 
 /// 完成操作的 typed 输出选择 → 输出分类。
 ///
@@ -150,6 +183,19 @@ impl<I: FlowInputs> FlowBuilder<I> {
             definition: Arc::new(definition),
             marker: PhantomData,
         })
+    }
+
+    /// 公开 façade 在擦除其内部 Builder 类型约束前取回构建态 Definition。
+    pub(crate) fn into_definition(self) -> Definition {
+        self.definition
+    }
+
+    /// 用公开 façade 持有的构建态 Definition 恢复类型化 Builder。
+    pub(crate) fn from_definition(definition: Definition) -> Self {
+        Self {
+            definition,
+            marker: PhantomData,
+        }
     }
 }
 

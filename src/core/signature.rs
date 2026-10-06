@@ -295,7 +295,7 @@ wiring_for_marker!(OrchSig, false, true);
 
 /// 正式输入 Signature 的类型清单：把 Orchestrator 的 `I` 与内部声明输入逐项可比。
 ///
-/// 消费者一般不需要实现本 trait：`()`、`(A,)`、`(A, B)` 由本 crate 提供实现。
+/// 消费者一般不需要实现本 trait：输入 tuple 的 1～16 个位置由本 crate 提供实现。
 pub trait InputTypes {
     /// 每个输入位置的类型名与 `TypeId`（按声明顺序）。
     fn input_types() -> Vec<(&'static str, TypeId)>;
@@ -322,32 +322,98 @@ impl<A: 'static, B: 'static> InputTypes for (A, B) {
     }
 }
 
+macro_rules! impl_input_types {
+    ($($type:ident),+ $(,)?) => {
+        impl<$($type: 'static),+> InputTypes for ($($type,)+) {
+            fn input_types() -> Vec<(&'static str, TypeId)> {
+                vec![$((std::any::type_name::<$type>(), TypeId::of::<$type>())),+]
+            }
+        }
+    };
+}
+
+impl_input_types!(A, B, C);
+impl_input_types!(A, B, C, D);
+impl_input_types!(A, B, C, D, E);
+impl_input_types!(A, B, C, D, E, F);
+impl_input_types!(A, B, C, D, E, F, G);
+impl_input_types!(A, B, C, D, E, F, G, H);
+impl_input_types!(A, B, C, D, E, F, G, H, I);
+impl_input_types!(A, B, C, D, E, F, G, H, I, J);
+impl_input_types!(A, B, C, D, E, F, G, H, I, J, K);
+impl_input_types!(A, B, C, D, E, F, G, H, I, J, K, L);
+impl_input_types!(A, B, C, D, E, F, G, H, I, J, K, L, M);
+impl_input_types!(A, B, C, D, E, F, G, H, I, J, K, L, M, N);
+impl_input_types!(A, B, C, D, E, F, G, H, I, J, K, L, M, N, O);
+impl_input_types!(A, B, C, D, E, F, G, H, I, J, K, L, M, N, O, P);
+
 /// `then` 的接线参数形态：`()`、`DataRef<A>`、`(DataRef<A>, DataRef<B>)`。
 ///
 /// 一个业务 tuple Data 的 `DataRef<(A, B)>` 与两个独立位置的
 /// `(DataRef<A>, DataRef<B>)` 是不同形态，不会被自动拆分或合并。
 pub(crate) trait WireInputs {
+    /// 由 DataRef 参数组成的类型 tuple。
+    type Types;
+
     /// 本次接线使用的逻辑输入位置（按书写顺序）。
     fn positions(&self) -> Vec<&RefId>;
 }
 
 impl WireInputs for () {
+    type Types = ();
+
     fn positions(&self) -> Vec<&RefId> {
         Vec::new()
     }
 }
 
-impl<A> WireInputs for DataRef<A> {
+impl<A: 'static> WireInputs for DataRef<A> {
+    type Types = A;
+
     fn positions(&self) -> Vec<&RefId> {
         vec![self.position()]
     }
 }
 
-impl<A, B> WireInputs for (DataRef<A>, DataRef<B>) {
+impl<A: 'static, B: 'static> WireInputs for (DataRef<A>, DataRef<B>) {
+    type Types = (A, B);
+
     fn positions(&self) -> Vec<&RefId> {
         vec![self.0.position(), self.1.position()]
     }
 }
+
+/// 仅用于 3～16 输入 Orchestrator 接线，避免与单输入的 tuple DataRef 重叠。
+pub(crate) trait MultiWireInputs: WireInputs<Types: InputTypes> {}
+
+macro_rules! impl_wire_inputs {
+    ($($type:ident:$index:tt),+ $(,)?) => {
+        impl<$($type: 'static),+> WireInputs for ($(DataRef<$type>,)+) {
+            type Types = ($($type,)+);
+
+            fn positions(&self) -> Vec<&RefId> {
+                vec![$(&self.$index.position()),+]
+            }
+        }
+
+        impl<$($type: 'static),+> MultiWireInputs for ($(DataRef<$type>,)+) {}
+    };
+}
+
+impl_wire_inputs!(A:0, B:1, C:2);
+impl_wire_inputs!(A:0, B:1, C:2, D:3);
+impl_wire_inputs!(A:0, B:1, C:2, D:3, E:4);
+impl_wire_inputs!(A:0, B:1, C:2, D:3, E:4, F:5);
+impl_wire_inputs!(A:0, B:1, C:2, D:3, E:4, F:5, G:6);
+impl_wire_inputs!(A:0, B:1, C:2, D:3, E:4, F:5, G:6, H:7);
+impl_wire_inputs!(A:0, B:1, C:2, D:3, E:4, F:5, G:6, H:7, I:8);
+impl_wire_inputs!(A:0, B:1, C:2, D:3, E:4, F:5, G:6, H:7, I:8, J:9);
+impl_wire_inputs!(A:0, B:1, C:2, D:3, E:4, F:5, G:6, H:7, I:8, J:9, K:10);
+impl_wire_inputs!(A:0, B:1, C:2, D:3, E:4, F:5, G:6, H:7, I:8, J:9, K:10, L:11);
+impl_wire_inputs!(A:0, B:1, C:2, D:3, E:4, F:5, G:6, H:7, I:8, J:9, K:10, L:11, M:12);
+impl_wire_inputs!(A:0, B:1, C:2, D:3, E:4, F:5, G:6, H:7, I:8, J:9, K:10, L:11, M:12, N:13);
+impl_wire_inputs!(A:0, B:1, C:2, D:3, E:4, F:5, G:6, H:7, I:8, J:9, K:10, L:11, M:12, N:13, O:14);
+impl_wire_inputs!(A:0, B:1, C:2, D:3, E:4, F:5, G:6, H:7, I:8, J:9, K:10, L:11, M:12, N:13, O:14, P:15);
 
 /// 构建期拒绝：接线与 Signature 的错误都在追加 Step 与分配输出位置之前发生。
 ///
