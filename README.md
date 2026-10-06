@@ -2,7 +2,7 @@
 
 System Runtime Workflow（SRFlow）是面向强类型业务流程的 Rust 执行与编排框架。本工程独立维护其设计、实现、测试和示例。
 
-> 当前总规范为 [SRFlow Design v2.1](docs/SRFlow_Design_v2.1.md)。实施路线是在同一 crate 中从空工程重写 Core；V21-00～V21-10 已验收为 **COMPLETED**，V21-10 复审结果见[最终验收](docs/tasks/V21_10_RESULTS.md#11-最终独立复审与验收2026-10-05)。[G21-A](docs/tasks/G21_A_Foundation_Review.md)／[G21-B](docs/tasks/G21_B_Typed_Flow_Review.md) 为 PASS；当前内部实现 **361 项测试、57 个编译负例**及六项工程检查通过。G21-C／G21-D仍OPEN，后续以[任务入口](docs/tasks/README.md)为准。
+> 当前总规范为 [SRFlow Design v2.1](docs/SRFlow_Design_v2.1.md)。实施路线是在同一 crate 中从空工程重写 Core；V21-00～V21-12 已验收为 **COMPLETED**，基线 `d79d33f`。[G21-A](docs/tasks/G21_A_Foundation_Review.md)／[G21-B](docs/tasks/G21_B_Typed_Flow_Review.md)／[G21-C](docs/tasks/G21_C_Control_And_Root_Review.md) 为 PASS。[V21-11](docs/tasks/V21_11_Integration_And_Fault_Validation.md) 独立复审通过：388 项测试、60 个 UI 负例、工程检查全通过；11 组定向注入 10 组被捕获、3b 如实记录为不可区分（[结果 §14](docs/tasks/V21_11_RESULTS.md#14-最终独立复审与验收2026-10-05)）。[V21-12](docs/tasks/V21_12_Public_API_Examples_And_Delivery_Closeout.md) 已独立复审通过：388 内部测试＋12 外部集成测试、78 UI、Rustdoc 与两个离线示例通过（[结果 §11.1](docs/tasks/V21_12_RESULTS.md#111-最终独立复审2026-10-06)）。G21-D 仍 OPEN，等待阶段 Gate 审查。后续以[任务入口](docs/tasks/README.md)为准。
 
 ## 当前工程状态
 
@@ -18,7 +18,7 @@ V21-09 已交付内部 Loop：Retry（每轮重新导入原始输入，Continue 
 
 V21-10 已在非 test 构建中交付内部的唯一 Root 执行入口 `Runtime::execute`：按 Signature 登记 owned Root 输入、经 `orchestrator.rs` 的受控装配入口在真实 RootScope 上运行完成态 Flow／Match／Each／Loop，冻结一次后整组预检全部声明输出（完整 Data、身份、存活、类型、Root 唯一责任、物理 DataId 互不重复、关闭前提），再同步 take 全组并与 `RootScope.owned` 责任移除同边界提交，最后复用已验收的关闭尾段；支持 `Unit`／`Data<O>`／`Out2<O1,O2>` 与单／双非空 `'static` owned 输入。独立于 `OutKind` 的 sealed `RootInputs`／`RootOutputs` 表达 Root owned 形状；`run_root`／`RootExit`／旧裸 Definition 驱动已降为 `#[cfg(test)]`。重复物理实例拒绝诊断是 `ScopeError::DuplicateRootDataId`。
 
-当前 crate 仍**没有任何公开 API**：`core` 不对外导出，业务侧无法按整数构造 ID、取得存储入口或访问 Scope 内部，也不能取得 Root 提取权限。公开 Node／Orchestrator／Flow／Match／Each／Loop API、公开错误类型与用户示例由 V21-12 交付；当前内部能力的验收不等于公开入口或完整 Runtime 已完成。
+V21-12 已把完成态 Runtime 收口为受控公开 API。单输入 Builder 直接以业务类型作泛型参数；双输入使用独立 Builder 类型。完成态 Flow 的类型签名与 Orchestrator 接线仍按 tuple 形态表达；Root 执行时单输入直接传业务值，双输入传二元 tuple：从 crate 根可使用 `DataRef`／`Data`／`Unit`／`Out2`、五种接线 Marker、`NodeCall0/1/2`、单输入 `FlowBuilder<A>`、双输入 `FlowBuilder2<A, B>`／`Flow`、`MatchBuilder`／`Match`、`EachBuilder`／`Each`、`LoopBuilder`／`Loop`、`Runtime::execute` 与公开错误类型（`BuildError`／`RunError`／`BodyError`）。`core` 模块与全部内部身份（`Definition`／`CallSite`／`RefId`／`ScopeId`／`DataId`、存储与生命周期操作、注入钩子与测试支持）仍不对外可达；Rustdoc 以 `#![warn(missing_docs)]` 与 `RUSTDOCFLAGS="-D warnings"` 把关，`examples/minimal_flow.rs` 与 `examples/controller_chain.rs` 离线可运行。当前支持范围：单／双非空输入，`Unit`／`Data`／`Out2` 输出，函数／结构体／`Arc<具体 Node>`，Flow／Match／Each／Loop 组合；`()` Flow Input、Retry 次数／耗尽与 Iter 停止规则仍为开放项；`crates.io` 发布与版本策略不在本轮范围。
 
 历史 T01～T08 和 G1～G3 的通过记录对应旧 v2.0，不表示新实现完成。[P01～P07 Probe](docs/SRFlow_Core_Compile_Probe_Results_v0.1.md) 是局部可行性证据，正式调用链仍需重新验收。
 
@@ -29,13 +29,16 @@ V21-10 已在非 test 构建中交付内部的唯一 Root 执行入口 `Runtime:
 ```sh
 cargo check --offline --all-targets
 cargo test --offline --all-targets
+cargo test --offline --doc
 cargo clippy --offline --all-targets -- -D warnings
 cargo fmt --all -- --check
+RUSTDOCFLAGS="-D warnings" cargo doc --offline --no-deps
+cargo run --offline --example minimal_flow
 ```
 
-`tests/ui/` 下是编译负例夹具，不是 Cargo target，需要按各文件头部注释中的 `rustc` 命令单独编译并确认预期失败。
+`tests/ui/` 下是编译负例夹具，不是 Cargo target；由 `docs/tasks/V21_12_PROBE/ui_check.py` 按 `ui_manifest.tsv`（装配模式＋主诊断码）逐项驱动核对。
 
-核心当前没有普通依赖。`futures` 仅作为开发依赖，用于后续离线测试和示例驱动异步代码；线程 bounds 与适配接口由对应任务落实。公开能力交付时同步补充可运行的用法和 Rustdoc。
+核心当前没有普通依赖。`futures` 仅作为开发依赖，用于离线测试、doc-test 与示例驱动异步代码（核心不绑定 executor）。
 
 ## 仓库协作约定
 

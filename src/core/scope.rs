@@ -80,7 +80,6 @@ pub(crate) struct StateImportSlot {
     expected_name: &'static str,
 }
 
-#[allow(dead_code)] // slot 由 Definition 元数据／V21-09 Loop 构造，当前只由驱动与测试使用
 impl StateImportSlot {
     /// 以 `T` 声明 child 本地目标位置的类型。
     pub(crate) fn new<T: Any>(state: &ControlStateId, target: &RefId) -> Self {
@@ -243,9 +242,9 @@ pub(crate) struct ImportSlot {
     expected_name: &'static str,
 }
 
-#[allow(dead_code)] // slot 由 Definition 元数据／V21-05 CallSite 构造，当前只由驱动与测试使用
 impl ImportSlot {
     /// 以 `T` 声明 child 本地目标位置的类型。
+    #[allow(dead_code)] // 仅由 cfg(test) 验收与观察路径使用（非 test 构建无消费者）
     pub(crate) fn new<T: Any>(source: &RefId, target: &RefId) -> Self {
         Self::with_type(source, target.clone(), TypeId::of::<T>(), type_name::<T>())
     }
@@ -277,9 +276,9 @@ pub(crate) struct ExportSlot {
     expected_name: &'static str,
 }
 
-#[allow(dead_code)] // slot 由 Definition 元数据／V21-05 CallSite 构造，当前只由驱动与测试使用
 impl ExportSlot {
     /// 以 `T` 声明 child 本地输出位置的类型。
+    #[allow(dead_code)] // 仅由 cfg(test) 验收与观察路径使用（非 test 构建无消费者）
     pub(crate) fn new<T: Any>(child: &RefId, caller: &RefId) -> Self {
         Self::with_type(child, caller.clone(), TypeId::of::<T>(), type_name::<T>())
     }
@@ -560,13 +559,11 @@ impl PreparedRootExtraction {
 ///
 /// 它提供受控的登记、导入、resolve、导出与退出入口，不启动业务调用、不创建 Invocation，
 /// 也不提供任意可变 Container 的访问器。后续 ExecutionContext 复用它。
-#[allow(dead_code)] // V21-04 接入真实调用链前，本组件的入口只由测试驱动
 pub(crate) struct ScopeCoordinator {
     registry: ScopeRegistry,
     container: DataContainer,
 }
 
-#[allow(dead_code)] // 同上：入口在 V21-04 接入前只由测试驱动
 impl ScopeCoordinator {
     /// 以驱动创建一次的 ExecutionIdentity 建立协调组件与内部 RootScope。
     ///
@@ -630,6 +627,22 @@ impl ScopeCoordinator {
             .expect("fixture scope exists")
             .refs
             .insert(position.clone(), target);
+    }
+
+    /// 测试故障注入：把某位置 CollectionItem 的 lifetime cap 换成指定 Scope（只改元数据）。
+    #[cfg(test)]
+    pub(crate) fn replace_item_cap_probe(
+        &mut self,
+        scope: &ScopeId,
+        position: &RefId,
+        cap: &ScopeId,
+    ) {
+        if let Some(record) = self.registry.scopes.get_mut(&scope.seq())
+            && let Some(RefTarget::CollectionItem { lifetime_cap, .. }) =
+                record.refs.get_mut(position)
+        {
+            *lifetime_cap = cap.clone();
+        }
     }
 
     /// 测试故障注入：把一份 owned 实例的责任移到指定 Scope。
@@ -698,7 +711,6 @@ impl ScopeCoordinator {
     ///
     /// 供 Context 校验"控制提交两端"的权限：不仅是来源 Scope，接收 state 的控制器
     /// 也必须属于当前调用的可见范围。
-    #[allow(dead_code)] // V21-05 接入 CallSite 前只由 Context 与测试使用
     pub(crate) fn state_owner(&self, state: &ControlStateId) -> Result<ScopeId, ScopeError> {
         if !Arc::ptr_eq(state.owner().execution(), &self.registry.execution) {
             return Err(ScopeError::StateForeignExecution {
@@ -718,7 +730,6 @@ impl ScopeCoordinator {
     }
 
     /// 未完成 collector 的责任 Scope。
-    #[allow(dead_code)] // 同上
     pub(crate) fn collector_owner(&self, collector: &CollectorId) -> Result<ScopeId, ScopeError> {
         Ok(self.lookup_collector_owner(collector)?.clone())
     }
@@ -741,7 +752,6 @@ impl ScopeCoordinator {
     /// 一个 Scope 的直接 parent；用于调用边界校验 frame 与 Scope 的关系。
     ///
     /// 只读元数据访问，不改变任何绑定或责任。
-    #[allow(dead_code)] // V21-04 的 Context frame 校验使用
     pub(crate) fn parent_of(&self, scope: &ScopeId) -> Result<Option<ScopeId>, ScopeError> {
         Ok(self.registry.lookup(scope)?.parent.clone())
     }
@@ -1144,7 +1154,6 @@ impl ScopeCoordinator {
     /// 两类来源共用同一条预检与提交路径：全部校验（含批内重复目标）通过后才绑定，
     /// 任何失败都不留下部分 `child.refs`，也不改变 owner 或状态 target。状态来源必须
     /// 属于 caller 本身：调用方不能凭"容器中存在此 DataId"导入未经合法保留的状态。
-    #[allow(dead_code)] // V21-09 接入真实 Loop 前只由驱动与测试使用
     pub(crate) fn import_batch_with_states(
         &mut self,
         child: &ScopeId,
@@ -1275,7 +1284,6 @@ impl ScopeCoordinator {
     /// `T` 是状态声明的类型；状态只保存 target 元数据，不保存业务值。初始化只解析
     /// 控制器自身的本地引用，不接受任意 DataId／RefTarget 注入，也不消耗 Definition
     /// RefId 或重绑任何本地位置。
-    #[allow(dead_code)] // V21-09 接入真实 Loop 前只由驱动与测试使用
     pub(crate) fn register_state<T: Any>(
         &mut self,
         controller: &ScopeId,
@@ -1319,7 +1327,6 @@ impl ScopeCoordinator {
     /// 用于"完成前为空"的控制器状态：Iter 的当前状态由本地初始引用设置（见
     /// [`Self::register_state`]），而 Retry 的最终结果状态在首轮完成前没有目标，只能
     /// 由首次合法 Promote 初始化。该形态的推进策略属 V21-09，本任务只交付机制。
-    #[allow(dead_code)] // V21-09 接入真实 Loop 前只由驱动与测试使用
     pub(crate) fn register_uninitialized_state<T: Any>(
         &mut self,
         controller: &ScopeId,
@@ -1332,7 +1339,7 @@ impl ScopeCoordinator {
     /// 不绑定父 Scope 的 Definition RefId，也不消耗 Definition RefId 序列。本入口是
     /// [`Self::promote_report`] 的薄兼容映射：成功为 `Ok(())`，拒绝时保持既有"清理失败
     /// 优先"规则（`Err(cleanup_failure.unwrap_or(primary))`）。
-    #[allow(dead_code)] // V21-09 接入真实 Loop 前只由驱动与测试使用
+    #[allow(dead_code)] // 仅由 cfg(test) 验收与观察路径使用（非 test 构建无消费者）
     pub(crate) fn promote(
         &mut self,
         source: &ScopeId,
@@ -1355,7 +1362,6 @@ impl ScopeCoordinator {
     /// 存活与唯一 owner、剩余 owned／collector 清理前提）→ commit（更新状态、必要时转移
     /// 责任、关闭来源、登记待回收旧状态）。早期拒绝不冻结；prepare 拒绝按既有纪律执行
     /// `cleanup_subtree`，其失败独立报告。
-    #[allow(dead_code)] // V21-09 接入真实 Loop 前只由驱动与测试使用
     pub(crate) fn promote_report(
         &mut self,
         source: &ScopeId,
@@ -1416,7 +1422,6 @@ impl ScopeCoordinator {
     /// 与 Promote 共用同一早检与清理纪律，但**不更新任何控制状态、不转移责任、不绑定
     /// Definition RefId**；用于 Retry 的 Continue（本轮结果随 Round 结束丢弃）。返回
     /// 报告形状，供真实 Round runner 区分"已关闭"与"拒绝"。
-    #[allow(dead_code)] // V21-09 接入真实 Loop 前只由驱动与测试使用
     pub(crate) fn discard_report(
         &mut self,
         source: &ScopeId,
@@ -1490,7 +1495,6 @@ impl ScopeCoordinator {
     /// 控制状态保留它。Promote 在替换旧状态时只登记 pending（不做全量扫描），本入口
     /// 执行检查与销毁；控制器退出时的清理是兜底。本入口不删除仍被使用的 alias，也不
     /// 通过制造"无人引用"推进状态。
-    #[allow(dead_code)] // V21-09 接入真实 Loop 前只由驱动与测试使用
     pub(crate) fn recycle_pending(&mut self, controller: &ScopeId) -> Result<(), ScopeError> {
         self.registry.lookup(controller)?.require_active()?;
 
@@ -1547,7 +1551,6 @@ impl ScopeCoordinator {
     /// 只用于最终输出准备：状态必须属于该控制器且已初始化，target 必须存活、类型相符
     /// 且责任链对该控制器可见；位置保持单赋值，不存在解绑／重绑接口。逐轮可变位置不
     /// 使用本入口。调用时机与决策属 V21-09。
-    #[allow(dead_code)] // V21-09 接入真实 Loop 前只由驱动与测试使用
     pub(crate) fn bind_state_output(
         &mut self,
         controller: &ScopeId,
@@ -1612,7 +1615,6 @@ impl ScopeCoordinator {
     ///
     /// 协调组件只登记责任 Scope 与元素真实 `TypeId`；建构值位于 Container 的建构区。
     /// 调用方不能预装元素：元素只能来自合法 Consume。`()` 不是可用的元素类型。
-    #[allow(dead_code)] // V21-08 接入真实 Each 前只由驱动与测试使用
     pub(crate) fn begin_collector<O: Any>(
         &mut self,
         owner: &ScopeId,
@@ -1639,7 +1641,7 @@ impl ScopeCoordinator {
     }
 
     /// 观测：未完成 collector 的登记元数据（元素类型名、责任 Scope）。
-    #[allow(dead_code)] // 观测入口，同上
+    #[allow(dead_code)] // 仅由 cfg(test) 验收与观察路径使用（非 test 构建无消费者）
     pub(crate) fn collector_metadata(
         &self,
         collector: &CollectorId,
@@ -1649,7 +1651,7 @@ impl ScopeCoordinator {
     }
 
     /// 观测：未完成 collector 已收集的元素数量。
-    #[allow(dead_code)] // 观测入口，同上
+    #[allow(dead_code)] // 仅由 cfg(test) 验收与观察路径使用（非 test 构建无消费者）
     pub(crate) fn collector_len(&self, collector: &CollectorId) -> Result<usize, ScopeError> {
         let _ = self.lookup_collector(collector)?;
         self.container
@@ -1671,7 +1673,7 @@ impl ScopeCoordinator {
     /// 不绑定 EachScope 的 Definition RefId，也不建立 collectible 集合：值在 Container
     /// 内部从普通 entry 移入建构值。全部预检（含剩余 owned 清理前提）在冻结与移动前
     /// 完成；Imported／parent-owned／sibling-owned 输出与类型不符都在移动前拒绝。
-    #[allow(dead_code)] // V21-08 接入真实 Each 前只由驱动与测试使用
+    #[allow(dead_code)] // 仅由 cfg(test) 验收与观察路径使用（非 test 构建无消费者）
     pub(crate) fn consume_item(
         &mut self,
         item: &ScopeId,
@@ -1887,21 +1889,31 @@ impl ScopeCoordinator {
             },
             None => (None, None, false),
         };
-        let (state_target, state_pending) = match state {
+        let (state_target, state_target_owner, state_target_alive, state_pending) = match state {
             Some(state) => match self.lookup_state(state) {
-                Ok(record) => (
-                    record
-                        .target
-                        .clone()
-                        .map(|target| TargetSnapshot::of(&target)),
-                    Some(record.pending.clone()),
-                ),
+                Ok(record) => {
+                    let target_value = record.target.clone();
+                    let owner = target_value.as_ref().and_then(|target| match target {
+                        RefTarget::Data(id) => self.owner_of(id).ok(),
+                        RefTarget::CollectionItem { .. } => None,
+                    });
+                    let alive = target_value.as_ref().is_some_and(|target| match target {
+                        RefTarget::Data(id) => self.container.borrow_any(id).is_ok(),
+                        RefTarget::CollectionItem { .. } => false,
+                    });
+                    (
+                        target_value.map(|target| TargetSnapshot::of(&target)),
+                        owner,
+                        alive,
+                        Some(record.pending.clone()),
+                    )
+                }
                 Err(err) => {
                     note(format!("state lookup: {err:?}"));
-                    (None, None)
+                    (None, None, false, None)
                 }
             },
-            None => (None, None),
+            None => (None, None, false, None),
         };
         super::test_support::record_round_collect_pre_cleanup(
             super::test_support::RoundCollectPreCleanupSnapshot {
@@ -1920,6 +1932,8 @@ impl ScopeCoordinator {
                 selected_owner,
                 selected_alive,
                 state_target,
+                state_target_owner,
+                state_target_alive,
                 state_pending,
                 next_data_id: self.next_data_id_probe(),
                 observation_error: error,
@@ -2107,7 +2121,6 @@ impl ScopeCoordinator {
     /// 新的普通 `DataId` 在任何移除 collector 或绑定之前分配，因此序号耗尽时 collector
     /// 仍保持未完成、内容不变，控制器不出现新 ref／owned／普通 entry。最终集合的类型
     /// 由后续 Export 的声明输出位置校验。
-    #[allow(dead_code)] // V21-08／V21-10 接入真实 Each／Root 前只由驱动与测试使用
     pub(crate) fn finish_collector(
         &mut self,
         controller: &ScopeId,
@@ -3146,6 +3159,34 @@ impl ScopeCoordinator {
             {
                 state.pending.push(old);
             }
+        }
+        #[cfg(test)]
+        {
+            // 只读元数据：提交后的控制状态与控制器责任（drop 前直读的实际现场）。
+            let controller_owned: Vec<DataId> = self
+                .registry
+                .lookup(&plan.controller)
+                .map(|record| record.owned.iter().cloned().collect())
+                .unwrap_or_default();
+            let (state_target, pending) = self
+                .registry
+                .states
+                .get(&plan.state_key)
+                .map(|state| {
+                    (
+                        state.target.as_ref().map(super::scope::TargetSnapshot::of),
+                        state.pending.clone(),
+                    )
+                })
+                .unwrap_or((None, Vec::new()));
+            super::test_support::record_promote_state(super::test_support::PromoteStateRecord {
+                controller: plan.controller.clone(),
+                source: plan.source.clone(),
+                state_target,
+                controller_owned,
+                pending,
+                transferred: plan.transferred,
+            });
         }
         self.close_scope(&plan.source)
     }

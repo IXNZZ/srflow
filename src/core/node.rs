@@ -22,24 +22,26 @@ use super::context::{
 };
 use super::identity::{DataId, ScopeId};
 use super::ref_id::RefId;
-use super::signature::{Data, NodeFut, OutKind, Unit};
+use super::signature::{Data, NodeFut, OutKind, OutputKind, Unit};
 
 // ---- 业务协议：结构体 Node 与 Arc<具体 Node> ----
 
 /// 零输入 Node 协议。
-pub(crate) trait NodeCall0<K: OutKind> {
+///
+/// 由具体结构体 Node 实现；`Arc<具体 Node>` 会自动经共享包装接入同一协议。
+pub trait NodeCall0<K: OutputKind> {
     /// 执行本次调用；返回值是新的 owned Data 或 `()`。
     fn call<'a>(&'a self) -> NodeFut<'a, K::Output>;
 }
 
 /// 单输入 Node 协议：`self` 与输入共享同一个短调用生命周期。
-pub(crate) trait NodeCall1<A: 'static, K: OutKind> {
+pub trait NodeCall1<A: 'static, K: OutputKind> {
     /// 执行本次调用；输入借用与 `self` 借用随 Future 结束。
     fn call<'a>(&'a self, a: &'a A) -> NodeFut<'a, K::Output>;
 }
 
 /// 双输入 Node 协议：两个输入与 `self` 共享同一个短调用生命周期。
-pub(crate) trait NodeCall2<A: 'static, B: 'static, K: OutKind> {
+pub trait NodeCall2<A: 'static, B: 'static, K: OutputKind> {
     /// 执行本次调用；两个输入借用与 `self` 借用随 Future 结束。
     fn call<'a>(&'a self, a: &'a A, b: &'a B) -> NodeFut<'a, K::Output>;
 }
@@ -188,11 +190,12 @@ impl LeafOutput for Unit {
 // ---- 擦除后的 Node site ----
 
 /// 擦除后的 Node 调用 site：业务 Node 只出现在 `Leaf…` 的私有字段里。
-#[allow(dead_code)] // V21-06 接入完整 Flow／Root 驱动前，V21-05 的真实执行样本是唯一消费者
 pub(crate) trait NodeSite {
     /// 本次接线的逻辑输入位置（按声明顺序）。
+    #[allow(dead_code)] // 仅由 cfg(test) 验收与观察路径使用（非 test 构建无消费者）
     fn inputs(&self) -> &[RefId];
     /// 本次调用的声明输出位置（unit 为空）。
+    #[allow(dead_code)] // 仅由 cfg(test) 验收与观察路径使用（非 test 构建无消费者）
     fn outputs(&self) -> &[RefId];
     /// 执行一次叶子调用：进入沿用 caller Scope 的 Leaf Invocation。
     fn invoke<'a>(
@@ -203,7 +206,6 @@ pub(crate) trait NodeSite {
 }
 
 /// 零输入叶子 site。
-#[allow(dead_code)] // V21-06 接入完整 Flow／Root 驱动前，V21-05 的真实执行样本是唯一消费者
 pub(crate) struct Leaf0<H, K> {
     node: H,
     output: Option<RefId>,
@@ -211,7 +213,6 @@ pub(crate) struct Leaf0<H, K> {
 }
 
 /// 单输入叶子 site。
-#[allow(dead_code)] // V21-06 接入完整 Flow／Root 驱动前，V21-05 的真实执行样本是唯一消费者
 pub(crate) struct Leaf1<H, A, K> {
     node: H,
     input: RefId,
@@ -220,7 +221,6 @@ pub(crate) struct Leaf1<H, A, K> {
 }
 
 /// 双输入叶子 site。
-#[allow(dead_code)] // V21-06 接入完整 Flow／Root 驱动前，V21-05 的真实执行样本是唯一消费者
 pub(crate) struct Leaf2<H, A, B, K> {
     node: H,
     inputs: [RefId; 2],
@@ -228,7 +228,6 @@ pub(crate) struct Leaf2<H, A, B, K> {
     marker: PhantomData<fn(&A, &B) -> K>,
 }
 
-#[allow(dead_code)] // V21-06 接入完整 Flow／Root 驱动前，V21-05 的真实执行样本是唯一消费者
 impl<H, K> Leaf0<H, K> {
     /// 构建零输入叶子 site。
     pub(crate) fn new(node: H, output: Option<RefId>) -> Self {
@@ -240,7 +239,6 @@ impl<H, K> Leaf0<H, K> {
     }
 }
 
-#[allow(dead_code)] // V21-06 接入完整 Flow／Root 驱动前，V21-05 的真实执行样本是唯一消费者
 impl<H, A, K> Leaf1<H, A, K> {
     /// 构建单输入叶子 site。
     pub(crate) fn new(node: H, input: RefId, output: Option<RefId>) -> Self {
@@ -253,7 +251,6 @@ impl<H, A, K> Leaf1<H, A, K> {
     }
 }
 
-#[allow(dead_code)] // V21-06 接入完整 Flow／Root 驱动前，V21-05 的真实执行样本是唯一消费者
 impl<H, A, B, K> Leaf2<H, A, B, K> {
     /// 构建双输入叶子 site。
     pub(crate) fn new(node: H, first: RefId, second: RefId, output: Option<RefId>) -> Self {
@@ -271,10 +268,12 @@ where
     H: NodeCall0<K>,
     K: LeafOutput,
 {
+    #[allow(dead_code)] // 仅由 cfg(test) 验收与观察路径使用（非 test 构建无消费者）
     fn inputs(&self) -> &[RefId] {
         &[]
     }
 
+    #[allow(dead_code)] // 仅由 cfg(test) 验收与观察路径使用（非 test 构建无消费者）
     fn outputs(&self) -> &[RefId] {
         self.output.as_slice()
     }
@@ -332,10 +331,12 @@ where
     A: 'static,
     K: LeafOutput,
 {
+    #[allow(dead_code)] // 仅由 cfg(test) 验收与观察路径使用（非 test 构建无消费者）
     fn inputs(&self) -> &[RefId] {
         std::slice::from_ref(&self.input)
     }
 
+    #[allow(dead_code)] // 仅由 cfg(test) 验收与观察路径使用（非 test 构建无消费者）
     fn outputs(&self) -> &[RefId] {
         self.output.as_slice()
     }
@@ -394,10 +395,12 @@ where
     B: 'static,
     K: LeafOutput,
 {
+    #[allow(dead_code)] // 仅由 cfg(test) 验收与观察路径使用（非 test 构建无消费者）
     fn inputs(&self) -> &[RefId] {
         &self.inputs
     }
 
+    #[allow(dead_code)] // 仅由 cfg(test) 验收与观察路径使用（非 test 构建无消费者）
     fn outputs(&self) -> &[RefId] {
         self.output.as_slice()
     }

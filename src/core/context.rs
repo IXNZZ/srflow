@@ -31,7 +31,6 @@ use super::scope::{
 };
 /// 首次终止类别：执行失败或取消。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)] // 非 test 构建下无生产消费者；由 V21-04／V21-05 的验收样本与后续任务驱动
 pub(crate) enum TerminationKind {
     /// 执行体返回失败（含其子调用的失败传播）。
     BodyError,
@@ -43,18 +42,15 @@ pub(crate) enum TerminationKind {
 /// 首次原因一旦记录就不再被后续失败或取消覆盖；后续清理故障另存于
 /// [`CleanupDiagnostic`]。
 #[derive(Debug, Clone)]
-#[allow(dead_code)] // 非 test 构建下无生产消费者；由 V21-04／V21-05 的验收样本与后续任务驱动
 pub(crate) struct ExecutionTermination {
     kind: TerminationKind,
-    #[allow(dead_code)]
     scope: Option<ScopeId>,
     note: &'static str,
+    #[allow(dead_code)] // 仅由 cfg(test) 验收与观察路径使用（非 test 构建无消费者）
     scope_error: Option<ScopeError>,
 }
-#[allow(dead_code)] // 非 test 构建下无生产消费者；由 V21-04／V21-05 的验收样本与后续任务驱动
 impl ExecutionTermination {
     /// 终止类别。
-    #[allow(dead_code)] // 非 test 构建下尚无可达的生产入口；由 V21-04 验收样本或 V21-05 正式路径驱动
     pub(crate) fn kind(&self) -> TerminationKind {
         self.kind
     }
@@ -70,6 +66,7 @@ impl ExecutionTermination {
     }
 
     /// 首次失败时的原始 Scope／执行诊断（如有），不是通用字符串。
+    #[allow(dead_code)] // 仅由 cfg(test) 验收与观察路径使用（非 test 构建无消费者）
     pub(crate) fn scope_error(&self) -> Option<&ScopeError> {
         self.scope_error.as_ref()
     }
@@ -78,21 +75,21 @@ impl ExecutionTermination {
 ///
 /// 与终止原因并存，彼此不覆盖；有故障的 Scope 不会被标成 Closed。
 #[derive(Debug, Clone)]
-#[allow(dead_code)] // 非 test 构建下无生产消费者；由 V21-04／V21-05 的验收样本与后续任务驱动
 pub(crate) struct CleanupDiagnostic {
-    #[allow(dead_code)]
+    #[allow(dead_code)] // 仅由 cfg(test) 验收与观察路径使用（非 test 构建无消费者）
     scope: ScopeId,
+    #[allow(dead_code)] // 仅由 cfg(test) 验收与观察路径使用（非 test 构建无消费者）
     error: ScopeError,
 }
-#[allow(dead_code)] // 非 test 构建下无生产消费者；由 V21-04／V21-05 的验收样本与后续任务驱动
 impl CleanupDiagnostic {
     /// 清理失败的 Scope。
-    #[allow(dead_code)] // 非 test 构建下尚无可达的生产入口；由 V21-04 验收样本或 V21-05 正式路径驱动
+    #[allow(dead_code)] // 仅由 cfg(test) 验收与观察路径使用（非 test 构建无消费者）
     pub(crate) fn scope(&self) -> &ScopeId {
         &self.scope
     }
 
     /// 清理失败的诊断。
+    #[allow(dead_code)] // 仅由 cfg(test) 验收与观察路径使用（非 test 构建无消费者）
     pub(crate) fn error(&self) -> &ScopeError {
         &self.error
     }
@@ -103,7 +100,6 @@ impl CleanupDiagnostic {
 /// 沿用 caller 的 Scope 且不承担其销毁责任。Item／Round 等作用域由所属编排调用建立，
 /// 作为该边界的 descendant 一并清理，不单独占用调用类别。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)] // 非 test 构建下无生产消费者；由 V21-04／V21-05 的验收样本与后续任务驱动
 pub(crate) enum InvocationKind {
     /// 本次 Root Execution 的调用。
     Root,
@@ -149,17 +145,14 @@ pub(crate) struct RoundCollectPermit {
 
 /// 一个调用 frame 的元数据。
 #[derive(Debug)]
-#[allow(dead_code)] // 非 test 构建下无生产消费者；由 V21-04／V21-05 的验收样本与后续任务驱动
 pub(crate) struct InvocationFrame {
     parent: Option<usize>,
     kind: InvocationKind,
     scope: Option<ScopeId>,
     owns_scope: bool,
 }
-#[allow(dead_code)] // 非 test 构建下无生产消费者；由 V21-04／V21-05 的验收样本与后续任务驱动
 impl InvocationFrame {
     /// 本 frame 的调用类别。
-    #[allow(dead_code)] // 非 test 构建下尚无可达的生产入口；由 V21-04 验收样本或 V21-05 正式路径驱动
     pub(crate) fn kind(&self) -> InvocationKind {
         self.kind
     }
@@ -186,7 +179,6 @@ enum ExitDisposition {
 }
 
 /// 一次 Execution 的内部调用与数据设施。
-#[allow(dead_code)] // 非 test 构建下无生产消费者；由 V21-04／V21-05 的验收样本与后续任务驱动
 pub(crate) struct ExecutionContext {
     coordinator: ScopeCoordinator,
     frames: Vec<InvocationFrame>,
@@ -198,19 +190,16 @@ pub(crate) struct ExecutionContext {
 
 /// 测试观测：Context 最终析构事件。
 #[cfg(test)]
-#[allow(dead_code)] // 非 test 构建下无生产消费者；由 V21-04／V21-05 的验收样本与后续任务驱动
 impl Drop for ExecutionContext {
     fn drop(&mut self) {
         creation_counts::record_event("context-drop");
     }
 }
 
-#[allow(dead_code)] // 非 test 构建下无生产消费者；由 V21-04／V21-05 的验收样本与后续任务驱动
 impl ExecutionContext {
     /// 以给定身份根建立 Context 与内部协调组件（唯一 DataContainer）。
     ///
     /// 只由 `runtime` 的 Root 设施在创建一次 Root Execution 时调用。
-    #[allow(dead_code)] // 非 test 构建下尚无可达的生产入口；由 V21-04 验收样本或 V21-05 正式路径驱动
     pub(crate) fn new(execution: Arc<ExecutionIdentity>) -> Self {
         #[cfg(test)]
         creation_counts::count_context();
@@ -240,6 +229,7 @@ impl ExecutionContext {
     }
 
     /// 当前 frame 的只读元数据。
+    #[allow(dead_code)] // 仅由 cfg(test) 验收与观察路径使用（非 test 构建无消费者）
     pub(crate) fn current_frame(&self) -> Option<&InvocationFrame> {
         self.frames.last()
     }
@@ -250,11 +240,13 @@ impl ExecutionContext {
     }
 
     /// 首次终止原因。
+    #[allow(dead_code)] // 仅由 cfg(test) 验收与观察路径使用（非 test 构建无消费者）
     pub(crate) fn termination(&self) -> Option<&ExecutionTermination> {
         self.termination.as_ref()
     }
 
     /// 首个清理失败诊断。
+    #[allow(dead_code)] // 仅由 cfg(test) 验收与观察路径使用（非 test 构建无消费者）
     pub(crate) fn cleanup_failure(&self) -> Option<&CleanupDiagnostic> {
         self.cleanup_failure.as_ref()
     }
@@ -572,6 +564,7 @@ impl ExecutionContext {
     }
 
     /// 直接 Consume：把 ItemScope 的完整 owned 输出移入其直接 parent 的 collector。
+    #[allow(dead_code)] // 仅由 cfg(test) 验收与观察路径使用（非 test 构建无消费者）
     pub(crate) fn consume_item(
         &mut self,
         item: &ScopeId,
@@ -613,12 +606,12 @@ impl ExecutionContext {
         self.coordinator.next_data_id_probe()
     }
 
-    /// 测试故障注入：把一个 target 直接写入 RootScope 的声明输出位置（只改元数据）。
+    /// 测试故障注入：把一个 target 直接写入指定 Scope 的一个本地位置（只改元数据）。
     ///
-    /// 只用于构造"类型不符／alias／CollectionItem／foreign Execution"的 Root 防御反例；
-    /// 不提供业务旁路，也不改变提取预检的判断路径。
+    /// 用于构造 Root 输出（类型不符／alias／CollectionItem／foreign Execution）与
+    /// Item 输入（陈旧 cap／imported 目标）等防御反例；不提供业务旁路，也不改变判断路径。
     #[cfg(test)]
-    pub(crate) fn inject_root_target_probe(
+    pub(crate) fn inject_scope_target_probe(
         &mut self,
         scope: &ScopeId,
         position: &RefId,
@@ -626,6 +619,29 @@ impl ExecutionContext {
     ) {
         self.coordinator
             .inject_target_probe(scope, position, target);
+    }
+
+    /// cfg(test) 只读观察：某 Scope 的直接 parent。
+    #[cfg(test)]
+    pub(crate) fn parent_scope_probe(
+        &self,
+        scope: &ScopeId,
+    ) -> Result<Option<ScopeId>, ScopeError> {
+        self.coordinator.parent_of(scope)
+    }
+
+    /// 测试故障注入：把某个位置上的 CollectionItem 的 lifetime cap 换成指定 Scope。
+    ///
+    /// 只用于构造"上一 Item 已关闭"的 cap 失效反例；不改变其它元数据，也不成为生产入口。
+    #[cfg(test)]
+    pub(crate) fn replace_item_cap_probe(
+        &mut self,
+        scope: &ScopeId,
+        position: &RefId,
+        cap: &ScopeId,
+    ) {
+        self.coordinator
+            .replace_item_cap_probe(scope, position, cap);
     }
 
     /// 测试故障注入：把一份 owned 实例的责任移到指定 Scope（构造"非 Root owner"反例）。
@@ -860,6 +876,7 @@ impl ExecutionContext {
     }
 
     /// Promote：把来源 child 的选定结果保留到父控制器的控制状态。
+    #[allow(dead_code)] // 仅由 cfg(test) 验收与观察路径使用（非 test 构建无消费者）
     pub(crate) fn promote(
         &mut self,
         source: &ScopeId,
@@ -899,7 +916,6 @@ impl ExecutionContext {
     }
 
     /// 登记尚未初始化的控制状态位置。
-    #[allow(dead_code)] // 非 test 构建下尚无可达的生产入口；由 V21-04 验收样本或 V21-05 正式路径驱动
     pub(crate) fn register_uninitialized_state<T: Any>(
         &mut self,
         controller: &ScopeId,
@@ -945,6 +961,7 @@ impl ExecutionContext {
     /// 边界进入前的可失败预检：终止状态、caller 可见范围与 caller 的 Active 状态。
     ///
     /// 与 `create_child`／`enter` 分离，使"建立 child 之后才失败"只可能来自内部不变量。
+    #[allow(dead_code)] // 仅由 cfg(test) 验收与观察路径使用（非 test 构建无消费者）
     fn require_boundary_entry(&self, caller: &ScopeId) -> Result<(), ScopeError> {
         self.require_running()?;
         self.require_call_scope(caller)?;
@@ -976,6 +993,7 @@ impl ExecutionContext {
     }
 
     /// 只读元数据：Scope 的直接 parent。
+    #[allow(dead_code)] // 仅由 cfg(test) 验收与观察路径使用（非 test 构建无消费者）
     pub(crate) fn parent_of(&self, scope: &ScopeId) -> Result<Option<ScopeId>, ScopeError> {
         self.coordinator.parent_of(scope)
     }
@@ -1155,14 +1173,12 @@ impl ExecutionContext {
 ///
 /// `Deref`／`DerefMut` 直接把 Context 暴露给同一调用链；guard 不持有业务值、输入
 /// Future 本体或第二份 Container。
-#[allow(dead_code)] // 非 test 构建下无生产消费者；由 V21-04／V21-05 的验收样本与后续任务驱动
 pub(crate) struct InvocationGuard<'ctx> {
     context: &'ctx mut ExecutionContext,
     frame_index: usize,
     responsible: Vec<ScopeId>,
     exit: ExitDisposition,
 }
-#[allow(dead_code)] // 非 test 构建下无生产消费者；由 V21-04／V21-05 的验收样本与后续任务驱动
 impl Deref for InvocationGuard<'_> {
     type Target = ExecutionContext;
 
@@ -1170,36 +1186,22 @@ impl Deref for InvocationGuard<'_> {
         self.context
     }
 }
-#[allow(dead_code)] // 非 test 构建下无生产消费者；由 V21-04／V21-05 的验收样本与后续任务驱动
 impl DerefMut for InvocationGuard<'_> {
     fn deref_mut(&mut self) -> &mut ExecutionContext {
         self.context
     }
 }
-#[allow(dead_code)] // 非 test 构建下无生产消费者；由 V21-04／V21-05 的验收样本与后续任务驱动
 impl InvocationGuard<'_> {
     /// 本 guard 对应 frame 的只读元数据。
-    #[allow(dead_code)] // 非 test 构建下尚无可达的生产入口；由 V21-04 验收样本或 V21-05 正式路径驱动
+    #[allow(dead_code)] // 仅由 cfg(test) 验收与观察路径使用（非 test 构建无消费者）
     pub(crate) fn frame(&self) -> &InvocationFrame {
         &self.context.frames[self.frame_index]
     }
 
     /// 本人仍负责退出的 Scope 列表。
+    #[allow(dead_code)] // 仅由 cfg(test) 验收与观察路径使用（非 test 构建无消费者）
     pub(crate) fn responsible_scopes(&self) -> &[ScopeId] {
         &self.responsible
-    }
-
-    /// 纳入一个由本调用建立、尚未关闭的 Scope。
-    ///
-    /// 只接受当前调用可见范围（本 frame 的 Scope 或它建立的 descendant）：传入
-    /// caller／ancestor 的 ScopeId 会被拒绝，不能借责任接管让祖先被本 guard 关闭。
-    #[allow(dead_code)] // 非 test 构建下尚无可达的生产入口；由 V21-04 验收样本或 V21-05 正式路径驱动
-    pub(crate) fn take_responsibility(&mut self, scope: &ScopeId) -> Result<(), ScopeError> {
-        self.context.require_call_scope(scope)?;
-        if !self.responsible.iter().any(|known| known == scope) {
-            self.responsible.push(scope.clone());
-        }
-        Ok(())
     }
 
     /// 测试观测：立即触发本 guard 的 Drop 校验（等价于在当前位置丢弃 guard）。
@@ -1312,7 +1314,6 @@ impl InvocationGuard<'_> {
         );
     }
 }
-#[allow(dead_code)] // 非 test 构建下无生产消费者；由 V21-04／V21-05 的验收样本与后续任务驱动
 impl Drop for InvocationGuard<'_> {
     fn drop(&mut self) {
         // 先校验 frame 关系：只有"本 guard 的 frame 正是栈顶、且与责任集合一致"时才
@@ -1386,14 +1387,13 @@ impl Drop for InvocationGuard<'_> {
             if let Some(scope) = frame_scope.clone()
                 && self.context.frames[self.frame_index].kind() == InvocationKind::Root
             {
-                let snapshot = super::test_support::root_snapshot(
+                super::test_support::record_strict_root_snapshot(
                     self.context,
                     &scope,
                     super::test_support::RootSnapshotPhase::AfterFailureCleanup,
                     0,
                     &[],
                 );
-                super::test_support::record_root_snapshot(snapshot);
             }
         }
 
@@ -1418,7 +1418,6 @@ impl Drop for InvocationGuard<'_> {
     }
 }
 
-#[allow(dead_code)] // 非 test 构建下无生产消费者；由 V21-04／V21-05 的验收样本与后续任务驱动
 impl InvocationGuard<'_> {
     /// frame 关系校验：本 guard 的 frame 必须是栈顶，且与责任集合、退出处置一致。
     fn frame_relation(&self) -> Result<(), &'static str> {
@@ -1499,24 +1498,23 @@ impl InvocationGuard<'_> {
     }
 }
 
-/// 执行体失败标记：说明文本与可选的 Scope 诊断。
+/// 业务执行错误：稳定的说明文本与可选框架诊断。
 ///
-/// 内部调用驱动的失败通道，不是公开 Execution Error API。
+/// 业务 Node 用 [`BodyError::new`] 返回自己的失败说明；`Display` 输出该说明。
+/// 框架内部的 Scope 诊断不进入公开访问面（访问器保持 crate 内可见）。
 #[derive(Debug)]
-#[allow(dead_code)] // 非 test 构建下无生产消费者；由 V21-04／V21-05 的验收样本与后续任务驱动
-pub(crate) struct BodyError {
+pub struct BodyError {
     note: &'static str,
     scope: Option<ScopeError>,
 }
-#[allow(dead_code)] // 非 test 构建下无生产消费者；由 V21-04／V21-05 的验收样本与后续任务驱动
 impl BodyError {
     /// 以说明文本构造。
-    pub(crate) fn new(note: &'static str) -> Self {
+    pub fn new(note: &'static str) -> Self {
         Self { note, scope: None }
     }
 
     /// 说明文本。
-    pub(crate) fn note(&self) -> &'static str {
+    pub fn note(&self) -> &'static str {
         self.note
     }
 
@@ -1525,13 +1523,19 @@ impl BodyError {
         self.scope.as_ref()
     }
 }
-#[allow(dead_code)] // 非 test 构建下无生产消费者；由 V21-04／V21-05 的验收样本与后续任务驱动
 impl From<super::signature::BuildError> for BodyError {
     fn from(source: super::signature::BuildError) -> Self {
         Self::new(source.note())
     }
 }
-#[allow(dead_code)] // 非 test 构建下无生产消费者；由 V21-04／V21-05 的验收样本与后续任务驱动
+
+impl std::fmt::Display for BodyError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.note)
+    }
+}
+
+impl std::error::Error for BodyError {}
 impl From<ScopeError> for BodyError {
     fn from(source: ScopeError) -> Self {
         Self {
@@ -1547,7 +1551,7 @@ impl From<ScopeError> for BodyError {
 ///
 /// `config` 是执行体自带的非 Data 上下文参数（对应 V21-05 起 Node／Orchestrator 的定义
 /// 与配置）：驱动原样透传，不解释、不存储，也不构成业务 Data 通道。
-#[allow(dead_code)] // V21-04 的验收样本直接驱动；V21-05 的正式 adapter 采用借用式叶子骨架与自建编排边界，不复用按值 config 形态
+#[allow(dead_code)] // 由 tests/ui/d22 等按真实非 test 入口编译；crate 内无调用点
 pub(crate) async fn invoke_leaf<T, X, O, F>(
     context: &mut ExecutionContext,
     scope: &ScopeId,
@@ -1577,7 +1581,7 @@ where
     }
 }
 /// 叶子调用的可失败步骤：调用方保证 guard 在失败时标记为执行错误退出。
-#[allow(dead_code)] // V21-04 的验收样本直接驱动；V21-05 的正式 adapter 采用借用式叶子骨架与自建编排边界，不复用按值 config 形态
+#[allow(dead_code)] // 由 tests/ui/d22 等按真实非 test 入口编译；crate 内无调用点
 async fn leaf_step<T, X, O, F>(
     guard: &mut InvocationGuard<'_>,
     scope: &ScopeId,
@@ -1604,7 +1608,7 @@ where
 ///
 /// 成功时与 [`invoke_leaf`] 相同地登记 owned 输出；失败时叶子 guard 只标记执行错误并
 /// 传播，**不清理 caller 的 Scope**——沿用 caller Scope 的叶子不承担其退出责任。
-#[allow(dead_code)] // V21-04 的验收样本直接驱动；V21-05 的正式 adapter 采用借用式叶子骨架与自建编排边界，不复用按值 config 形态
+#[cfg(test)]
 pub(crate) async fn invoke_fallible_leaf<T, X, O, F>(
     context: &mut ExecutionContext,
     scope: &ScopeId,
@@ -1632,7 +1636,7 @@ where
     }
 }
 /// 可失败叶子的步骤：失败不触碰 caller Scope 的绑定与责任。
-#[allow(dead_code)] // V21-04 的验收样本直接驱动；V21-05 的正式 adapter 采用借用式叶子骨架与自建编排边界，不复用按值 config 形态
+#[cfg(test)]
 async fn fallible_leaf_step<T, X, O, F>(
     guard: &mut InvocationGuard<'_>,
     scope: &ScopeId,
@@ -1657,7 +1661,7 @@ where
 /// 无输出叶子调用驱动：`()` 输出不登记业务 Data，也不产生 `DataId`。
 ///
 /// 顺序与 [`invoke_leaf`] 相同，但成功后不调用 `register_owned`（`()` 不是业务 Data）。
-#[allow(dead_code)] // V21-04 的验收样本直接驱动；V21-05 的正式 adapter 采用借用式叶子骨架与自建编排边界，不复用按值 config 形态
+#[cfg(test)]
 pub(crate) async fn invoke_leaf_unit<T, X, F>(
     context: &mut ExecutionContext,
     scope: &ScopeId,
@@ -1699,7 +1703,7 @@ where
 /// body 使用同一个 Context；它可以通过 `create_child` 建立 Item／Round 等 descendant
 /// 作用域，这些作用域由本边界的 Scope 退出清理覆盖。body 失败时 guard 走执行错误
 /// 退出：清理本边界仍负责的 Scope 后把失败交给调用方。`config` 与叶子驱动同样原样透传。
-#[allow(dead_code)] // V21-04 的验收样本直接驱动；V21-05 的正式 adapter 采用借用式叶子骨架与自建编排边界，不复用按值 config 形态
+#[cfg(test)]
 pub(crate) async fn invoke_boundary<X, F>(
     context: &mut ExecutionContext,
     imports: &[ImportSlot],
@@ -1753,7 +1757,7 @@ where
     }
 }
 /// 边界调用的可失败步骤：运行 body、整组 Export 并解除责任。
-#[allow(dead_code)] // V21-04 的验收样本直接驱动；V21-05 的正式 adapter 采用借用式叶子骨架与自建编排边界，不复用按值 config 形态
+#[cfg(test)]
 async fn boundary_step<X, F>(
     guard: &mut InvocationGuard<'_>,
     child: &ScopeId,

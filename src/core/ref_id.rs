@@ -23,7 +23,6 @@ pub(crate) struct RefIdSource {
     next: AtomicU64,
 }
 
-#[allow(dead_code)] // 来源根由 Definition 驱动／V21-05 的 Builder 创建，当前只由测试使用
 impl RefIdSource {
     /// 创建新的来源根，序列从 0 开始。
     pub(crate) fn new() -> Arc<Self> {
@@ -75,7 +74,6 @@ pub(crate) struct RefId {
     seq: u64,
 }
 
-#[allow(dead_code)] // seq 仅供后续 Definition 归属诊断与测试使用
 impl RefId {
     /// 仅由 [`RefIdAllocator`] 在模块内调用。
     fn new(source: Arc<RefIdSource>, seq: u64) -> Self {
@@ -83,6 +81,7 @@ impl RefId {
     }
 
     /// 本来源内的本地序号。
+    #[allow(dead_code)] // 仅由 cfg(test) 验收与观察路径使用（非 test 构建无消费者）
     pub(crate) fn seq(&self) -> u64 {
         self.seq
     }
@@ -96,6 +95,7 @@ impl RefId {
     ///
     /// 与 [`Self::eq`] 相同地只比较来源分配地址与本地序号，不依赖来源字段值；它只
     /// 说明"同源"，不说明位置已在当前 Definition 登记（后者由构建器声明表回答）。
+    #[allow(dead_code)] // 仅由 cfg(test) 验收与观察路径使用（非 test 构建无消费者）
     pub(crate) fn same_source(&self, other: &Self) -> bool {
         self.seq == other.seq && Arc::ptr_eq(&self.source, &other.source)
     }
@@ -145,7 +145,6 @@ pub(crate) struct RefIdAllocator {
     source: Arc<RefIdSource>,
 }
 
-#[allow(dead_code)] // RefId 由 Definition 驱动／V21-05 的 Builder 创建，当前只由测试使用
 impl RefIdAllocator {
     /// 以给定来源根建立分配句柄。
     pub(crate) fn new(source: Arc<RefIdSource>) -> Self {

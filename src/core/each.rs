@@ -26,11 +26,11 @@ use super::builder::{BuildSite, Definition, IntoCallSite, TypedCallBuilder};
 use super::context::ItemConsumePermit;
 use super::context::{BodyError, ExecutionContext, InvocationGuard, InvocationKind};
 use super::data_ref::DataRef;
-use super::flow::{Flow, FlowBuilder, FlowInputs};
+use super::flow::{Flow, FlowBuilder, FlowInputs, FlowInputsDeclare};
 use super::identity::{CollectorId, ScopeId};
 use super::internal_error::ScopeError;
 use super::orchestrator::{
-    EachScopeTransfer, OrchCall, OrchScope, PackFor, PackFromPorts, ScopeRole, Targets1, Targets2,
+    EachScopeTransfer, OrchCall, OrchScope, PackFor, ScopeRole, Targets1, Targets2,
 };
 use super::ref_id::RefId;
 use super::signature::{Data, DeclaredPort, InputTypes, NodeFut, WireInputs, Wiring};
@@ -38,13 +38,13 @@ use super::signature::{Data, DeclaredPort, InputTypes, NodeFut, WireInputs, Wiri
 // ---------------------------------------------------------------- 输入形状
 
 /// 无 shared 的 Each 形状标记：输入 `(Vec<T>,)`，body 输入 `(T,)`。
-pub(crate) struct EachOnly<T>(PhantomData<fn() -> T>);
+pub struct EachOnly<T>(PhantomData<fn() -> T>);
 
 /// 带一个 shared Data 的 Each 形状标记：输入 `(Vec<T>, S)`，body 输入 `(T, S)`。
-pub(crate) struct EachShared<T, S>(PhantomData<fn() -> (T, S)>);
+pub struct EachShared<T, S>(PhantomData<fn() -> (T, S)>);
 
 /// 无 shared 时包装 Definition 的私有 shared 占位类型。
-pub(crate) struct NoShared;
+pub struct NoShared;
 
 mod sealed {
     /// 形状标记只由本模块给出，业务侧不能新增 Each 形状。
@@ -54,24 +54,28 @@ mod sealed {
 impl<T: 'static> sealed::Sealed for EachOnly<T> {}
 impl<T: 'static, S: 'static> sealed::Sealed for EachShared<T, S> {}
 
-/// Each 输入形状：把 Each 自身 Signature、输入 pack、集合元素、shared 与包装 body
-/// 形状绑在一起，供 `OrchCall` 与构建器共用。
-pub(crate) trait EachShape: 'static + sealed::Sealed
-where
-    <<Self as EachShape>::Wrapper as FlowInputs>::Handles: WireInputs + Clone,
-    <<Self as EachShape>::Wrapper as FlowInputs>::Pack: PackFor<<Self as EachShape>::Wrapper>,
-{
+/// Each 输入形状：把 Each 自身 Signature、集合元素、shared 与包装 body 形状绑在一起。
+///
+/// 消费者只在类型标注中书写 [`EachOnly`]／[`EachShared`] 两个形状标记；本 trait 是
+/// sealed 的，关联类型供构建器与运行路径使用，不面向外部实现。
+pub trait EachShape: 'static + sealed::Sealed {
     /// Each 自身输入 Signature（`(Vec<T>,)` 或 `(Vec<T>, S)`）。
-    type I: 'static + InputTypes + EachInputs;
-    /// Each 输入 pack（集合 + 可选 shared）。
-    type Pack: PackFor<Self::I> + PackFromPorts;
+    type I: 'static + InputTypes;
+    /// Each 输入 pack（集合 + 可选 shared；内部接线协议使用）。
+    type Pack;
     /// 集合元素类型 `T`。
     type Element: 'static;
-    /// shared 类型（无 shared 时为 [`NoShared`]）。
+    /// shared 类型（无 shared 时由内部占位类型表示）。
     type Shared: 'static;
     /// 包装 body 的输入 Signature（`(T,)` 或 `(T, S)`）。
     type Wrapper: 'static + FlowInputs + InputTypes;
+}
 
+/// 内部：形状相关的方法（包装端口核对、集合／shared 解析与 item 绑定）。
+///
+/// 只在 crate 内使用；公开使用者不实现也不调用。形状相关的前置条件（Handles 可接线、
+/// pack 绑定、输入声明）以 trait where 形式给出，使用方只需 bound 本 trait。
+pub(crate) trait EachShapeSpec: EachShape {
     /// 包装 Definition 的输入位置数。
     fn wrapper_inputs() -> usize;
 
@@ -85,14 +89,8 @@ where
         scope: &ScopeId,
     ) -> Result<&'a Vec<Self::Element>, ScopeError>;
 
-    /// 从 Each 输入 pack 解析可选 shared（无 shared 时返回空）。
-    fn shared<'a>(
-        pack: &Self::Pack,
-        ctx: &'a ExecutionContext,
-        scope: &ScopeId,
-    ) -> Result<Option<&'a Self::Shared>, ScopeError>;
-
     /// 在 ItemScope 中绑定包装输入：item 目标 +（若有）shared alias。
+    #[allow(clippy::too_many_arguments)] // 与真实绑定边界一一对应，不做参数包
     fn bind_item_inputs(
         ctx: &mut ExecutionContext,
         each_scope: &ScopeId,
@@ -109,7 +107,9 @@ impl<T: 'static> EachShape for EachOnly<T> {
     type Element = T;
     type Shared = NoShared;
     type Wrapper = (T,);
+}
 
+impl<T: 'static> EachShapeSpec for EachOnly<T> {
     fn wrapper_inputs() -> usize {
         1
     }
@@ -124,14 +124,6 @@ impl<T: 'static> EachShape for EachOnly<T> {
         scope: &ScopeId,
     ) -> Result<&'a Vec<T>, ScopeError> {
         pack.first(ctx, scope)
-    }
-
-    fn shared<'a>(
-        _pack: &Self::Pack,
-        _ctx: &'a ExecutionContext,
-        _scope: &ScopeId,
-    ) -> Result<Option<&'a NoShared>, ScopeError> {
-        Ok(None)
     }
 
     fn bind_item_inputs(
@@ -170,7 +162,9 @@ impl<T: 'static, S: 'static> EachShape for EachShared<T, S> {
     type Element = T;
     type Shared = S;
     type Wrapper = (T, S);
+}
 
+impl<T: 'static, S: 'static> EachShapeSpec for EachShared<T, S> {
     fn wrapper_inputs() -> usize {
         2
     }
@@ -185,14 +179,6 @@ impl<T: 'static, S: 'static> EachShape for EachShared<T, S> {
         scope: &ScopeId,
     ) -> Result<&'a Vec<T>, ScopeError> {
         pack.first(ctx, scope)
-    }
-
-    fn shared<'a>(
-        pack: &Self::Pack,
-        ctx: &'a ExecutionContext,
-        scope: &ScopeId,
-    ) -> Result<Option<&'a S>, ScopeError> {
-        pack.second(ctx, scope).map(Some)
     }
 
     fn bind_item_inputs(
@@ -307,6 +293,63 @@ fn take_item_metadata_fault() -> Option<ItemMetadataFault> {
     ITEM_METADATA_FAULT.with(|slot| slot.replace(None))
 }
 
+/// 按下标选中的 Item 输入／收口故障（R11-05：角色＋实际 Item 下标，不误伤其它边界）。
+#[cfg(test)]
+#[derive(Clone)]
+pub(crate) enum ItemInputFault {
+    /// 在第 `index` 个 Item 绑定后，把 item 目标替换为给定 target（只改元数据）。
+    ReplaceItemTarget {
+        /// Item 下标（0 起）。
+        index: usize,
+        /// 注入的 target。
+        target: super::scope::RefTarget,
+    },
+    /// 在第 `index` 个 Item 绑定后，把它替换为**上一个真实 Item**绑定的同一目标
+    /// （来源集合／下标／旧 ItemScope cap 完整保留；旧 cap 已随上一 Item 关闭）。
+    ReusePreviousItemTarget {
+        /// Item 下标（0 起）。
+        index: usize,
+    },
+    /// 在第 `index` 个 Item 绑定后，把 item 输入的元素声明类型损坏为 `u8`（只改元数据）：
+    /// 真实输入校验必须在 body 之前以类型判据拒绝。
+    CorruptItemInputType {
+        /// Item 下标（0 起）。
+        index: usize,
+    },
+}
+
+#[cfg(test)]
+thread_local! {
+    static ITEM_INPUT_FAULT: std::cell::RefCell<Option<ItemInputFault>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// 安装一个按下标选中的 Item 故障（只生效一次）。
+#[cfg(test)]
+pub(crate) fn install_item_input_fault(fault: ItemInputFault) {
+    ITEM_INPUT_FAULT.with(|slot| *slot.borrow_mut() = Some(fault));
+}
+
+#[cfg(test)]
+fn take_item_input_fault_at(index: usize, destroy: bool) -> Option<ItemInputFault> {
+    ITEM_INPUT_FAULT.with(|slot| {
+        let matches = slot
+            .borrow()
+            .as_ref()
+            .is_some_and(|fault| match (fault, destroy) {
+                (ItemInputFault::ReplaceItemTarget { index: at, .. }, false) => *at == index,
+                (ItemInputFault::ReusePreviousItemTarget { index: at }, false) => *at == index,
+                (ItemInputFault::CorruptItemInputType { index: at }, false) => *at == index,
+                _ => false,
+            });
+        if matches {
+            slot.borrow_mut().take()
+        } else {
+            None
+        }
+    })
+}
+
 /// Consume 前的故障模式（只影响下一次收口）。
 #[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -367,7 +410,9 @@ fn take_pre_consume_fault() -> Option<PreConsumeFault> {
 // ---------------------------------------------------------------- 完成态
 
 /// 完成态 Each：不可变 Definition、登记的包装 Flow 与登记元数据。
-pub(crate) struct Each<Sh: EachShape, O: 'static> {
+///
+/// 可作为 Root 或 child 使用；`Clone` 只复制定义句柄，不复制业务 Data。
+pub struct Each<Sh: EachShape, O: 'static> {
     definition: Arc<Definition>,
     /// 登记的 body 包装：Node 与 Orchestrator body 都作为其唯一 Step。
     wrapper: Flow<Sh::Wrapper, Data<O>>,
@@ -384,9 +429,15 @@ pub(crate) struct Each<Sh: EachShape, O: 'static> {
 }
 
 impl<Sh: EachShape, O: 'static> Each<Sh, O> {
+    /// 本编排体的只读 Definition（不要求 `EachShapeSpec`；crate 内部使用）。
+    pub(crate) fn raw_definition(&self) -> &Definition {
+        &self.definition
+    }
+
     /// 登记的包装 Definition（只读；供身份核对与观察）。
+    #[allow(dead_code)] // 仅由 cfg(test) 验收与观察路径使用（非 test 构建无消费者）
     pub(crate) fn wrapper_definition(&self) -> &Definition {
-        self.wrapper.definition()
+        self.wrapper.raw_definition()
     }
 
     /// 登记的包装 Flow（只读；只由 Each 专用转交使用）。
@@ -403,8 +454,11 @@ impl<Sh: EachShape, O: 'static> Each<Sh, O> {
     ///
     /// 这保证运行期不会执行"同类型的另一个包装"，也不接受陈旧或外来 ports 表；篡改
     /// 只能经 test-only 元数据故障构造。
-    pub(crate) fn verify_registration(&self) -> Result<(), BodyError> {
-        let live = self.wrapper.definition();
+    pub(crate) fn verify_registration(&self) -> Result<(), BodyError>
+    where
+        Sh: EachShapeSpec,
+    {
+        let live = self.wrapper.raw_definition();
         if live as *const Definition as *const () != self.wrapper_identity {
             return Err(BodyError::new(
                 "registered each body is not the registered wrapper definition",
@@ -458,9 +512,11 @@ impl<Sh: EachShape, O: 'static> Each<Sh, O> {
     }
 }
 
-impl<Sh: EachShape, O: 'static> OrchCall<Sh::I, Data<Vec<O>>> for Each<Sh, O>
+impl<Sh: EachShapeSpec, O: 'static> OrchCall<Sh::I, Data<Vec<O>>> for Each<Sh, O>
 where
     Sh::I: InputTypes,
+    Sh::Pack: PackFor<Sh::I>,
+    <Sh::Wrapper as FlowInputs>::Handles: WireInputs + Clone,
 {
     type Pack = Sh::Pack;
     const ROLE: ScopeRole = ScopeRole::Each;
@@ -481,13 +537,13 @@ where
 }
 
 /// Each 的运行主体：逐项建立 ItemScope → 驱动包装 Step → 直接 Consume；全部完成后 finish。
-async fn run_each<Sh: EachShape, O: 'static>(
+async fn run_each<Sh: EachShapeSpec, O: 'static>(
     mut session: EachSession<'_, Sh, O>,
 ) -> Result<(), BodyError> {
     #[cfg(test)]
     super::test_support::record(&format!(
         "wrapper-allocated:{}",
-        session.wrapper.definition().allocated_probe()
+        session.wrapper.raw_definition().allocated_probe()
     ));
     let count = session.item_count()?;
     for index in 0..count {
@@ -497,7 +553,7 @@ async fn run_each<Sh: EachShape, O: 'static>(
     #[cfg(test)]
     super::test_support::record(&format!(
         "wrapper-allocated-end:{}",
-        session.wrapper.definition().allocated_probe()
+        session.wrapper.raw_definition().allocated_probe()
     ));
     Ok(())
 }
@@ -519,7 +575,7 @@ pub(crate) struct EachSession<'a, Sh: EachShape, O: 'static> {
     marker: PhantomData<fn() -> (Sh, O)>,
 }
 
-impl<'a, Sh: EachShape, O: 'static> EachSession<'a, Sh, O> {
+impl<'a, Sh: EachShapeSpec, O: 'static> EachSession<'a, Sh, O> {
     /// 受控构造：只由 `OrchScope` 的 Each 专用转交调用（调用方拿不到可变 Context）。
     #[allow(clippy::too_many_arguments)] // 内部构造：Context／Scope／Definition／pack／登记包装
     pub(crate) fn new(
@@ -553,7 +609,7 @@ impl<'a, Sh: EachShape, O: 'static> EachSession<'a, Sh, O> {
     /// 运行第 `index` 项：创建 ItemScope → 绑定 item／shared → 驱动包装 Step → 直接 Consume。
     async fn run_item(&mut self, index: usize) -> Result<(), BodyError> {
         let each_scope = self.each.clone();
-        let wrapper = self.wrapper.definition();
+        let wrapper = self.wrapper.raw_definition();
         let item_scope = self
             .ctx
             .create_child(&each_scope)
@@ -581,6 +637,80 @@ impl<'a, Sh: EachShape, O: 'static> EachSession<'a, Sh, O> {
                 self.ctx.record_cleanup_failure(item_scope.clone(), cleanup);
             }
             return Err(BodyError::from(primary));
+        }
+
+        #[cfg(test)]
+        {
+            let item_port = wrapper
+                .inputs()
+                .first()
+                .expect("wrapper declares the item input")
+                .position()
+                .clone();
+            match take_item_input_fault_at(index, false) {
+                Some(ItemInputFault::ReplaceItemTarget { target, .. }) => {
+                    self.ctx
+                        .inject_scope_target_probe(&item_scope, &item_port, target);
+                }
+                Some(ItemInputFault::ReusePreviousItemTarget { .. }) => {
+                    // 上一真实 Item 的完整 CollectionItem 目标：来源集合／下标／旧 cap。
+                    let previous = super::test_support::item_target_snapshot()
+                        .into_iter()
+                        .rev()
+                        .find(|record| record.item != item_scope)
+                        .expect("previous item target must be recorded");
+                    match previous.target {
+                        super::scope::TargetSnapshot::CollectionItem {
+                            collection,
+                            index: item_index,
+                            lifetime_cap,
+                            ..
+                        } => {
+                            assert!(
+                                super::test_support::closed_scope_snapshot()
+                                    .iter()
+                                    .filter(|scope| *scope == &lifetime_cap)
+                                    .count()
+                                    == 1,
+                                "previous item cap must be a real closed scope"
+                            );
+                            self.ctx.inject_scope_target_probe(
+                                &item_scope,
+                                &item_port,
+                                super::scope::RefTarget::CollectionItem {
+                                    collection,
+                                    index: item_index,
+                                    lifetime_cap,
+                                    access: super::scope::ItemAccess::for_collection::<
+                                        <Sh as EachShape>::Element,
+                                    >(),
+                                },
+                            );
+                        }
+                        other => {
+                            panic!("previous item target is not a CollectionItem: {other:?}")
+                        }
+                    }
+                }
+                Some(ItemInputFault::CorruptItemInputType { .. }) => {
+                    let access = super::scope::ItemAccess::for_collection::<u8>();
+                    self.ctx
+                        .corrupt_item_access_probe(&item_scope, &item_port, access, None)
+                        .expect("corrupt item input type");
+                }
+                None => {}
+            }
+            // 记录本 Item 绑定到输入位置上的**实际**目标（含故障替换后的结果）。
+            if let Ok((refs, _)) = self.ctx.snapshot_targets_probe(&item_scope)
+                && let Some((_, target)) = refs
+                    .into_iter()
+                    .find(|(position, _)| *position == item_port)
+            {
+                super::test_support::record_item_target(super::test_support::ItemTargetRecord {
+                    item: item_scope.clone(),
+                    target,
+                });
+            }
         }
 
         #[cfg(test)]
@@ -631,6 +761,11 @@ impl<'a, Sh: EachShape, O: 'static> EachSession<'a, Sh, O> {
         {
             if let Ok(moves) = guard.collector_moves_probe(&self.collector) {
                 super::test_support::record(&format!("collector-before:{moves}"));
+            }
+            if take_item_input_fault_at(index, true).is_some()
+                && let Ok(Some(id)) = guard.target_data_id_probe(&item_scope, &selected)
+            {
+                guard.destroy_probe(&id);
             }
             match take_pre_consume_fault() {
                 Some(PreConsumeFault::Selected) => {
@@ -818,9 +953,13 @@ pub(crate) struct EachBuilder<Sh: EachShape, O: 'static> {
     marker: PhantomData<fn() -> (Sh, O)>,
 }
 
-impl<Sh: EachShape, O: 'static> EachBuilder<Sh, O> {
+impl<Sh: EachShapeSpec, O: 'static> EachBuilder<Sh, O> {
     /// 建立 Each：声明集合（+ 可选 shared）输入与最终 `Vec<O>` 输出端口，并开始包装 Flow。
-    pub(crate) fn start() -> Result<Self, super::signature::BuildError> {
+    pub(crate) fn start() -> Result<Self, super::signature::BuildError>
+    where
+        Sh::I: EachInputs,
+        Sh::Wrapper: FlowInputsDeclare,
+    {
         let mut definition = Definition::new();
         <Sh::I as EachInputs>::declare_each_inputs(&mut definition)?;
         let final_position = definition.declare_output_port::<Vec<O>>("each output")?;
@@ -849,6 +988,7 @@ impl<Sh: EachShape, O: 'static> EachBuilder<Sh, O> {
         C: BuildSite<M, <Sh::Wrapper as FlowInputs>::Handles>,
         M: Wiring<BuildOutput = DataRef<O>>,
         C: IntoCallSite<M, <Sh::Wrapper as FlowInputs>::Handles, BuildOutput = DataRef<O>>,
+        <Sh::Wrapper as FlowInputs>::Handles: WireInputs + Clone,
     {
         if self.produced.is_some() {
             return Err(super::signature::BuildError::SecondEachBody);
@@ -865,7 +1005,9 @@ impl<Sh: EachShape, O: 'static> EachBuilder<Sh, O> {
         self.produced = Some(produced);
         Ok(())
     }
+}
 
+impl<Sh: EachShape, O: 'static> EachBuilder<Sh, O> {
     /// 完成：包装 finish 后形成不可变完成态 Each，并捕获登记身份与声明端口。
     pub(crate) fn finish(mut self) -> Result<Each<Sh, O>, super::signature::BuildError> {
         let produced = self
@@ -877,21 +1019,21 @@ impl<Sh: EachShape, O: 'static> EachBuilder<Sh, O> {
             .take()
             .expect("each builder is still open")
             .finish::<Data<O>, _>(produced)?;
-        let wrapper_identity = wrapper.definition() as *const Definition as *const ();
+        let wrapper_identity = wrapper.raw_definition() as *const Definition as *const ();
         let wrapper_step_identity = wrapper
-            .definition()
+            .raw_definition()
             .steps()
             .first()
             .expect("each wrapper has exactly one registered body step")
             .site() as *const _ as *const ();
-        let wrapper_inputs = wrapper.definition().inputs().to_vec();
+        let wrapper_inputs = wrapper.raw_definition().inputs().to_vec();
         #[cfg(test)]
         let wrapper_outputs = self
             .tampered_outputs
             .take()
-            .unwrap_or_else(|| wrapper.definition().output_ports().to_vec());
+            .unwrap_or_else(|| wrapper.raw_definition().output_ports().to_vec());
         #[cfg(not(test))]
-        let wrapper_outputs = wrapper.definition().output_ports().to_vec();
+        let wrapper_outputs = wrapper.raw_definition().output_ports().to_vec();
         #[allow(clippy::arc_with_non_send_sync)]
         // 单线程、非 Send 执行模型：只共享不可变 Definition
         let definition = Arc::new(self.definition);
@@ -909,7 +1051,7 @@ impl<Sh: EachShape, O: 'static> EachBuilder<Sh, O> {
 }
 
 #[cfg(test)]
-impl<Sh: EachShape, O: 'static> EachBuilder<Sh, O> {
+impl<Sh: EachShapeSpec, O: 'static> EachBuilder<Sh, O> {
     /// 测试观测：包装 Definition 当前 Step 数量（构建失败不留 Step）。
     pub(crate) fn wrapper_step_count_probe(&self) -> Option<usize> {
         self.wrapper_builder
@@ -929,9 +1071,9 @@ impl<Sh: EachShape, O: 'static> EachBuilder<Sh, O> {
 }
 
 #[cfg(test)]
-impl<Sh: EachShape, O: 'static> EachSession<'_, Sh, O> {
+impl<Sh: EachShapeSpec, O: 'static> EachSession<'_, Sh, O> {
     /// 编译期字段见证：字段类型变为其他类型时本函数不再编译（H10）。
-    #[allow(dead_code)]
+    #[allow(dead_code)] // 编译期字段见证：有意不被调用
     fn session_field_witness(&self) {
         let _: &ExecutionContext = self.ctx;
         let _: &ScopeId = self.each;

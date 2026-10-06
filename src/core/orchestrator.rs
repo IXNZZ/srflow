@@ -23,9 +23,10 @@ use super::signature::{BuildError, DeclaredPort, InputTypes, NodeFut, OutKind};
 use super::signature::{Data, WireInputs};
 
 /// 把 pack 类型与正式输入 Signature 关联：只有匹配的类型 tuple 才成立。
-pub(crate) trait PackFor<I: 'static> {}
+///
+/// 与 [`PackFromPorts`] 配对：能被绑定到某个 Signature 的 pack 必然支持从声明端口构造。
+pub(crate) trait PackFor<I: 'static>: PackFromPorts {}
 
-impl PackFor<()> for Targets0 {}
 impl<A: 'static> PackFor<(A,)> for Targets1<A> {}
 impl<A: 'static, B: 'static> PackFor<(A, B)> for Targets2<A, B> {}
 
@@ -35,7 +36,6 @@ impl<A: 'static, B: 'static> PackFor<(A, B)> for Targets2<A, B> {}
 /// [`InvocationKind::Boundary`](super::context::InvocationKind::Boundary)。这里的角色只用于
 /// `cfg(test)` 只读记录真实创建点，说明该 child Scope 是由哪一类调用建立的。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)] // 非 test 构建下只由记录钩子与 Match 登记表消费；角色不参与执行语义
 pub(crate) enum ScopeRole {
     /// Flow／SubFlow 调用建立的 child Scope。
     Flow,
@@ -46,36 +46,21 @@ pub(crate) enum ScopeRole {
     /// Each 调用建立的 child Scope（EachScope）。
     Each,
     /// Each 内部每个 item 建立的 child Scope（ItemScope）。
+    #[allow(dead_code)] // 仅由 cfg(test) 验收与观察路径使用（非 test 构建无消费者）
     Item,
     /// Loop 调用建立的 child Scope（LoopScope）。
     Loop,
     /// Loop 内部每轮建立的 child Scope（RoundScope）。
+    #[allow(dead_code)] // 仅由 cfg(test) 验收与观察路径使用（非 test 构建无消费者）
     Round,
-}
-
-#[allow(dead_code)] // 标签供 cfg(test) 记录与断言引用
-impl ScopeRole {
-    /// 稳定标签，供事件与断言引用。
-    pub(crate) fn label(self) -> &'static str {
-        match self {
-            Self::Flow => "flow",
-            Self::Match => "match",
-            Self::Branch => "branch",
-            Self::Each => "each",
-            Self::Item => "item",
-            Self::Loop => "loop",
-            Self::Round => "round",
-        }
-    }
 }
 
 /// 业务 Orchestrator 协议：显式声明输入签名 `I`、输出分类 `K` 与输入 pack 类型。
 ///
 /// `definition()` 返回该编排体持有的内部 Definition（真实子调用描述），不是任意 body
 /// 闭包；`run` 在当前 Context 与自身 Scope 中组织 child 调用。
-#[allow(dead_code)] // V21-06 接入完整 Flow／Root 驱动前，V21-05 的真实执行样本是唯一消费者
 pub(crate) trait OrchCall<I: 'static + InputTypes, K: OutKind> {
-    /// 输入 pack 类型（[`Targets0`]／[`Targets1`]／[`Targets2`]）。
+    /// 输入 pack 类型（[`Targets1`]／[`Targets2`]）。
     ///
     /// `PackFor<I>` 把 pack 与正式输入 Signature 绑定：写错 pack 类型（例如声明
     /// `OrchCall<(u32,), _>` 却给 `Targets1<String>`）在**编译期**就不成立，
@@ -85,7 +70,6 @@ pub(crate) trait OrchCall<I: 'static + InputTypes, K: OutKind> {
     /// 该编排体在被上层接线调用时使用的 Scope 角色（默认 Flow；Match 覆盖为 Match）。
     ///
     /// 只影响 `cfg(test)` 的创建点记录与诊断标签，不改变调用边界语义。
-    #[allow(dead_code)] // 非 test 构建下唯一消费者是记录钩子；角色本身不参与执行
     const ROLE: ScopeRole = ScopeRole::Flow;
 
     /// 内部 Definition：声明输入端口、输出端口与真实子调用。
@@ -96,7 +80,6 @@ pub(crate) trait OrchCall<I: 'static + InputTypes, K: OutKind> {
 }
 
 /// 由声明端口构造输入 pack；数量或声明类型不匹配时在构建期拒绝。
-#[allow(dead_code)] // V21-06 接入完整 Flow／Root 驱动前，V21-05 的真实执行样本是唯一消费者
 pub(crate) trait PackFromPorts: 'static {
     /// 按声明输入端口构造 pack。
     fn from_ports(ports: &[DeclaredPort]) -> Result<Self, BuildError>
@@ -110,26 +93,19 @@ pub(crate) trait PackFromPorts: 'static {
     fn validate(&self, ctx: &ExecutionContext, child: &ScopeId) -> Result<(), ScopeError>;
 }
 
-/// 零输入 pack。
-#[allow(dead_code)] // V21-06 接入完整 Flow／Root 驱动前，V21-05 的真实执行样本是唯一消费者
-pub(crate) struct Targets0;
-
 /// 单输入 pack：只携带 child-local 位置元数据。
-#[allow(dead_code)] // V21-06 接入完整 Flow／Root 驱动前，V21-05 的真实执行样本是唯一消费者
-pub(crate) struct Targets1<A> {
+pub struct Targets1<A> {
     position: RefId,
     marker: PhantomData<fn() -> A>,
 }
 
 /// 双输入 pack：保留顺序与每项类型。
-#[allow(dead_code)] // V21-06 接入完整 Flow／Root 驱动前，V21-05 的真实执行样本是唯一消费者
-pub(crate) struct Targets2<A, B> {
+pub struct Targets2<A, B> {
     first: RefId,
     second: RefId,
     marker: PhantomData<fn() -> (A, B)>,
 }
 
-#[allow(dead_code)] // V21-06 接入完整 Flow／Root 驱动前，V21-05 的真实执行样本是唯一消费者
 impl<A: 'static> Targets1<A> {
     /// 只读访问第一个声明输入（类型由 Signature 固定，不猜类型）。
     pub(crate) fn first<'a>(
@@ -141,7 +117,6 @@ impl<A: 'static> Targets1<A> {
     }
 }
 
-#[allow(dead_code)] // V21-06 接入完整 Flow／Root 驱动前，V21-05 的真实执行样本是唯一消费者
 impl<A: 'static, B: 'static> Targets2<A, B> {
     /// 只读访问第一个声明输入。
     pub(crate) fn first<'a>(
@@ -153,29 +128,13 @@ impl<A: 'static, B: 'static> Targets2<A, B> {
     }
 
     /// 只读访问第二个声明输入；两个位置分别解析，重复 Ref 借用同样合法。
+    #[allow(dead_code)] // 仅由 cfg(test) 验收与观察路径使用（非 test 构建无消费者）
     pub(crate) fn second<'a>(
         &self,
         ctx: &'a ExecutionContext,
         child: &ScopeId,
     ) -> Result<&'a B, ScopeError> {
         ctx.resolve::<B>(child, &self.second)
-    }
-}
-
-impl PackFromPorts for Targets0 {
-    fn from_ports(ports: &[DeclaredPort]) -> Result<Self, BuildError> {
-        if ports.is_empty() {
-            Ok(Self)
-        } else {
-            Err(BuildError::InputCountMismatch {
-                expected: 0,
-                supplied: ports.len(),
-            })
-        }
-    }
-
-    fn validate(&self, _ctx: &ExecutionContext, _child: &ScopeId) -> Result<(), ScopeError> {
-        Ok(())
     }
 }
 
@@ -256,7 +215,6 @@ impl<A: 'static, B: 'static> PackFromPorts for Targets2<A, B> {
 }
 
 /// 编排体内的受控 Scope 视图：只暴露自身 Scope 的声明端口与真实子调用。
-#[allow(dead_code)] // V21-06 接入完整 Flow／Root 驱动前，V21-05 的真实执行样本是唯一消费者
 pub(crate) struct OrchScope<'a, P, K: OutKind> {
     ctx: &'a mut ExecutionContext,
     child: &'a ScopeId,
@@ -265,7 +223,6 @@ pub(crate) struct OrchScope<'a, P, K: OutKind> {
     marker: PhantomData<fn() -> K>,
 }
 
-#[allow(dead_code)] // 编排体视图由 V21-05 的真实执行样本驱动
 impl<'a, P, K: OutKind> OrchScope<'a, P, K> {
     /// 输入 pack（只携带位置元数据）。
     pub(crate) fn pack(&self) -> &P {
@@ -349,7 +306,7 @@ pub(crate) trait EachScopeTransfer<'a, Sh, O: 'static> {
 
 impl<'a, Sh, O> EachScopeTransfer<'a, Sh, O> for OrchScope<'a, Sh::Pack, Data<Vec<O>>>
 where
-    Sh: super::each::EachShape + 'static,
+    Sh: super::each::EachShapeSpec + 'static,
     O: 'static,
     <<Sh as super::each::EachShape>::Wrapper as super::flow::FlowInputs>::Handles:
         WireInputs + Clone,
@@ -360,7 +317,7 @@ where
     ) -> Result<super::each::EachSession<'a, Sh, O>, BodyError> {
         // 本次实际执行的 Definition 必须就是该 Each 自身；否则在 collector／Item／body 之前拒绝。
         if self.inner as *const Definition as *const ()
-            != each.definition() as *const Definition as *const ()
+            != each.raw_definition() as *const Definition as *const ()
         {
             return Err(BodyError::new(
                 "each session requires the running definition to be the each orchestrator",
@@ -398,7 +355,7 @@ pub(crate) trait LoopScopeTransfer<'a, Sh: super::loop_orchestrator::LoopShape> 
 
 impl<'a, Sh> LoopScopeTransfer<'a, Sh> for OrchScope<'a, Sh::Pack, Data<Sh::Value>>
 where
-    Sh: super::loop_orchestrator::LoopShape + 'static,
+    Sh: super::loop_orchestrator::LoopShapeSpec + 'static,
     Sh::I: InputTypes,
     <<Sh as super::loop_orchestrator::LoopShape>::Wrapper as super::flow::FlowInputs>::Handles:
         WireInputs + Clone,
@@ -409,7 +366,7 @@ where
     ) -> Result<super::loop_orchestrator::LoopSession<'a, Sh>, BodyError> {
         // 本次实际执行的 Definition 必须就是该 Loop 自身；否则在 state／Round／body 之前拒绝。
         if self.inner as *const Definition as *const ()
-            != orchestrator.definition() as *const Definition as *const ()
+            != orchestrator.raw_definition() as *const Definition as *const ()
         {
             return Err(BodyError::new(
                 "loop session requires the running definition to be the loop orchestrator",
@@ -429,7 +386,6 @@ where
 }
 
 /// 擦除后的 Orchestrator 调用点。
-#[allow(dead_code)] // V21-06 接入完整 Flow／Root 驱动前，V21-05 的真实执行样本是唯一消费者
 pub(crate) trait OrchestratorSite {
     /// 本次接线使用的 caller 输入位置。
     fn inputs(&self) -> &[RefId];
@@ -453,18 +409,17 @@ pub(crate) trait OrchestratorSite {
 }
 
 /// Orchestrator 调用点：保存调用对象、caller 位置与本编排体的输入 pack。
-#[allow(dead_code)] // V21-06 接入完整 Flow／Root 驱动前，V21-05 的真实执行样本是唯一消费者
 pub(crate) struct OrchSite<O, I, K> {
     orchestrator: O,
     caller_inputs: Vec<RefId>,
     caller_outputs: Vec<RefId>,
+    #[allow(dead_code)] // 仅由 cfg(test) 验收与观察路径使用（非 test 构建无消费者）
     role: ScopeRole,
     #[cfg(test)]
     pack_override: std::cell::RefCell<Option<Box<dyn Any>>>,
     marker: PhantomData<fn() -> (I, K)>,
 }
 
-#[allow(dead_code)] // V21-06 接入完整 Flow／Root 驱动前，V21-05 的真实执行样本是唯一消费者
 impl<O, I, K> OrchSite<O, I, K> {
     /// 构建调用点：caller 位置、声明输出位置与 Scope 角色已由接线器确定。
     pub(crate) fn new(
@@ -630,7 +585,6 @@ where
 /// - 本入口只做擦除后的 pack 防御校验，再按 `OrchCall::run` 运行编排体。
 ///
 /// `OrchScope` 字段保持模块私有：装配与借用只在这里发生，`runtime.rs` 不直接构造它。
-#[allow(dead_code)] // 非 test 构建的唯一消费者是 runtime::Runtime::execute
 pub(crate) async fn run_root_call<'a, O, I, K>(
     ctx: &'a mut ExecutionContext,
     root: &'a O,
@@ -660,7 +614,6 @@ where
 }
 
 /// 编排体运行：先做擦除后的防御校验，再在自身 Scope 中运行 body。
-#[allow(dead_code)] // V21-06 接入完整 Flow／Root 驱动前，V21-05 的真实执行样本是唯一消费者
 async fn run_orchestrator_body<O, I, K>(
     guard: &mut super::context::InvocationGuard<'_>,
     child: &ScopeId,
@@ -702,8 +655,68 @@ where
     site.orchestrator.run(scope).await
 }
 
+/// 嵌套 Export 的 cfg(test) 故障：只改操作前元数据，预检／提交仍走生产路径。
+///
+/// R11-12：目标按**完整 child ScopeId**选择。样本先把执行推进到目标边界已存在的
+/// Pending 现场，用 `boundary_creation_snapshot` 取得真实 `ScopeId` 后再安装；命中时
+/// 记录 child／caller 完整身份（`ExportFaultHit`），样本必须断言命中，未命中的注入
+/// 不能作为证据。
+#[cfg(test)]
+#[derive(Clone, Debug)]
+pub(crate) enum ExportFault {
+    /// 在整组 Export 预检之前，用正式 `register_owned` 预占指定 child 的 caller 第
+    /// `index` 个输出位置。
+    OccupyCallerSlot {
+        /// 目标 child Scope（完整身份）。
+        child: ScopeId,
+        /// 被预占的 caller 输出位置下标。
+        index: usize,
+    },
+    /// 把指定 child 即将 Export 的 CollectionItem 目标 cap 收紧为 child 自身 Scope：
+    /// 目的（caller）必然在 cap 之外 → 触发真实 Export 目的端检查。
+    TightenItemCap {
+        /// 目标 child Scope（完整身份）。
+        child: ScopeId,
+    },
+}
+
+#[cfg(test)]
+thread_local! {
+    static EXPORT_FAULT: std::cell::RefCell<Option<ExportFault>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// 安装一次嵌套 Export 故障（只生效一次；未消费前再次安装视为夹具错误）。
+#[cfg(test)]
+pub(crate) fn install_export_fault(fault: ExportFault) {
+    EXPORT_FAULT.with(|slot| {
+        let mut slot = slot.borrow_mut();
+        assert!(
+            slot.is_none(),
+            "a previous export fault was never consumed: {slot:?}"
+        );
+        *slot = Some(fault);
+    });
+}
+
+/// 取出当前 child 匹配的故障；只按完整 `ScopeId` 与槽位前提判断，不做角色／次数推断。
+#[cfg(test)]
+fn take_export_fault(child: &ScopeId, slot_count: usize) -> Option<ExportFault> {
+    EXPORT_FAULT.with(|slot| {
+        let mut borrowed = slot.borrow_mut();
+        let matched = match borrowed.as_ref() {
+            Some(ExportFault::OccupyCallerSlot {
+                child: target,
+                index,
+            }) => target == child && slot_count > *index,
+            Some(ExportFault::TightenItemCap { child: target }) => target == child,
+            None => false,
+        };
+        if matched { borrowed.take() } else { None }
+    })
+}
+
 /// 整组输出预检与提交：child-local 声明端口 → caller 输出位置。
-#[allow(dead_code)] // V21-06 接入完整 Flow／Root 驱动前，V21-05 的真实执行样本是唯一消费者
 fn export_orchestrator_outputs(
     guard: &mut super::context::InvocationGuard<'_>,
     child: &ScopeId,
@@ -711,6 +724,70 @@ fn export_orchestrator_outputs(
     caller_outputs: &[RefId],
 ) -> Result<(), BodyError> {
     let ports = inner.output_ports();
+    #[cfg(test)]
+    {
+        // R11-12：目标按**完整 child ScopeId**选择；命中后记录 child／caller 完整身份，
+        // 注入失败（未命中）由样本的 hit 断言捕获，不在这里静默跳过。
+        if let Some(fault) = take_export_fault(child, caller_outputs.len()) {
+            let caller = guard
+                .parent_scope_probe(child)
+                .expect("caller lookup for the export fault")
+                .expect("export child must have a caller");
+            match fault {
+                ExportFault::OccupyCallerSlot { index, .. } => {
+                    let position = caller_outputs
+                        .get(index)
+                        .expect("export fault caller slot index");
+                    let anchor_position =
+                        super::ref_id::RefIdAllocator::new(super::ref_id::RefIdSource::new())
+                            .allocate()
+                            .expect("fresh anchor position");
+                    let anchor = guard
+                        .register_owned(child, &anchor_position, 9u8)
+                        .expect("export fault anchor registration");
+                    guard.inject_scope_target_probe(
+                        &caller,
+                        position,
+                        super::scope::RefTarget::Data(anchor),
+                    );
+                    super::test_support::record_export_fault_hit(
+                        super::test_support::ExportFaultHit {
+                            kind: "occupy-caller-slot",
+                            child: child.clone(),
+                            caller,
+                            index: Some(index),
+                        },
+                    );
+                }
+                ExportFault::TightenItemCap { .. } => {
+                    // 把 child 中即将 Export 的 CollectionItem 目标 cap 收紧为 child 自身：
+                    // 目的（caller）在 cap 之外，必须由真实 Export 目的端检查拒绝。
+                    let (refs, _) = guard
+                        .snapshot_targets_probe(child)
+                        .expect("child refs for the cap fault");
+                    let mut tightened = false;
+                    for (position, target) in refs {
+                        if matches!(target, super::scope::TargetSnapshot::CollectionItem { .. }) {
+                            guard.replace_item_cap_probe(child, &position, child);
+                            tightened = true;
+                        }
+                    }
+                    assert!(
+                        tightened,
+                        "tighten-item-cap fault requires a bound CollectionItem in the child"
+                    );
+                    super::test_support::record_export_fault_hit(
+                        super::test_support::ExportFaultHit {
+                            kind: "tighten-item-cap",
+                            child: child.clone(),
+                            caller,
+                            index: None,
+                        },
+                    );
+                }
+            }
+        }
+    }
     if ports.len() != caller_outputs.len() {
         return Err(BodyError::new(
             "orchestrator output arity does not match the wiring signature",

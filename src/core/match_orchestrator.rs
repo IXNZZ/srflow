@@ -56,7 +56,7 @@ where
     K: OutKind,
     I::Pack: super::orchestrator::PackFor<I>,
 {
-    wrapper.definition() as *const Definition as *const ()
+    wrapper.raw_definition() as *const Definition as *const ()
 }
 
 /// branch 包装内部那一次真实调用的类别。
@@ -74,7 +74,7 @@ pub(crate) enum BranchStepKind {
 /// 一个可选路径的构建期配置：key（default 为 `None`）＋其包装 Definition 的声明输出端口。
 ///
 /// 声明端口在这里是**类型证据**：运行期用它核对 branch 的声明与 Match 共同端口一致。
-struct RegisteredBranch<R, A, K: OutKind> {
+struct RegisteredBranch<R, A, K> {
     key: Option<R>,
     wrapper: Flow<(A,), K>,
     /// 包装 Definition 的声明输出端口（登记时从真实包装捕获，完成时整组校验）。
@@ -94,6 +94,7 @@ struct Alternative<R> {
     /// 输入／输出类型完全相同、端口类型也相同，只要来源对象不同就会被拒绝。Unit 分支没有
     /// 输出端口，因此来源身份必须独立于端口列表。
     definition_identity: *const (),
+    #[allow(dead_code)] // 仅由 cfg(test) 验收与观察路径使用（非 test 构建无消费者）
     step_kind: BranchStepKind,
 }
 
@@ -102,9 +103,10 @@ struct Alternative<R> {
 /// 未完成的构建态既不能被执行，也不能作为 child 接线；只有 [`Self::finish`] 产出
 /// [`Match`] 之后才成立。
 #[allow(clippy::type_complexity)] // Marker 只编码 (R, A, K) 三个类型的零成本占位
-pub(crate) struct MatchBuilder<R, A, K: OutKind> {
+pub(crate) struct MatchBuilder<R, A, K> {
     definition: Definition,
     /// `R` 输入位置（路由）。
+    #[allow(dead_code)] // 仅由 cfg(test) 验收与观察路径使用（非 test 构建无消费者）
     route_position: RefId,
     /// `A` 输入位置（branch 业务输入）。
     input_position: RefId,
@@ -269,11 +271,6 @@ impl<R: 'static + Eq, A: 'static, K: OutKind> MatchBuilder<R, A, K> {
 
 #[cfg(test)]
 impl<R: 'static + Eq, A: 'static, K: OutKind> MatchBuilder<R, A, K> {
-    /// 构建态 Definition（只读）：M14 用它断言共同端口不进入 `declared()`／`steps()`。
-    pub(crate) fn definition_probe(&self) -> &Definition {
-        &self.definition
-    }
-
     /// 本次构建已分配的位置数量（失败不消耗序号）。
     pub(crate) fn allocated_probe(&self) -> u64 {
         self.definition.allocated_probe()
@@ -282,11 +279,6 @@ impl<R: 'static + Eq, A: 'static, K: OutKind> MatchBuilder<R, A, K> {
     /// 已登记条目数量。
     pub(crate) fn registered_probe(&self) -> usize {
         self.registered.len()
-    }
-
-    /// 已登记 default 的下标。
-    pub(crate) fn default_probe(&self) -> Option<usize> {
-        self.default_index
     }
 
     /// 测试构造：登记一个**已经完成**的包装 Flow（M10 的合法双输出 imported alias 组合）。
@@ -353,8 +345,10 @@ impl<R: 'static + Eq, A: 'static, K: OutKind> MatchBuilder<R, A, K> {
 }
 
 /// 完成态 Match：不可变 Declaration + 私有登记表；不缓存任何运行态身份或业务状态。
+///
+/// 可作为 Root 或 child 使用；`Clone` 只共享不可变定义，不复制业务 Data。
 #[allow(clippy::type_complexity)] // Marker 只编码 (R, A, K) 三个类型的零成本占位
-pub(crate) struct Match<R, A, K: OutKind> {
+pub struct Match<R, A, K> {
     /// 不可变定义：**同时持有自己的私有可选路径登记表**（`Definition::alternatives`）。
     ///
     /// 受控选择入口只从这张表按索引取调用点，因此不需要、也不允许把另一张表传进执行面。
@@ -365,7 +359,7 @@ pub(crate) struct Match<R, A, K: OutKind> {
     marker: PhantomData<fn() -> (R, A, K)>,
 }
 
-impl<R, A, K: OutKind> std::fmt::Debug for Match<R, A, K> {
+impl<R, A, K> std::fmt::Debug for Match<R, A, K> {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         // 只报告定义规模：完成态不携带业务值，也不要求 `R`／`A` 实现 `Debug`。
         formatter
@@ -377,7 +371,7 @@ impl<R, A, K: OutKind> std::fmt::Debug for Match<R, A, K> {
     }
 }
 
-impl<R, A, K: OutKind> Clone for Match<R, A, K> {
+impl<R, A, K> Clone for Match<R, A, K> {
     fn clone(&self) -> Self {
         // 只共享不可变定义（含登记表）：不复制业务 Data，也不要求 R／A／O Clone。
         Self {
@@ -390,7 +384,7 @@ impl<R, A, K: OutKind> Clone for Match<R, A, K> {
 }
 
 #[cfg(test)]
-impl<R, A, K: OutKind> Match<R, A, K> {
+impl<R, A, K> Match<R, A, K> {
     /// 已登记的 alternative 调用点（M15 用于构造"外来／错误元数据"注入样本）。
     pub(crate) fn sites_probe(&self) -> &[CallSite] {
         self.definition.alternatives()
@@ -443,11 +437,6 @@ impl<R, A, K: OutKind> Match<R, A, K> {
     /// 登记条目数量。
     pub(crate) fn registered_probe(&self) -> usize {
         self.entries.len()
-    }
-
-    /// 某个替代的类型证据端口（M15 对照用）。
-    pub(crate) fn ports_probe(&self, index: usize) -> &[DeclaredPort] {
-        &self.entries[index].ports
     }
 
     /// 各替代包装内部的真实调用类别（M03 对照用）。
@@ -521,7 +510,7 @@ where
     }
 }
 
-impl<R: 'static + Eq, A: 'static, K: OutKind> Match<R, A, K> {
+impl<R: 'static + Eq, A: 'static, K> Match<R, A, K> {
     /// key 等值查找：命中唯一登记条目；未命中时回退到 default（若有）。
     ///
     /// 比较按共享借用进行：不复制 key、不要求 `R: Clone`／`Hash`，也不触碰路由 Data 的持有者。
@@ -540,7 +529,10 @@ impl<R: 'static + Eq, A: 'static, K: OutKind> Match<R, A, K> {
     ///
     /// 返回前按 `cfg(test)` 只读记录本 MatchScope 在**真实失败时刻**的绑定与责任快照，
     /// 供"没有自行生成输出"的证据使用；记录不改变清理顺序，也不恢复调用。
-    fn report_unmatched(&self, scope: &OrchScope<'_, Targets2<R, A>, K>) -> BodyError {
+    fn report_unmatched(&self, scope: &OrchScope<'_, Targets2<R, A>, K>) -> BodyError
+    where
+        K: OutKind,
+    {
         #[cfg(test)]
         {
             if let Ok((refs, owned)) = scope.ctx_probe().snapshot_probe(scope.child()) {
@@ -561,7 +553,10 @@ impl<R: 'static + Eq, A: 'static, K: OutKind> Match<R, A, K> {
         &self,
         scope: &OrchScope<'_, Targets2<R, A>, K>,
         index: usize,
-    ) -> Result<(), BodyError> {
+    ) -> Result<(), BodyError>
+    where
+        K: OutKind,
+    {
         let violated = |violated: &'static str| BodyError::from(ScopeError::Invariant { violated });
         let Some(entry) = self.entries.get(index) else {
             return Err(violated("registered alternative index is out of range"));

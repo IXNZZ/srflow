@@ -57,7 +57,6 @@ impl RootExecution {
 #[cfg(test)]
 #[derive(Debug)]
 pub(crate) struct RootExit {
-    #[allow(dead_code)]
     body_error: Option<BodyError>,
     termination: Option<ExecutionTermination>,
     close_error: Option<ScopeError>,
@@ -69,7 +68,6 @@ pub(crate) struct RootExit {
 #[cfg(test)]
 impl RootExit {
     /// 执行体的原始失败（含说明与可选 Scope 诊断）。
-    #[allow(dead_code)] // V21-10 接入真实 Runtime::execute 与公开结果记录前只由内部驱动与测试使用
     pub(crate) fn body_error(&self) -> Option<&BodyError> {
         self.body_error.as_ref()
     }
@@ -209,7 +207,6 @@ pub(crate) enum RootErrorStage {
 /// `RefId`／`DataId`），body 错误另保留 [`BodyError`] 的说明；清理失败单独记录，不覆盖首次
 /// 失败。外围通用文本不会替换这些字段。
 #[derive(Debug)]
-#[allow(dead_code)] // 诊断字段供结果记录与断言引用；公开错误 API 在 V21-12 收口
 pub(crate) struct RootError {
     stage: RootErrorStage,
     note: &'static str,
@@ -217,12 +214,12 @@ pub(crate) struct RootError {
     scope: Option<ScopeError>,
     termination: Option<TerminationKind>,
     termination_scope: Option<ScopeId>,
+    termination_note: Option<&'static str>,
     close: Option<ScopeError>,
     cleanup: Option<CleanupDiagnostic>,
     registered_inputs: usize,
 }
 
-#[allow(dead_code)] // 同上
 impl RootError {
     fn signature(build: BuildError) -> Self {
         Self {
@@ -232,6 +229,7 @@ impl RootError {
             scope: None,
             termination: None,
             termination_scope: None,
+            termination_note: None,
             close: None,
             cleanup: None,
             registered_inputs: 0,
@@ -246,6 +244,7 @@ impl RootError {
             scope: Some(scope),
             termination: None,
             termination_scope: None,
+            termination_note: None,
             close: None,
             cleanup: None,
             registered_inputs,
@@ -273,13 +272,20 @@ impl RootError {
     }
 
     /// 首次终止类别（body／取消）。
+    #[allow(dead_code)] // 仅由 cfg(test) 验收与观察路径使用（非 test 构建无消费者）
     pub(crate) fn termination(&self) -> Option<TerminationKind> {
         self.termination
     }
 
     /// 首次终止的定位 Scope（最深实际调用位置）。
+    #[allow(dead_code)] // 仅由 cfg(test) 验收与观察路径使用（非 test 构建无消费者）
     pub(crate) fn termination_scope(&self) -> Option<&ScopeId> {
         self.termination_scope.as_ref()
+    }
+
+    /// 首次终止时**实际保存**的说明（从真实 `termination_report` 回读）。
+    pub(crate) fn termination_note(&self) -> Option<&'static str> {
+        self.termination_note
     }
 
     /// 关闭阶段的诊断（如有）。
@@ -305,10 +311,8 @@ impl RootError {
 /// 可以执行多次，每次独立身份空间。Root 对象只被不可变借用（`&O`），Future 拥有本次
 /// `RootExecution`；未被 poll 时尚未开始执行，输入随 Future 一同销毁。
 #[derive(Debug)]
-#[allow(dead_code)] // V21-12 公开入口收口前，非 test 构建的唯一消费者是 V21-10 验收样本
 pub(crate) struct Runtime;
 
-#[allow(dead_code)] // V21-12 公开入口收口前，非 test 构建的唯一消费者是 V21-10 验收样本
 impl Runtime {
     /// 执行一个完成态 Root Orchestrator，成功时把声明输出全部移交 Application。
     ///
@@ -451,6 +455,7 @@ where
                                     scope: None,
                                     termination: Some(TerminationKind::BodyError),
                                     termination_scope: None,
+                                    termination_note: None,
                                     close: Some(close_error),
                                     cleanup: None,
                                     registered_inputs: 0,
@@ -476,6 +481,7 @@ where
                             scope: Some(scope),
                             termination: Some(TerminationKind::BodyError),
                             termination_scope: None,
+                            termination_note: None,
                             close: None,
                             cleanup: None,
                             registered_inputs: 0,
@@ -492,6 +498,7 @@ where
                     scope: None,
                     termination: Some(TerminationKind::BodyError),
                     termination_scope: None,
+                    termination_note: None,
                     close: None,
                     cleanup: None,
                     registered_inputs: 0,
@@ -505,6 +512,7 @@ where
                     build: None,
                     scope: body_error.scope_error().cloned(),
                     termination: Some(TerminationKind::BodyError),
+                    termination_note: None,
                     termination_scope: None,
                     close: None,
                     cleanup: None,
@@ -525,6 +533,25 @@ where
                 0,
                 &[],
             );
+            #[cfg(test)]
+            if super::test_support::take_post_terminate_probe() {
+                // L19：终止（含失败清理）之后，业务入口与普通 commit 必须被拒绝；
+                // 受控清理入口仍可用（返回真实清理诊断，而不是 Terminated）。
+                let fresh = super::ref_id::RefIdAllocator::new(super::ref_id::RefIdSource::new())
+                    .allocate()
+                    .expect("probe position");
+                let business = execution
+                    .context
+                    .register_owned::<u8>(&root_scope, &fresh, 7u8);
+                super::test_support::record(&format!("post-fail-business:{business:?}"));
+                let commit = execution
+                    .context
+                    .finalize(&root_scope, &[], &mut Vec::new())
+                    .map_err(|error| format!("{error:?}"));
+                super::test_support::record(&format!("post-fail-commit:{commit:?}"));
+                let cleanup = execution.context.abort(&root_scope);
+                super::test_support::record(&format!("post-fail-cleanup:{cleanup:?}"));
+            }
             // 首次失败与清理诊断分别保存，互不覆盖。
             error.cleanup = execution.context.cleanup_report();
             if let Some(termination) = execution.context.termination_report() {
@@ -533,6 +560,9 @@ where
                 }
                 if error.termination_scope.is_none() {
                     error.termination_scope = termination.scope().cloned();
+                }
+                if error.termination_note.is_none() {
+                    error.termination_note = Some(termination.note());
                 }
             }
             Err(error)
@@ -608,7 +638,7 @@ fn apply_root_post_body_fault(
         }
         RootFault::InjectOutputTarget { index, target } => {
             if let Some(port) = ports.get(index) {
-                ctx.inject_root_target_probe(root, port.position(), target);
+                ctx.inject_scope_target_probe(root, port.position(), target);
             }
         }
         RootFault::RetargetOutputFromInput { index, input } => {
@@ -629,14 +659,14 @@ fn apply_root_post_body_fault(
                     super::scope::TargetSnapshot::Data(id) => super::scope::RefTarget::Data(id),
                     _ => return,
                 };
-                ctx.inject_root_target_probe(root, port.position(), target);
+                ctx.inject_scope_target_probe(root, port.position(), target);
             }
         }
         _ => {}
     }
 }
 
-/// 记录一个 Root 提取观察点（只读元数据）。
+/// 记录一个 Root 提取观察点（严格路径：失败只登记错误、不落默认值快照）。
 #[cfg(test)]
 fn record_root_snapshot(
     ctx: &ExecutionContext,
@@ -645,11 +675,5 @@ fn record_root_snapshot(
     planned_takes: usize,
     taken: &[super::identity::DataId],
 ) {
-    super::test_support::record_root_snapshot(super::test_support::root_snapshot(
-        ctx,
-        root,
-        phase,
-        planned_takes,
-        taken,
-    ));
+    super::test_support::record_strict_root_snapshot(ctx, root, phase, planned_takes, taken);
 }

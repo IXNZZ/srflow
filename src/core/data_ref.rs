@@ -15,7 +15,12 @@ use std::marker::PhantomData;
 use super::ref_id::RefId;
 
 /// Definition 中一个逻辑数据位置的强类型引用。
-pub(crate) struct DataRef<T> {
+///
+/// `DataRef<T>` 不保存本次 Execution 的真实值、`DataId`／`ScopeId` 绑定或业务 `T`：
+/// 复制句柄（`Clone`）既不要求 `T: Clone`，也不复制业务 Data。构造受控：业务侧无法
+/// 凭空造出位置，只能在 Definition 构建期通过声明输入或接线输出位置取得（见
+/// [`FlowBuilder`](crate::FlowBuilder) 等构建器）。
+pub struct DataRef<T> {
     position: RefId,
     marker: PhantomData<fn() -> T>,
 }

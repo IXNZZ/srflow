@@ -24,23 +24,27 @@ use std::sync::Arc;
 
 use super::builder::{BuildSite, Definition, IntoCallSite, TypedCallBuilder};
 use super::data_ref::DataRef;
-use super::orchestrator::{OrchCall, OrchScope, PackFor, PackFromPorts, Targets1, Targets2};
+use super::orchestrator::{OrchCall, OrchScope, PackFor, Targets1, Targets2};
 use super::signature::{
     BuildError, Data, DeclaredPort, InputTypes, NodeFut, Out2, OutKind, Unit, WireInputs, Wiring,
 };
 
-#[allow(dead_code)]
 // V21-06 交付的内部能力：当前消费者是 V21-06 验收样本；公开入口由 V21-10 接续
 /// Flow 输入 Signature：单／双非空位置。
 ///
-/// `Pack` 与该 Signature 绑定（[`PackFor`]），因此一个 `Flow` 用作 child 时，调用边界的
-/// 输入 pack 与声明输入类型在**编译期**就一致；`Handles` 是构建方拿到的位置句柄。
-pub(crate) trait FlowInputs: 'static {
-    /// 与输入 Signature 绑定的 pack 类型。
-    type Pack: PackFromPorts;
+/// `Handles` 是构建方拿到的位置句柄（`DataRef<A>` 或两个位置的 tuple）；`Pack` 是与此
+/// Signature 绑定的内部输入 pack 类型（接线协议使用，调用方无需命名）。
+pub trait FlowInputs: 'static {
+    /// 与输入 Signature 绑定的 pack 类型（内部接线协议使用）。
+    type Pack;
     /// 构建方拿到的输入位置句柄。
     type Handles;
+}
 
+/// 内部：在给定 Definition 上声明本形状的全部输入位置。
+///
+/// 只在 crate 内由构建器调用；公开使用者不实现本 trait。
+pub(crate) trait FlowInputsDeclare: FlowInputs {
     /// 在给定 Definition 上声明本形状的全部输入位置。
     fn declare(definition: &mut Definition) -> Result<Self::Handles, BuildError>;
 }
@@ -48,7 +52,9 @@ pub(crate) trait FlowInputs: 'static {
 impl<A: 'static> FlowInputs for (A,) {
     type Pack = Targets1<A>;
     type Handles = DataRef<A>;
+}
 
+impl<A: 'static> FlowInputsDeclare for (A,) {
     fn declare(definition: &mut Definition) -> Result<Self::Handles, BuildError> {
         definition.declare_input::<A>("input")
     }
@@ -57,7 +63,9 @@ impl<A: 'static> FlowInputs for (A,) {
 impl<A: 'static, B: 'static> FlowInputs for (A, B) {
     type Pack = Targets2<A, B>;
     type Handles = (DataRef<A>, DataRef<B>);
+}
 
+impl<A: 'static, B: 'static> FlowInputsDeclare for (A, B) {
     fn declare(definition: &mut Definition) -> Result<Self::Handles, BuildError> {
         Ok((
             definition.declare_input::<A>("input")?,
@@ -66,7 +74,6 @@ impl<A: 'static, B: 'static> FlowInputs for (A, B) {
     }
 }
 
-#[allow(dead_code)] // V21-06 交付的内部能力：当前消费者是 V21-06 验收样本
 /// 完成操作的 typed 输出选择 → 输出分类。
 ///
 /// 加入此处空实现之外的 None 不能成立：三种选择各自只有一个实现，`K` 由选择类型唯一确定，
@@ -98,7 +105,6 @@ impl<O1: 'static, O2: 'static> FlowOutput<Out2<O1, O2>> for (DataRef<O1>, DataRe
     }
 }
 
-#[allow(dead_code)] // V21-06 交付的内部能力：当前消费者是 V21-06 验收样本
 /// Flow 构建态：声明输入、按顺序追加 Step，但**不实现** Orchestrator 协议。
 ///
 /// 未完成的 Builder 既不能被执行，也不能作为 child 接入 `then`；只有 [`Self::finish`]
@@ -108,10 +114,12 @@ pub(crate) struct FlowBuilder<I: FlowInputs> {
     marker: PhantomData<fn() -> I>,
 }
 
-#[allow(dead_code)] // V21-06 交付的内部能力：当前消费者是 V21-06 验收样本
 impl<I: FlowInputs> FlowBuilder<I> {
     /// 建立 Flow：声明本形状的输入位置，并返回构建方使用的句柄。
-    pub(crate) fn start() -> Result<(Self, I::Handles), BuildError> {
+    pub(crate) fn start() -> Result<(Self, I::Handles), BuildError>
+    where
+        I: FlowInputsDeclare,
+    {
         let mut definition = Definition::new();
         let handles = I::declare(&mut definition)?;
         Ok((
@@ -178,12 +186,11 @@ impl<I: FlowInputs> TypedCallBuilder for FlowBuilder<I> {
     }
 }
 
-#[allow(dead_code)] // V21-06 交付的内部能力：子 Flow 复用与 Root 驱动由后续任务接入
-/// 完成态 Flow：封装已验证、不可变的 Definition，实现 Orchestrator 协议。
+/// 完成态 Flow：封装已验证、不可变的 Definition，可作为 Root 或 child 使用。
 ///
 /// 不保存任何某次 Execution 的 ScopeId／DataId／输入借用／Prepared 输出／可变业务状态
-/// 或 Context；`Clone` 只复制定义句柄（共享同一个 `Arc<Definition>`），不复制业务 Data。
-pub(crate) struct Flow<I, K> {
+/// 或 Context；`Clone` 只复制定义句柄（共享同一个不可变定义），不复制业务 Data。
+pub struct Flow<I, K> {
     definition: Arc<Definition>,
     marker: PhantomData<fn() -> (I, K)>,
 }
@@ -205,6 +212,13 @@ impl<I, K> Clone for Flow<I, K> {
             definition: Arc::clone(&self.definition),
             marker: PhantomData,
         }
+    }
+}
+
+impl<I, K> Flow<I, K> {
+    /// 本定义的只读 Definition（不要求 `OrchCall` 前置；crate 内部使用）。
+    pub(crate) fn raw_definition(&self) -> &Definition {
+        &self.definition
     }
 }
 

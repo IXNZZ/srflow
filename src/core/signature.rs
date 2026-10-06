@@ -26,7 +26,10 @@ use super::ref_id::{RefId, RefIdAllocator};
 
 /// 已接线调用返回的 boxed Future：生命周期绑定当前调用（Context／Node／输入借用），
 /// 不要求 `Send`，也不强求输入借用是 `'static`。
-pub(crate) type NodeFut<'a, O> = Pin<Box<dyn Future<Output = Result<O, BodyError>> + 'a>>;
+///
+/// 结构体 Node 与 `Arc<具体 Node>` 的协议方法返回本类型；实现方通常写作
+/// `NodeFut<'a, K::Output>`（见 [`super::node::NodeCall1::call`]）。
+pub type NodeFut<'a, O> = Pin<Box<dyn Future<Output = Result<O, BodyError>> + 'a>>;
 
 /// 一个已声明位置的元数据：位置、声明类型与诊断用类型名。
 #[derive(Debug, Clone)]
@@ -36,7 +39,6 @@ pub(crate) struct DeclaredPort {
     expected_name: &'static str,
 }
 
-#[allow(dead_code)] // 声明元数据由 Definition 构建期记录，V21-05 的驱动按位置使用
 impl DeclaredPort {
     /// 以 `T` 声明位置的类型。
     pub(crate) fn new<T: 'static>(position: RefId) -> Self {
@@ -76,14 +78,20 @@ impl DeclaredPort {
     }
 }
 
-/// 输出分类：决定声明端口数量、`then` 的返回形态与登记方式。
-#[allow(dead_code)] // V21-06 接入完整 Flow／Root 驱动前，V21-05 的真实执行样本是唯一消费者
-pub(crate) trait OutKind: 'static {
-    /// 业务执行体返回的价值类型（`Unit` 为 `()`）。
+/// 公开输出分类：[`Data`]／[`Unit`]／[`Out2`] 三者的公共语义只有"业务值类型"。
+///
+/// 内部构建与运行还需要端口数量、位置槽与登记行为，由 crate 内部的 `OutKind`
+/// 扩展 trait 承担；本 trait 只出现在 `NodeCall*` 等必须由调用者书写的 bound 中，
+/// 不向调用者暴露内部位置。
+pub trait OutputKind: 'static {
+    /// 业务执行体返回的价值类型（`Unit` 与 `Out2` 为 `()`）。
     type Output: 'static;
-
-    /// `then` 的构建输出（调用方看到的形态）。
+    /// 接线构建输出（调用方在 `then` 处看到的形态：`DataRef<O>`／`()`／两个位置）。
     type BuildOutput;
+}
+
+/// 内部输出分类：在 [`OutputKind`] 之上给出声明端口数量、位置槽与登记行为。
+pub(crate) trait OutKind: 'static + OutputKind {
     /// 整组分配得到的类型化位置槽。
     type Slots;
 
@@ -104,14 +112,11 @@ pub(crate) trait OutKind: 'static {
 }
 
 /// 一份 owned 业务 Data 输出。
-#[allow(dead_code)] // V21-06 接入完整 Flow／Root 驱动前，V21-05 的真实执行样本是唯一消费者
-pub(crate) struct Data<O>(PhantomData<fn() -> O>);
+pub struct Data<O>(PhantomData<fn() -> O>);
 /// 显式无业务输出的 Signature。
-#[allow(dead_code)] // V21-06 接入完整 Flow／Root 驱动前，V21-05 的真实执行样本是唯一消费者
-pub(crate) struct Unit;
+pub struct Unit;
 /// Orchestrator 的两个异构输出位置。
-#[allow(dead_code)] // V21-06 接入完整 Flow／Root 驱动前，V21-05 的真实执行样本是唯一消费者
-pub(crate) struct Out2<O1, O2>(PhantomData<fn() -> (O1, O2)>);
+pub struct Out2<O1, O2>(PhantomData<fn() -> (O1, O2)>);
 
 /// 0／1／2 个位置的类型化槽。
 #[derive(Debug)]
@@ -121,9 +126,12 @@ pub(crate) struct Slots1(RefId);
 #[derive(Debug)]
 pub(crate) struct Slots2(RefId, RefId);
 
-impl<O: 'static> OutKind for Data<O> {
+impl<O: 'static> OutputKind for Data<O> {
     type Output = O;
     type BuildOutput = DataRef<O>;
+}
+
+impl<O: 'static> OutKind for Data<O> {
     type Slots = Slots1;
     const DECLARED: usize = 1;
 
@@ -145,9 +153,12 @@ impl<O: 'static> OutKind for Data<O> {
     }
 }
 
-impl OutKind for Unit {
+impl OutputKind for Unit {
     type Output = ();
     type BuildOutput = ();
+}
+
+impl OutKind for Unit {
     type Slots = Slots0;
     const DECLARED: usize = 0;
 
@@ -166,9 +177,12 @@ impl OutKind for Unit {
     fn assemble(_slots: Self::Slots) -> Self::BuildOutput {}
 }
 
-impl<O1: 'static, O2: 'static> OutKind for Out2<O1, O2> {
+impl<O1: 'static, O2: 'static> OutputKind for Out2<O1, O2> {
     type Output = ();
     type BuildOutput = (DataRef<O1>, DataRef<O2>);
+}
+
+impl<O1: 'static, O2: 'static> OutKind for Out2<O1, O2> {
     type Slots = Slots2;
     const DECLARED: usize = 2;
 
@@ -199,26 +213,20 @@ impl<O1: 'static, O2: 'static> OutKind for Out2<O1, O2> {
 }
 
 /// 接线 Marker：普通同步函数 item。
-#[allow(dead_code)] // V21-06 接入完整 Flow／Root 驱动前，V21-05 的真实执行样本是唯一消费者
-pub(crate) struct SyncFnSig<I, K>(PhantomData<fn() -> (I, K)>);
+pub struct SyncFnSig<I, K>(PhantomData<fn() -> (I, K)>);
 /// 接线 Marker：普通异步函数 item。
-#[allow(dead_code)] // V21-06 接入完整 Flow／Root 驱动前，V21-05 的真实执行样本是唯一消费者
-pub(crate) struct AsyncFnSig<I, K>(PhantomData<fn() -> (I, K)>);
+pub struct AsyncFnSig<I, K>(PhantomData<fn() -> (I, K)>);
 /// 接线 Marker：按值持有的具体结构体 Node。
-#[allow(dead_code)] // V21-06 接入完整 Flow／Root 驱动前，V21-05 的真实执行样本是唯一消费者
-pub(crate) struct NodeSig<I, K>(PhantomData<fn() -> (I, K)>);
+pub struct NodeSig<I, K>(PhantomData<fn() -> (I, K)>);
 /// 接线 Marker：`Arc<具体 Node>` 句柄。
-#[allow(dead_code)] // V21-06 接入完整 Flow／Root 驱动前，V21-05 的真实执行样本是唯一消费者
-pub(crate) struct ArcNodeSig<I, K>(PhantomData<fn() -> (I, K)>);
+pub struct ArcNodeSig<I, K>(PhantomData<fn() -> (I, K)>);
 /// 接线 Marker：Orchestrator。
-#[allow(dead_code)] // V21-06 接入完整 Flow／Root 驱动前，V21-05 的真实执行样本是唯一消费者
-pub(crate) struct OrchSig<I, K>(PhantomData<fn() -> (I, K)>);
+pub struct OrchSig<I, K>(PhantomData<fn() -> (I, K)>);
 
 /// Marker → 输出槽、构建输出与声明端口。
 ///
 /// 每种 Marker 家族只有一份实现，全部委托给输出分类 [`OutKind`]；Marker 只负责分类，
 /// 不参与运行时执行。
-#[allow(dead_code)] // V21-06 接入完整 Flow／Root 驱动前，V21-05 的真实执行样本是唯一消费者
 pub(crate) trait Wiring: 'static {
     type Slots;
     type BuildOutput;
@@ -287,10 +295,8 @@ wiring_for_marker!(OrchSig, false, true);
 
 /// 正式输入 Signature 的类型清单：把 Orchestrator 的 `I` 与内部声明输入逐项可比。
 ///
-/// 它使 `then` 能在输出分配与 Step 追加之前核对"接线 Signature ↔ 内部 Definition 声明"
-/// 两者一致，并把不一致报成 [`BuildError::SignatureMismatch`]（含输入序号），而不是拖到
-/// 执行期 Import 才失败。
-pub(crate) trait InputTypes {
+/// 消费者一般不需要实现本 trait：`()`、`(A,)`、`(A, B)` 由本 crate 提供实现。
+pub trait InputTypes {
     /// 每个输入位置的类型名与 `TypeId`（按声明顺序）。
     fn input_types() -> Vec<(&'static str, TypeId)>;
 }
@@ -320,7 +326,6 @@ impl<A: 'static, B: 'static> InputTypes for (A, B) {
 ///
 /// 一个业务 tuple Data 的 `DataRef<(A, B)>` 与两个独立位置的
 /// `(DataRef<A>, DataRef<B>)` 是不同形态，不会被自动拆分或合并。
-#[allow(dead_code)] // V21-06 接入完整 Flow／Root 驱动前，V21-05 的真实执行样本是唯一消费者
 pub(crate) trait WireInputs {
     /// 本次接线使用的逻辑输入位置（按书写顺序）。
     fn positions(&self) -> Vec<&RefId>;
@@ -348,7 +353,6 @@ impl<A, B> WireInputs for (DataRef<A>, DataRef<B>) {
 ///
 /// 这不是公开错误 API；执行期错误另由 [`BodyError`] 表达。
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[allow(dead_code)] // V21-06 接入完整 Flow／Root 驱动前，V21-05 的真实执行样本是唯一消费者
 pub(crate) enum BuildError {
     /// 普通函数 item 的输出类型为 `()`：本次支持范围只允许产生 Data。
     ///

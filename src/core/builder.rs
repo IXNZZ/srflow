@@ -29,7 +29,6 @@ use super::signature::{
 };
 
 /// 一个已接线的调用点。
-#[allow(dead_code)] // V21-06 接入完整 Flow／Root 驱动前，V21-05 的真实执行样本是唯一消费者
 pub(crate) enum CallSite {
     /// 业务叶子：Node 协议或函数适配器，经叶子 site 执行。
     Node(Box<dyn NodeSite>),
@@ -53,7 +52,6 @@ impl Step {
 ///
 /// 实现分布在各调用对象类别上（函数 item、具体结构体／`Arc` Node、Orchestrator）；
 /// 业务侧不实现本 trait，也不接触 `CallSite`。
-#[allow(dead_code)] // V21-06 接入完整 Flow／Root 驱动前，V21-05 的真实执行样本是唯一消费者
 pub(crate) trait BuildSite<M, A0>: IntoCallSite<M, A0> {
     /// 追加 Step 前的额外预检（例如 Orchestrator 内部 Definition 的声明输入）。
     fn precheck(&self, _definition: &Definition, _args: &A0) -> Result<(), BuildError> {
@@ -67,15 +65,13 @@ pub(crate) trait BuildSite<M, A0>: IntoCallSite<M, A0> {
 /// 强类型接线：Marker `M` 决定参数形态与构建输出。
 ///
 /// `BuildOutput` 与 [`Wiring::BuildOutput`] 相等，使 `then` 能在不暴露输出分类的前提下
-/// 返回 `DataRef<O>`／`()`／两个位置的 tuple。
-#[allow(dead_code)] // V21-06 接入完整 Flow／Root 驱动前，V21-05 的真实执行样本是唯一消费者
-pub(crate) trait IntoCallSite<M, A0> {
+/// 返回 `DataRef<O>`／`()`／两个位置的 tuple。消费者不实现本 trait，只在泛型位置使用。
+pub trait IntoCallSite<M, A0> {
     /// 本次调用的构建输出。
     type BuildOutput;
 }
 
 /// 接线入口。
-#[allow(dead_code)] // V21-06 接入完整 Flow／Root 驱动前，V21-05 的真实执行样本是唯一消费者
 pub(crate) trait TypedCallBuilder {
     /// 追加一个调用点：参数形态与输出形态由编译期类型检查，构建期拒绝另行报告。
     fn then<C, M, A0>(&mut self, callable: C, args: A0) -> Result<C::BuildOutput, BuildError>
@@ -87,7 +83,6 @@ pub(crate) trait TypedCallBuilder {
 }
 
 /// 一个 Definition 的构建状态与执行元数据。
-#[allow(dead_code)] // V21-06 接入完整 Flow／Root 驱动前，V21-05 的真实执行样本是唯一消费者
 pub(crate) struct Definition {
     source: Arc<RefIdSource>,
     allocator: RefIdAllocator,
@@ -102,7 +97,6 @@ pub(crate) struct Definition {
     alternatives: Vec<CallSite>,
 }
 
-#[allow(dead_code)] // V21-06 接入完整 Flow／Root 驱动前，V21-05 的真实执行样本是唯一消费者
 impl Definition {
     /// 测试构造：以指定来源建立 Definition（用于验证 checked 整组分配耗尽）。
     #[cfg(test)]
@@ -160,6 +154,7 @@ impl Definition {
     ///
     /// 用于两情形：编排体的输出来自某个真实子调用的输出位置，或重新暴露一个完整
     /// imported Data（端口位置即声明输入位置）。位置必须属于本 Definition 的来源。
+    #[allow(dead_code)] // 仅由 cfg(test) 验收与观察路径使用（非 test 构建无消费者）
     pub(crate) fn declare_output_port_for<T: 'static>(
         &mut self,
         position: &DataRef<T>,
@@ -194,6 +189,7 @@ impl Definition {
     }
 
     /// 合法接线来源：已声明输入与此前 Step 的输出（按声明顺序）。
+    #[allow(dead_code)] // 仅由 cfg(test) 验收与观察路径使用（非 test 构建无消费者）
     pub(crate) fn declared(&self) -> Vec<&DeclaredPort> {
         self.inputs.iter().chain(self.produced.iter()).collect()
     }
@@ -352,7 +348,6 @@ impl Default for Definition {
     }
 }
 
-#[allow(dead_code)] // V21-06 接入完整 Flow／Root 驱动前，V21-05 的真实执行样本是唯一消费者
 impl TypedCallBuilder for Definition {
     fn then<C, M, A0>(&mut self, callable: C, args: A0) -> Result<C::BuildOutput, BuildError>
     where
@@ -394,7 +389,6 @@ impl TypedCallBuilder for Definition {
 }
 
 /// 顺序驱动一个 Definition 的全部 Step（最小 adapter 集成驱动，不是完整 Flow 执行器）。
-#[allow(dead_code)] // V21-06 接入完整 Flow／Root 驱动前，V21-05 的真实执行样本是唯一消费者
 pub(crate) async fn run_definition(
     ctx: &mut ExecutionContext,
     definition: &Definition,
@@ -451,7 +445,6 @@ async fn definition_root_body(
 ///
 /// 输入类型由输入 pack（[`PackFromPorts`]）按声明类型还原时核对，因此这里核对数量、
 /// pack 构造与输出端口分类；caller 位置的归属与声明由 `then` 的第 1 步负责。
-#[allow(dead_code)] // V21-06 接入完整 Flow／Root 驱动前，V21-05 的真实执行样本是唯一消费者
 fn check_orchestrator_inputs<O, I, K>(
     orchestrator: &O,
     positions: &[&RefId],

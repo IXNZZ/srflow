@@ -6,7 +6,8 @@
 //! 单独定义：
 //!
 //! - [`RootInputs<I>`]：把 `Runtime::execute` 收到的 owned 输入按 Signature 顺序交给登记
-//!   边界（擦除值 + 真实类型名），`I` 的外层 tuple 不额外分配 DataId；
+//!   边界（擦除值 + 真实类型名）；单输入在公开入口直接传值，双输入传 pair，内部统一
+//!   适配成按 Signature 排列的 tuple，tuple 包装本身不额外分配 DataId；
 //! - [`RootOutputs<K>`]：按 `K` 给出 owned 结果类型与提取次数，并把已按声明顺序 take 的
 //!   擦除值组装成 Application 结果。
 //!
@@ -15,17 +16,21 @@
 
 use std::any::Any;
 
-use super::signature::{BuildError, Data, DeclaredPort, Out2, OutKind, Unit};
+use super::signature::{BuildError, Data, DeclaredPort, Out2, OutKind, OutputKind, Unit};
 
 mod sealed {
-    /// 只有本模块的三种 Root 形状可以实现映射 trait。
-    #[allow(dead_code)] // 由同模块的映射 trait 作为 supertrait 使用
-    pub(crate) trait Sealed {}
+    /// 只有本模块的三种 Root 形状可以实现映射 trait（公开 trait 的 sealed 标记）。
+    pub trait Sealed {}
 }
 
 /// Root 输入形状：`Self = I`，把 owned 输入按 Signature 顺序交给登记边界。
-#[allow(dead_code)] // 非 test 构建的唯一消费者是 runtime::Runtime::execute
-pub(crate) trait RootInputs<I: 'static>: sealed::Sealed {
+pub trait RootInputs<I: 'static>: sealed::Sealed {
+    /// Application 侧传给 `Runtime::execute` 的输入形状：单输入直接传值，双输入传 tuple。
+    type ApplicationInput;
+
+    /// 将 Application 侧输入适配为内部按 Signature 顺序登记的 tuple。
+    fn into_internal(input: Self::ApplicationInput) -> I;
+
     /// 按声明顺序交出 `(真实类型名, 擦除值)`；元组包装本身不是业务 Data。
     fn into_values(self) -> Vec<(&'static str, Box<dyn Any>)>;
 }
@@ -33,6 +38,12 @@ pub(crate) trait RootInputs<I: 'static>: sealed::Sealed {
 impl<X: 'static> sealed::Sealed for (X,) {}
 
 impl<X: 'static> RootInputs<(X,)> for (X,) {
+    type ApplicationInput = X;
+
+    fn into_internal(input: X) -> (X,) {
+        (input,)
+    }
+
     fn into_values(self) -> Vec<(&'static str, Box<dyn Any>)> {
         vec![(std::any::type_name::<X>(), Box::new(self.0))]
     }
@@ -41,6 +52,12 @@ impl<X: 'static> RootInputs<(X,)> for (X,) {
 impl<X: 'static, Y: 'static> sealed::Sealed for (X, Y) {}
 
 impl<X: 'static, Y: 'static> RootInputs<(X, Y)> for (X, Y) {
+    type ApplicationInput = (X, Y);
+
+    fn into_internal(input: (X, Y)) -> (X, Y) {
+        input
+    }
+
     fn into_values(self) -> Vec<(&'static str, Box<dyn Any>)> {
         vec![
             (std::any::type_name::<X>(), Box::new(self.0)),
@@ -50,8 +67,10 @@ impl<X: 'static, Y: 'static> RootInputs<(X, Y)> for (X, Y) {
 }
 
 /// Root owned 输出映射：`Self = K`，给出 owned 结果类型与提取次数。
-#[allow(dead_code)] // 非 test 构建的唯一消费者是 runtime::Runtime::execute
-pub(crate) trait RootOutputs<K: OutKind>: sealed::Sealed {
+///
+/// 由 crate 为 [`Unit`]／[`Data`]／[`Out2`] 实现（sealed）；消费者只在
+/// [`Runtime::execute`](crate::Runtime::execute) 的结果类型中使用 [`Self::Owned`]。
+pub trait RootOutputs<K: OutputKind>: sealed::Sealed {
     /// Application 取得的 owned 结果。
     type Owned: 'static;
 
@@ -113,7 +132,6 @@ impl<O1: 'static, O2: 'static> RootOutputs<Out2<O1, O2>> for Out2<O1, O2> {
 /// 与登记输入之前完成：数量不符或声明类型不符都在这里被拒绝，不会拖到提取阶段。
 /// `K::port_types()` 的顺序就是 `declare_finish_outputs`／`declare_common_outputs` 的声明
 /// 顺序，因此第 `index` 项一一对应。
-#[allow(dead_code)] // 非 test 构建的唯一消费者是 runtime::Runtime::execute
 pub(crate) fn check_root_output_signature<K: OutKind>(
     ports: &[DeclaredPort],
 ) -> Result<(), BuildError> {

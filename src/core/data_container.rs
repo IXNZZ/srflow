@@ -46,6 +46,7 @@ trait ErasedVecBuilder {
     fn vec_type_name(&self) -> &'static str;
 
     /// 已收集元素数量。
+    #[allow(dead_code)] // 仅由 cfg(test) 验收与观察路径使用（非 test 构建无消费者）
     fn element_count(&self) -> usize;
 }
 
@@ -183,6 +184,8 @@ impl DataContainer {
             Arc::ptr_eq(&self.execution, id.execution()),
             "root take requires an id from this execution"
         );
+        #[cfg(test)]
+        super::test_support::record_take(id);
         self.entries
             .remove(&id.seq())
             .expect("root take requires an entry proven alive by the preflight")
@@ -248,13 +251,13 @@ impl DataContainer {
         Ok(())
     }
 
-    #[allow(dead_code)]
     // V21-10 Root take 接入前只由测试驱动；V21-03 的 Consume 走 collector 内部移动原语
     /// 移除 entry 并返回原 owned 值；成功后旧 `DataId` 失效。
     ///
     /// 类型与身份在移动之前验证：类型不符时 entry 保持原状，值不会被误删。这是后续
     /// Consume（V21-03）与 Root take（V21-10）的实现原语——它们必须先完成 Scope、
     /// owner 或 Root 预检再调用本方法；本方法不授予 Orchestrator 按值取数权。
+    #[allow(dead_code)] // 仅由 cfg(test) 验收与观察路径使用（非 test 构建无消费者）
     pub(crate) fn remove_owned<T: Any>(&mut self, id: &DataId) -> Result<T, InternalError> {
         let (seq, entry) = self.entry(id)?;
         if !entry.value.is::<T>() {
@@ -319,7 +322,6 @@ impl DataContainer {
     /// 只有容器持有建构值；协调组件登记责任 Scope 与元素类型元数据。`()` 不是可用的
     /// 元素类型：空 collector 仍需一个真实元素类型，否则无法与"没有集合元素"区分。
     /// `CollectorId` 由本 Execution 的身份序列分配，容器只按身份登记。
-    #[allow(dead_code)] // V21-08 接入真实 Each 前只由驱动与测试使用
     pub(crate) fn begin_collector<O: Any>(
         &mut self,
         collector: &CollectorId,
@@ -345,13 +347,12 @@ impl DataContainer {
     }
 
     /// 未完成 collector 已收集的元素数量。
-    #[allow(dead_code)] // 同上：观测入口
+    #[allow(dead_code)] // 仅由 cfg(test) 验收与观察路径使用（非 test 构建无消费者）
     pub(crate) fn collector_len(&self, collector: &CollectorId) -> Result<usize, InternalError> {
         Ok(self.collector_builder(collector)?.element_count())
     }
 
     /// collector 登记的元素类型身份与类型名。
-    #[allow(dead_code)] // 同上：观测入口
     pub(crate) fn collector_element_type(
         &self,
         collector: &CollectorId,
@@ -375,7 +376,6 @@ impl DataContainer {
     ///
     /// 顺序固定为归属 → 存活 → 类型：任一步失败都不移除 entry、不改变建构值长度。
     /// 移动完成后旧 `DataId` 立即失效，`Box<dyn Any>` 不离开容器。
-    #[allow(dead_code)] // V21-08 接入真实 Each 前只由驱动与测试使用
     pub(crate) fn move_into_collector(
         &mut self,
         collector: &CollectorId,
@@ -418,7 +418,6 @@ impl DataContainer {
     ///
     /// 新 `DataId` 在任何移除或写入之前分配，因此序号耗尽时 collector 仍保持未完成，
     /// 内容不变，也不留下无元素类型的 entry。完成后旧 `CollectorId` 不再存在。
-    #[allow(dead_code)] // V21-08 接入真实 Each 前只由驱动与测试使用
     pub(crate) fn finish_collector(
         &mut self,
         collector: &CollectorId,
@@ -449,7 +448,6 @@ impl DataContainer {
     }
 
     /// 销毁未完成 collector；部分结果随建构值一起析构。
-    #[allow(dead_code)] // 控制器退出清理路径由 V21-08／V21-09 接入
     pub(crate) fn destroy_collector(
         &mut self,
         collector: &CollectorId,

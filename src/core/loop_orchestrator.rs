@@ -26,11 +26,11 @@ use super::context::{
     BodyError, ExecutionContext, InvocationGuard, InvocationKind, RoundCollectPermit,
 };
 use super::data_ref::DataRef;
-use super::flow::{Flow, FlowBuilder, FlowInputs};
+use super::flow::{Flow, FlowBuilder, FlowInputs, FlowInputsDeclare};
 use super::identity::ScopeId;
 use super::internal_error::ScopeError;
 use super::orchestrator::{
-    LoopScopeTransfer, OrchCall, OrchScope, PackFor, PackFromPorts, ScopeRole, Targets1, Targets2,
+    LoopScopeTransfer, OrchCall, OrchScope, PackFor, ScopeRole, Targets1, Targets2,
 };
 use super::ref_id::RefId;
 use super::scope::{
@@ -42,7 +42,7 @@ use super::signature::{BuildError, Data, DeclaredPort, InputTypes, NodeFut, Wire
 
 /// 本轮推进决定：正常 Output 已表达的业务结论，只有两种。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum LoopDecision {
+pub enum LoopDecision {
     /// 继续下一轮。
     Continue,
     /// 结束 Loop，把选定值作为最终结果。
@@ -51,9 +51,9 @@ pub(crate) enum LoopDecision {
 
 /// reader：由正常 Output 的类型自身表达 Continue／Finish。
 ///
-/// 只读取**已计算好的字段**，不取得 Context、DataRef、target、Scope、owned 值或异步 child
-/// 调用权；直接字段读取不构成字段级 DataRef，也不产生新的业务 Data。
-pub(crate) trait LoopControl: 'static {
+/// 被推进的值类型（[`LoopShape::Value`]）实现本 trait；只读取**已计算好的字段**，
+/// 不取得 Context、DataRef、target、Scope、owned 值或异步 child 调用权。
+pub trait LoopControl: 'static {
     /// 本轮结论。
     fn loop_decision(&self) -> LoopDecision;
 }
@@ -157,14 +157,14 @@ pub(crate) enum LoopStrategy {
 }
 
 /// Retry：单业务输入 `A`，body 产生 `Data<O>`。
-pub(crate) struct Retry1<A, O>(PhantomData<fn() -> (A, O)>);
+pub struct Retry1<A, O>(PhantomData<fn() -> (A, O)>);
 /// Retry：两个业务输入 `(A, B)`，body 产生 `Data<O>`。
 #[allow(clippy::type_complexity)] // 形状标记：只承载类型，不承载数据
-pub(crate) struct Retry2<A, B, O>(PhantomData<fn() -> (A, B, O)>);
+pub struct Retry2<A, B, O>(PhantomData<fn() -> (A, B, O)>);
 /// Iter：初始状态 `S`，body 产生 `Data<S>`。
-pub(crate) struct Iter1<S>(PhantomData<fn() -> S>);
+pub struct Iter1<S>(PhantomData<fn() -> S>);
 /// Iter：初始状态 `S` ＋ 每轮显式导入的 shared `X`，body 产生 `Data<S>`。
-pub(crate) struct Iter2<S, X>(PhantomData<fn() -> (S, X)>);
+pub struct Iter2<S, X>(PhantomData<fn() -> (S, X)>);
 
 mod sealed {
     /// 形状标记只由本模块给出，业务侧不能新增 Loop 形状。
@@ -204,24 +204,26 @@ impl<A: 'static, B: 'static> LoopInputs for (A, B) {
     }
 }
 
-/// Loop 形状：把 Loop 自身 Signature、输入 pack、包装输入、被推进的值与策略绑在一起。
+/// Loop 形状：把 Loop 自身 Signature、包装输入与被推进的值绑在一起。
 ///
-/// `I`／`Wrapper`／`Value` 三者的关系是本任务的类型约束：Retry 的 `I` 与 `Value` 可以不同；
-/// Iter 的输出就是关联的 `S`，不能先擦除再在运行时猜测。
-pub(crate) trait LoopShape: 'static + sealed::Sealed
-where
-    <<Self as LoopShape>::Wrapper as FlowInputs>::Handles: WireInputs + Clone,
-    <<Self as LoopShape>::Wrapper as FlowInputs>::Pack: PackFor<<Self as LoopShape>::Wrapper>,
-{
+/// 消费者只在类型标注中书写 [`Retry1`]／[`Retry2`]／[`Iter1`]／[`Iter2`] 四个形状标记；
+/// 本 trait 是 sealed 的，关联类型供构建器与运行路径使用，不面向外部实现。
+pub trait LoopShape: 'static + sealed::Sealed {
     /// Loop 自身输入 Signature。
-    type I: 'static + InputTypes + LoopInputs;
-    /// Loop 输入 pack。
-    type Pack: PackFor<Self::I> + PackFromPorts;
+    type I: 'static + InputTypes;
+    /// Loop 输入 pack（内部接线协议使用）。
+    type Pack;
     /// 包装 body 的输入 Signature（与 Loop 输入一一对应）。
     type Wrapper: 'static + FlowInputs + InputTypes;
     /// 被推进的值：Retry 为 `O`，Iter 为 `S`。
     type Value: 'static + LoopControl;
+}
 
+/// 内部：形状相关的推进策略与逐轮输入装配。
+///
+/// 只在 crate 内使用；公开使用者不实现也不调用。形状相关的前置条件（Handles 可接线、
+/// pack 绑定、输入声明）以 trait where 形式给出，使用方只需 bound 本 trait。
+pub(crate) trait LoopShapeSpec: LoopShape {
     /// 推进策略。
     const STRATEGY: LoopStrategy;
 
@@ -305,6 +307,9 @@ impl<A: 'static, O: 'static + LoopControl> LoopShape for Retry1<A, O> {
     type Pack = Targets1<A>;
     type Wrapper = (A,);
     type Value = O;
+}
+
+impl<A: 'static, O: 'static + LoopControl> LoopShapeSpec for Retry1<A, O> {
     const STRATEGY: LoopStrategy = LoopStrategy::Retry;
 
     fn wrapper_inputs() -> usize {
@@ -332,6 +337,9 @@ impl<A: 'static, B: 'static, O: 'static + LoopControl> LoopShape for Retry2<A, B
     type Pack = Targets2<A, B>;
     type Wrapper = (A, B);
     type Value = O;
+}
+
+impl<A: 'static, B: 'static, O: 'static + LoopControl> LoopShapeSpec for Retry2<A, B, O> {
     const STRATEGY: LoopStrategy = LoopStrategy::Retry;
 
     fn wrapper_inputs() -> usize {
@@ -359,6 +367,9 @@ impl<S: 'static + LoopControl> LoopShape for Iter1<S> {
     type Pack = Targets1<S>;
     type Wrapper = (S,);
     type Value = S;
+}
+
+impl<S: 'static + LoopControl> LoopShapeSpec for Iter1<S> {
     const STRATEGY: LoopStrategy = LoopStrategy::Iter;
 
     fn wrapper_inputs() -> usize {
@@ -386,6 +397,9 @@ impl<S: 'static + LoopControl, X: 'static> LoopShape for Iter2<S, X> {
     type Pack = Targets2<S, X>;
     type Wrapper = (S, X);
     type Value = S;
+}
+
+impl<S: 'static + LoopControl, X: 'static> LoopShapeSpec for Iter2<S, X> {
     const STRATEGY: LoopStrategy = LoopStrategy::Iter;
 
     fn wrapper_inputs() -> usize {
@@ -411,7 +425,9 @@ impl<S: 'static + LoopControl, X: 'static> LoopShape for Iter2<S, X> {
 // ---------------------------------------------------------------- 完成态
 
 /// 完成态 Loop：不可变 Definition、登记的包装 Flow 与登记元数据。
-pub(crate) struct Loop<Sh: LoopShape> {
+///
+/// 可作为 Root 或 child 使用；`Clone` 只复制定义句柄，不复制业务 Data 或运行状态。
+pub struct Loop<Sh: LoopShape> {
     definition: Arc<Definition>,
     /// 登记的 body 包装：Node 与 Orchestrator body 都作为其唯一 Step。
     wrapper: Flow<Sh::Wrapper, Data<Sh::Value>>,
@@ -445,22 +461,31 @@ impl<Sh: LoopShape> Clone for Loop<Sh> {
     }
 }
 
-impl<Sh: LoopShape> std::fmt::Debug for Loop<Sh> {
+impl<Sh: LoopShapeSpec> std::fmt::Debug for Loop<Sh> {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         // 只报告定义规模：完成态不携带业务值，也不要求形状类型实现 `Debug`。
         formatter
             .debug_struct("Loop")
             .field("strategy", &Sh::STRATEGY)
-            .field("steps", &self.wrapper.definition().steps().len())
-            .field("outputs", &self.wrapper.definition().output_ports().len())
+            .field("steps", &self.wrapper.raw_definition().steps().len())
+            .field(
+                "outputs",
+                &self.wrapper.raw_definition().output_ports().len(),
+            )
             .finish()
     }
 }
 
 impl<Sh: LoopShape> Loop<Sh> {
+    /// 本编排体的只读 Definition（不要求 `LoopShapeSpec`；crate 内部使用）。
+    pub(crate) fn raw_definition(&self) -> &Definition {
+        &self.definition
+    }
+
     /// 登记的包装 Definition（只读；供身份核对与观察）。
+    #[allow(dead_code)] // 仅由 cfg(test) 验收与观察路径使用（非 test 构建无消费者）
     pub(crate) fn wrapper_definition(&self) -> &Definition {
-        self.wrapper.definition()
+        self.wrapper.raw_definition()
     }
 
     /// 登记的包装 Flow（只读；只由 Loop 专用转交使用）。
@@ -485,8 +510,11 @@ impl<Sh: LoopShape> Loop<Sh> {
     ///
     /// 保证运行期不会执行"同类型的另一个包装"，也不接受陈旧或外来 ports／Step 表；篡改
     /// 只能经 test-only 元数据故障构造。
-    pub(crate) fn verify_registration(&self) -> Result<(), BodyError> {
-        let live = self.wrapper.definition();
+    pub(crate) fn verify_registration(&self) -> Result<(), BodyError>
+    where
+        Sh: LoopShapeSpec,
+    {
+        let live = self.wrapper.raw_definition();
         if live as *const Definition as *const () != self.wrapper_identity {
             return Err(BodyError::new(
                 "registered loop body is not the registered wrapper definition",
@@ -545,9 +573,11 @@ impl<Sh: LoopShape> Loop<Sh> {
     }
 }
 
-impl<Sh: LoopShape> OrchCall<Sh::I, Data<Sh::Value>> for Loop<Sh>
+impl<Sh: LoopShapeSpec> OrchCall<Sh::I, Data<Sh::Value>> for Loop<Sh>
 where
     Sh::I: InputTypes,
+    Sh::Pack: PackFor<Sh::I>,
+    <Sh::Wrapper as FlowInputs>::Handles: WireInputs + Clone,
 {
     type Pack = Sh::Pack;
     const ROLE: ScopeRole = ScopeRole::Loop;
@@ -576,7 +606,7 @@ enum RoundStep {
 }
 
 /// Loop 的运行主体：登记控制状态后按轮推进，直到某轮给出 Finish。
-async fn run_loop<Sh: LoopShape>(mut session: LoopSession<'_, Sh>) -> Result<(), BodyError> {
+async fn run_loop<Sh: LoopShapeSpec>(mut session: LoopSession<'_, Sh>) -> Result<(), BodyError> {
     let state = session.register_control_state()?;
     loop {
         match session.run_round(&state).await? {
@@ -596,6 +626,7 @@ pub(crate) struct LoopSession<'a, Sh: LoopShape> {
     loop_scope: &'a ScopeId,
     /// Loop 自身 Definition（声明输入位置）。
     inner: &'a Definition,
+    #[allow(dead_code)] // 仅由 cfg(test) 验收与观察路径使用（非 test 构建无消费者）
     pack: &'a Sh::Pack,
     wrapper: &'a Flow<Sh::Wrapper, Data<Sh::Value>>,
     /// 登记包装的唯一声明输出位置。
@@ -608,7 +639,7 @@ pub(crate) struct LoopSession<'a, Sh: LoopShape> {
     marker: PhantomData<fn() -> Sh>,
 }
 
-impl<'a, Sh: LoopShape> LoopSession<'a, Sh> {
+impl<'a, Sh: LoopShapeSpec> LoopSession<'a, Sh> {
     /// 受控构造：只由 `OrchScope` 的 Loop 专用转交调用（调用方拿不到可变 Context）。
     #[allow(clippy::too_many_arguments)] // 内部构造：Context／Scope／Definition／pack／登记包装
     pub(crate) fn new(
@@ -695,7 +726,7 @@ impl<'a, Sh: LoopShape> LoopSession<'a, Sh> {
     /// 收口（Promote／discard）。
     async fn run_round(&mut self, state: &ControlStateId) -> Result<RoundStep, BodyError> {
         let loop_scope = self.loop_scope.clone();
-        let wrapper = self.wrapper.definition();
+        let wrapper = self.wrapper.raw_definition();
         #[cfg(test)]
         {
             self.rounds += 1;
@@ -1172,9 +1203,13 @@ pub(crate) struct LoopBuilder<Sh: LoopShape> {
     marker: PhantomData<fn() -> Sh>,
 }
 
-impl<Sh: LoopShape> LoopBuilder<Sh> {
+impl<Sh: LoopShapeSpec> LoopBuilder<Sh> {
     /// 建立 Loop：声明形状输入与最终输出端口，并开始包装 Flow。
-    pub(crate) fn start() -> Result<Self, BuildError> {
+    pub(crate) fn start() -> Result<Self, BuildError>
+    where
+        Sh::I: LoopInputs,
+        Sh::Wrapper: FlowInputsDeclare,
+    {
         let mut definition = Definition::new();
         <Sh::I as LoopInputs>::declare_loop_inputs(&mut definition)?;
         let final_position = definition.declare_output_port::<Sh::Value>("loop output")?;
@@ -1207,6 +1242,7 @@ impl<Sh: LoopShape> LoopBuilder<Sh> {
         C: BuildSite<M, <Sh::Wrapper as FlowInputs>::Handles>,
         M: Wiring<BuildOutput = DataRef<Sh::Value>>,
         C: IntoCallSite<M, <Sh::Wrapper as FlowInputs>::Handles, BuildOutput = DataRef<Sh::Value>>,
+        <Sh::Wrapper as FlowInputs>::Handles: WireInputs + Clone,
     {
         if self.produced.is_some() {
             return Err(BuildError::SecondLoopBody);
@@ -1224,7 +1260,9 @@ impl<Sh: LoopShape> LoopBuilder<Sh> {
         self.produced = Some(produced);
         Ok(())
     }
+}
 
+impl<Sh: LoopShape> LoopBuilder<Sh> {
     /// 完成：包装 finish 后形成不可变完成态 Loop，并捕获登记身份与声明端口。
     pub(crate) fn finish(mut self) -> Result<Loop<Sh>, BuildError> {
         let produced = self.produced.take().ok_or(BuildError::LoopBodyMissing)?;
@@ -1233,7 +1271,7 @@ impl<Sh: LoopShape> LoopBuilder<Sh> {
             .take()
             .expect("loop builder is still open")
             .finish::<Data<Sh::Value>, _>(produced)?;
-        let wrapper_definition = wrapper.definition();
+        let wrapper_definition = wrapper.raw_definition();
         if wrapper_definition.steps().len() != 1 || wrapper_definition.output_ports().len() != 1 {
             return Err(BuildError::LoopWrapperShape);
         }
@@ -1279,7 +1317,7 @@ impl<Sh: LoopShape> LoopBuilder<Sh> {
 }
 
 #[cfg(test)]
-impl<Sh: LoopShape> LoopBuilder<Sh> {
+impl<Sh: LoopShapeSpec> LoopBuilder<Sh> {
     /// 测试观测：包装 Definition 当前 Step 数量（构建失败不留 Step）。
     pub(crate) fn wrapper_step_count_probe(&self) -> Option<usize> {
         self.wrapper_builder
@@ -1309,9 +1347,9 @@ impl<Sh: LoopShape> LoopBuilder<Sh> {
 }
 
 #[cfg(test)]
-impl<Sh: LoopShape> LoopSession<'_, Sh> {
+impl<Sh: LoopShapeSpec> LoopSession<'_, Sh> {
     /// 编译期字段见证：字段类型变为其它类型时本函数不再编译。
-    #[allow(dead_code)]
+    #[allow(dead_code)] // 编译期字段见证：有意不被调用
     fn session_field_witness(&self) {
         let _: &ExecutionContext = self.ctx;
         let _: &ScopeId = self.loop_scope;

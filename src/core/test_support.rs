@@ -180,6 +180,10 @@ pub(crate) struct RoundCollectPreCleanupSnapshot {
     pub(crate) selected_alive: bool,
     /// 控制状态当前 target（target-aware）。
     pub(crate) state_target: Option<crate::core::scope::TargetSnapshot>,
+    /// 控制状态当前 target 的责任方（完整 Data 时；item 目标为空）。
+    pub(crate) state_target_owner: Option<crate::core::identity::ScopeId>,
+    /// 控制状态当前 target 是否仍存活（item 目标不适用时为 false）。
+    pub(crate) state_target_alive: bool,
     /// 控制状态待回收旧值。
     pub(crate) state_pending: Option<Vec<crate::core::identity::DataId>>,
     /// 观察时的下一个 `DataId` 序号。
@@ -465,6 +469,9 @@ pub(crate) fn reset_observations() {
     take_export_pre_cleanup();
     take_generic_promote_probe();
     take_termination_saved();
+    take_post_terminate_probe();
+    export_fault_hits_reset();
+    item_targets_reset();
     release_gate();
 }
 
@@ -524,6 +531,42 @@ pub(crate) fn closed_scope_reset() {
     CLOSED_SCOPES.with(|closed| closed.borrow_mut().clear());
 }
 
+/// Promote 提交现场记录：直接反映"当前控制器已 Promote 什么"（元数据，不含业务值）。
+#[derive(Debug, Clone)]
+pub(crate) struct PromoteStateRecord {
+    /// 控制器（Loop）Scope。
+    pub(crate) controller: super::identity::ScopeId,
+    /// 来源 Round Scope（提交后已关闭）。
+    pub(crate) source: super::identity::ScopeId,
+    /// 提交后控制状态的 target。
+    pub(crate) state_target: Option<super::scope::TargetSnapshot>,
+    /// 提交后控制器的 owned 集合。
+    pub(crate) controller_owned: Vec<super::identity::DataId>,
+    /// 提交后待回收旧值。
+    pub(crate) pending: Vec<super::identity::DataId>,
+    /// 本次提交是否把完整 Data 的责任转给控制器（owned current）。
+    pub(crate) transferred: bool,
+}
+
+thread_local! {
+    static PROMOTE_STATES: RefCell<Vec<PromoteStateRecord>> = const { RefCell::new(Vec::new()) };
+}
+
+/// 记录一次真实 Promote 提交现场（cfg(test) 只读元数据）。
+pub(crate) fn record_promote_state(record: PromoteStateRecord) {
+    PROMOTE_STATES.with(|records| records.borrow_mut().push(record));
+}
+
+/// 取出全部 Promote 提交现场记录。
+pub(crate) fn take_promote_states() -> Vec<PromoteStateRecord> {
+    PROMOTE_STATES.with(|records| std::mem::take(&mut *records.borrow_mut()))
+}
+
+/// 复位 Promote 提交现场记录。
+pub(crate) fn promote_states_reset() {
+    PROMOTE_STATES.with(|records| records.borrow_mut().clear());
+}
+
 /// Root 提取观察点。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RootSnapshotPhase {
@@ -558,6 +601,8 @@ pub(crate) struct RootSnapshot {
     pub(crate) next_data_id: Option<u64>,
     /// 该观察点上的首次终止类别（`None` = 本次执行未终止）。
     pub(crate) terminated: Option<super::context::TerminationKind>,
+    /// 该观察点上的首次终止定位 Scope（最深实际 frame）。
+    pub(crate) termination_scope: Option<super::identity::ScopeId>,
 }
 
 thread_local! {
@@ -580,6 +625,10 @@ pub(crate) fn root_snapshots_reset() {
 }
 
 /// 读取真实状态构造一个观察点（只读，不改变任何状态）。
+///
+/// V21-10 的历史口径（观察失败回退默认值）；V21-11 起真实路径改用
+/// [`strict_root_snapshot`]／[`record_strict_root_snapshot`]，本函数只保留给前序样本。
+#[allow(dead_code)]
 pub(crate) fn root_snapshot(
     ctx: &super::context::ExecutionContext,
     root: &super::identity::ScopeId,
@@ -605,6 +654,9 @@ pub(crate) fn root_snapshot(
         root_state: ctx.state(root).unwrap_or(super::scope::ScopeState::Closed),
         next_data_id: ctx.next_data_id_probe(),
         terminated: ctx.termination().map(|termination| termination.kind()),
+        termination_scope: ctx
+            .termination()
+            .and_then(|termination| termination.scope().cloned()),
     }
 }
 
@@ -685,6 +737,236 @@ pub(crate) fn take_root_post_body_fault() -> Option<RootFault> {
                 | RootFault::RetargetOutputFromInput { .. }
         )
     })
+}
+
+// ---- V21-11：终止后入口探针（cfg(test) 窄开关，只由 L19 安装） ----
+
+thread_local! {
+    static POST_TERMINATE_PROBE: Cell<bool> = const { Cell::new(false) };
+}
+
+/// 武装"预检失败终止后的双入口探针"（只影响下一次 Root 预检拒绝路径）。
+pub(crate) fn install_post_terminate_probe() {
+    POST_TERMINATE_PROBE.with(|probe| probe.set(true));
+}
+
+/// 取出（一次性）终止后入口探针开关。
+pub(crate) fn take_post_terminate_probe() -> bool {
+    POST_TERMINATE_PROBE.with(|probe| {
+        let armed = probe.get();
+        probe.set(false);
+        armed
+    })
+}
+
+// ---- V21-11：Export 故障命中记录（完整身份，样本必须断言） ----
+
+/// 一次 Export 故障实际命中的边界（只读元数据；child／caller 为完整 `ScopeId`）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ExportFaultHit {
+    /// 故障类别标签（`occupy-caller-slot`／`tighten-item-cap`）。
+    pub(crate) kind: &'static str,
+    /// 命中的 child Scope。
+    pub(crate) child: ScopeId,
+    /// 命中的 caller Scope。
+    pub(crate) caller: ScopeId,
+    /// `OccupyCallerSlot` 的被预占下标。
+    pub(crate) index: Option<usize>,
+}
+
+thread_local! {
+    static EXPORT_FAULT_HITS: RefCell<Vec<ExportFaultHit>> = const { RefCell::new(Vec::new()) };
+}
+
+/// 记录一次 Export 故障命中（只读元数据，不改变注入路径）。
+pub(crate) fn record_export_fault_hit(hit: ExportFaultHit) {
+    EXPORT_FAULT_HITS.with(|hits| hits.borrow_mut().push(hit));
+}
+
+/// 取走全部 Export 故障命中记录。
+pub(crate) fn take_export_fault_hits() -> Vec<ExportFaultHit> {
+    EXPORT_FAULT_HITS.with(|hits| std::mem::take(&mut *hits.borrow_mut()))
+}
+
+/// 复位 Export 故障命中记录。
+pub(crate) fn export_fault_hits_reset() {
+    EXPORT_FAULT_HITS.with(|hits| hits.borrow_mut().clear());
+}
+
+// ---- V21-11：Item 绑定目标记录（每项真实绑定后的完整 metadata） ----
+
+/// 一次 Item 绑定后的实际目标（完整身份，供 L04／L12 精确断言与目标重用）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ItemTargetRecord {
+    /// 绑定的 ItemScope。
+    pub(crate) item: ScopeId,
+    /// Item 输入位置上的实际目标。
+    pub(crate) target: super::scope::TargetSnapshot,
+}
+
+thread_local! {
+    static ITEM_TARGETS: RefCell<Vec<ItemTargetRecord>> = const { RefCell::new(Vec::new()) };
+}
+
+/// 记录一次 Item 绑定后的实际目标（只读元数据）。
+pub(crate) fn record_item_target(record: ItemTargetRecord) {
+    ITEM_TARGETS.with(|entries| entries.borrow_mut().push(record));
+}
+
+/// 本次样本全部 Item 绑定目标快照（按绑定顺序）。
+pub(crate) fn item_target_snapshot() -> Vec<ItemTargetRecord> {
+    ITEM_TARGETS.with(|entries| entries.borrow().clone())
+}
+
+/// 复位 Item 绑定目标记录。
+pub(crate) fn item_targets_reset() {
+    ITEM_TARGETS.with(|entries| entries.borrow_mut().clear());
+}
+
+// ---- V21-11：严格观察（take 计数、无默认值快照） ----
+
+thread_local! {
+    static TAKEN_IDS: RefCell<Vec<super::identity::DataId>> = const { RefCell::new(Vec::new()) };
+}
+
+/// 记录一次真实 `take_verified`（只含完整 `DataId`，按调用顺序）。
+pub(crate) fn record_take(id: &super::identity::DataId) {
+    TAKEN_IDS.with(|taken| taken.borrow_mut().push(id.clone()));
+}
+
+/// 本次样本实际发生的 `take_verified` 完整序列。
+#[allow(dead_code)] // 各 V21-11 样本按需引用
+pub(crate) fn take_log_snapshot() -> Vec<super::identity::DataId> {
+    TAKEN_IDS.with(|taken| taken.borrow().clone())
+}
+
+/// 复位 take 记录（每个样本开始一次）。
+pub(crate) fn take_log_reset() {
+    TAKEN_IDS.with(|taken| taken.borrow_mut().clear());
+}
+
+/// 观察失败：不返回默认值，携带实际失败项与底层诊断。
+#[derive(Debug, Clone)]
+#[allow(dead_code)] // 字段供断言与诊断引用；随严格快照被 V21-11 样本消费
+pub(crate) struct ObservationError {
+    /// 失败项说明。
+    pub(crate) note: &'static str,
+    /// 相关 Scope（如有）。
+    pub(crate) scope: Option<super::identity::ScopeId>,
+    /// 相关位置（如有）。
+    pub(crate) position: Option<RefId>,
+    /// 底层 Scope 诊断（如有）。
+    pub(crate) source: Option<super::internal_error::ScopeError>,
+}
+
+/// 严格 Root 快照：任何观察项失败都返回 `ObservationError`，不使用默认值。
+#[allow(dead_code)] // 各 V21-11 样本按需引用
+pub(crate) fn strict_root_snapshot(
+    ctx: &super::context::ExecutionContext,
+    root: &super::identity::ScopeId,
+    phase: RootSnapshotPhase,
+    planned_takes: usize,
+    taken: &[super::identity::DataId],
+) -> Result<RootSnapshot, ObservationError> {
+    let (root_refs, root_owned) =
+        ctx.snapshot_targets_probe(root)
+            .map_err(|source| ObservationError {
+                note: "root refs/owned snapshot failed",
+                scope: Some(root.clone()),
+                position: None,
+                source: Some(source),
+            })?;
+    let mut taken_alive = Vec::with_capacity(taken.len());
+    let mut taken_owned_by = Vec::with_capacity(taken.len());
+    for id in taken {
+        taken_alive.push(ctx.alive_probe(id));
+        // 明确区分"没有 owner"与观察失败：只有 `NoOwner` 映射成 `None`。
+        match ctx.owner_probe(id) {
+            Ok(owner) => taken_owned_by.push(Some(owner)),
+            Err(super::internal_error::ScopeError::NoOwner { .. }) => taken_owned_by.push(None),
+            Err(source) => {
+                return Err(ObservationError {
+                    note: "root take ownership observation failed",
+                    scope: Some(root.clone()),
+                    position: None,
+                    source: Some(source),
+                });
+            }
+        }
+    }
+    let root_state = ctx.state(root).map_err(|source| ObservationError {
+        note: "root state observation failed",
+        scope: Some(root.clone()),
+        position: None,
+        source: Some(source),
+    })?;
+    Ok(RootSnapshot {
+        phase,
+        planned_takes,
+        taken_alive,
+        taken_owned_by,
+        root_refs,
+        root_owned,
+        root_state,
+        next_data_id: ctx.next_data_id_probe(),
+        terminated: ctx.termination().map(|termination| termination.kind()),
+        termination_scope: ctx
+            .termination()
+            .and_then(|termination| termination.scope().cloned()),
+    })
+}
+
+/// 严格记录一个 Root 观察点：失败时登记到错误通道并**不**落快照，测试必须显式证明无失败。
+#[allow(dead_code)] // 各 V21-11 样本按需引用
+pub(crate) fn record_strict_root_snapshot(
+    ctx: &super::context::ExecutionContext,
+    root: &super::identity::ScopeId,
+    phase: RootSnapshotPhase,
+    planned_takes: usize,
+    taken: &[super::identity::DataId],
+) {
+    match strict_root_snapshot(ctx, root, phase, planned_takes, taken) {
+        Ok(snapshot) => record_root_snapshot(snapshot),
+        Err(error) => record_root_observation_error(error),
+    }
+}
+
+thread_local! {
+    static ROOT_OBSERVATION_ERRORS: RefCell<Vec<ObservationError>> =
+        const { RefCell::new(Vec::new()) };
+}
+
+/// 记录一次严格 Root 观察的失败（生产路径只记录元数据，不改变执行）。
+pub(crate) fn record_root_observation_error(error: ObservationError) {
+    ROOT_OBSERVATION_ERRORS.with(|errors| errors.borrow_mut().push(error));
+}
+
+/// 本次样本的全部严格观察失败。
+pub(crate) fn take_root_observation_errors() -> Vec<ObservationError> {
+    ROOT_OBSERVATION_ERRORS.with(|errors| std::mem::take(&mut *errors.borrow_mut()))
+}
+
+/// 复位严格观察错误。
+pub(crate) fn root_observation_errors_reset() {
+    ROOT_OBSERVATION_ERRORS.with(|errors| errors.borrow_mut().clear());
+}
+
+/// 严格版本的 `reset_observations`：额外复位 take 记录。
+#[allow(dead_code)] // 各 V21-11 样本按需引用
+pub(crate) fn strict_reset_observations() {
+    reset_observations();
+    take_log_reset();
+    root_observation_errors_reset();
+    promote_states_reset();
+}
+
+/// 断言本次样本的全部严格观察都成功（V21-11 样本在比较快照前调用）。
+pub(crate) fn assert_no_observation_errors() {
+    let errors = take_root_observation_errors();
+    assert!(
+        errors.is_empty(),
+        "严格观察失败（不允许默认值回退）: {errors:?}"
+    );
 }
 
 // ---- Future 驱动 ----

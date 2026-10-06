@@ -33,7 +33,6 @@ pub(crate) struct ExecutionIdentity {
 }
 
 impl ExecutionIdentity {
-    #[allow(dead_code)] // 唯一身份根由 ExecutionContext（V21-04）创建，当前只由驱动／测试使用
     /// 创建一个新的身份根，三条序列都从 0 开始。
     pub(crate) fn new() -> Arc<Self> {
         Self::create(0, 0, 0)
