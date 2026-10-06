@@ -1,41 +1,44 @@
 # SRFlow
 
-System Runtime Workflow（SRFlow）是一个以强类型 Flow 为中心的 Rust 执行框架。本仓库独立维护其设计、实现、测试和示例。
+System Runtime Workflow（SRFlow）是面向强类型业务流程的 Rust 执行与编排框架。本工程独立维护其设计、实现、测试和示例。
 
-> 当前总规范为 [SRFlow Design v2.1](docs/SRFlow_Design_v2.1.md)，已于 2026-10-03 完成规范切换。以下代码用法和 T01～T08 验收对应现存 v2.0 实现，是迁移起点；v2.1 Runtime 尚待按[新任务入口](docs/tasks/README.md)实施和整合验收。
+> 当前总规范为 [SRFlow Design v2.1](docs/SRFlow_Design_v2.1.md)。实施路线是在同一 crate 中从空工程重写 Core；V21-00～V21-12 已验收为 **COMPLETED**，基线 `d79d33f`。[G21-A](docs/tasks/G21_A_Foundation_Review.md)／[G21-B](docs/tasks/G21_B_Typed_Flow_Review.md)／[G21-C](docs/tasks/G21_C_Control_And_Root_Review.md) 为 PASS。[V21-11](docs/tasks/V21_11_Integration_And_Fault_Validation.md) 独立复审通过：388 项测试、60 个 UI 负例、工程检查全通过；11 组定向注入 10 组被捕获、3b 如实记录为不可区分（[结果 §14](docs/tasks/V21_11_RESULTS.md#14-最终独立复审与验收2026-10-05)）。[V21-12](docs/tasks/V21_12_Public_API_Examples_And_Delivery_Closeout.md) 已独立复审通过：388 内部测试＋12 外部集成测试、78 UI、Rustdoc 与两个离线示例通过（[结果 §11.1](docs/tasks/V21_12_RESULTS.md#111-最终独立复审2026-10-06)）。G21-D 仍 OPEN，等待阶段 Gate 审查。后续以[任务入口](docs/tasks/README.md)为准。
 
-T01～T08 已通过复审，G1／G2／G3 已分别完成独立验收。仓库是一个可编译的 `srflow` library crate，提供统一异步执行基础 `Runtime`、`Executable`、`Node`，最小 Flow（`FlowBuilder`、`Flow`、`Ref`），Binding（整值读取、字段投影、2～8 元 tuple、命名结构装配，由 `consume`、`field!`、`bind!` 表达），以及四种控制型 Executable：`Retry`（正常业务 Output 驱动的有限重做）、`Match`（依据已有路由值执行唯一分支）、`Each`（按顺序逐项执行并收集结果）与 `Iter`（携带上一轮状态的顺序推进）。四者可以在同一条流程里组合使用。
+## 当前工程状态
 
-## 首次使用（最短路径）
+旧实现、测试和示例已清理。V21-01 在非公开的 `src/core/` 内交付了 Execution 身份（`DataId`／`ScopeId` 在单次 Execution 内单调分配且不复用）、异构 owned `DataContainer` 与短期只读借用。V21-02 在同一内部层已实现 Definition `RefId` 来源、Scope registry（`refs`／`owned`、Active／Finalizing／Closed tombstone）、显式 Import、整组 Export 预检与责任交接，以及正常／同步失败退出清理；责任链、数据保护、输出契约、祖先保留与失败清理诊断已验收通过。V21-03 已验收：`CollectorId` 身份与分配、控制状态登记与状态来源导入、无父 Ref 绑定的 Promote、受控 pending 回收、container 内 collector 建构区与内部移动、ItemScope 直接 Consume、collector 完成与最终输出一次性绑定，以及随控制器退出的状态／collector 清理。
 
-1. `cargo test --all-targets` 跑通全部离线测试；
-2. 只实现 `Node` 并交给 `Runtime` 执行：`cargo run --example node_only`；
-3. 需要编排顺序与数据连接时用 `FlowBuilder`／`Ref`／Binding：`cargo run --example basic_flow`；
-4. 需要重做、路由、逐项处理或跨轮推进时加控制型 Executable：`retry`／`match`／`each`／`iter`；
-5. 想看它们在同一条流程里如何组合：`cargo run --example story_workflow`。
+V21-04 已验收内部单 Context／Invocation 与三类退出设施：真实异步输入借用、建立失败终止、清理／控制权限、原始错误及取消定位、不可恢复终止、frame 关系检查，以及提交与分路径取消析构证据。V21-05 已验收内部强类型接线与双路径分派：`DataRef<T>` 逻辑位置句柄、`OutKind` 输出分类（数据／显式 unit／两个异构位置）、五种接线 Marker、业务 Node 协议（函数 item 的 HRTB 与结构体／`Arc<具体 Node>` 的单一短生命周期 boxed Future）、独立 Orchestrator 协议与 child-local 端口／输入 pack、异型 `CallSite`／`Step` 保存、Definition 声明表与 checked 整组分配，以及基础执行样本。普通 `Result<()>` 函数的构建期拒绝已有证据；任意编排体 Data 注入、Signature 关联、零输入 Arc、叶子失败终止和原子性／取消证据缺口均已关闭。V21-06 已验收内部完整 `FlowBuilder<I>`／`Flow<I, K>`：显式完成态、单／双非空输入、unit／单 Data／两个独立输出位置、完成输出整组类型校验、真实 SubFlow Import／Export 与顺序执行、定义复用及错误／取消清理。Root 测试驱动只观察并按空声明收口，尚不移交 owned 输出。
 
-（示例与文档测试用 `futures::executor::block_on` 驱动异步代码；`srflow` 本身不依赖任何 executor，使用者需要在自己的项目里选择并添加一个——本仓库的开发依赖不会随 `srflow` 提供。）
+V21-07 已验收内部完成态 Match：已有路由 Data 与显式业务输入、函数／结构体／Arc Node 或完整 Flow branch、三种共同输出、不可变分支登记与来源校验、单一路由及 default、真实 BranchScope 与两层 Export、imported alias、错误终止及 Future 取消清理。未选 branch 不创建 Scope 或执行业务；子调用失败不改选分支。
 
-## 示例（按学习顺序）
+V21-08 已验收内部 Each：显式集合与可选 shared 输入、CollectionItem／ItemScope cap、真实 Node 或完成态 Flow body、按项顺序执行与直接 Consume、collector 一次完成并 Export 最终 Vec、imported 输出拒绝、正常错误与 Future 取消清理。Each 会话核对当前实际 Definition，构建失败保留合法状态；状态收口和诊断观察的验收缺口均已关闭。当前范围为单 owned 输出、可选一个 shared、单线程顺序执行。
 
+V21-09 已交付内部 Loop：Retry（每轮重新导入原始输入，Continue 丢弃本轮结果、Finish 保留到最终结果状态并导出）与 Iter（current-state 每轮经 `StateImportSlot` 导入，继续／完成都把选定 `S` 经窄许可 Promote 到 current-state，旧值在引用失效后受控回收）两种正式推进策略；RoundScope 是 LoopScope 的直接 child，body 一律是完成态包装 Flow 的唯一 Step（Node 为 Round leaf，Orchestrator 建 child 并先 Export 给 Round）。收口新增 `PromoteOutcome`／`DiscardOutcome` 共享报告（旧 `promote` 保持"清理失败优先"映射），Round frame 不能经通用 `promote` 越权提交 parent state（运行期 `OutsideInvocation`），`ScopeRole::Loop`／`Round` 只在真实创建点记录。当前范围为单／双业务输入、单份 `Data<O>`／`Data<S>` 输出、可选一个 shared、单线程顺序执行；无轮次上限与耗尽规则（仍为开放项）。
+
+V21-10 已在非 test 构建中交付内部的唯一 Root 执行入口 `Runtime::execute`：按 Signature 登记 owned Root 输入、经 `orchestrator.rs` 的受控装配入口在真实 RootScope 上运行完成态 Flow／Match／Each／Loop，冻结一次后整组预检全部声明输出（完整 Data、身份、存活、类型、Root 唯一责任、物理 DataId 互不重复、关闭前提），再同步 take 全组并与 `RootScope.owned` 责任移除同边界提交，最后复用已验收的关闭尾段；支持 `Unit`／`Data<O>`／`Out2<O1,O2>` 与单／双非空 `'static` owned 输入。独立于 `OutKind` 的 sealed `RootInputs`／`RootOutputs` 表达 Root owned 形状；`run_root`／`RootExit`／旧裸 Definition 驱动已降为 `#[cfg(test)]`。重复物理实例拒绝诊断是 `ScopeError::DuplicateRootDataId`。
+
+V21-12 已把完成态 Runtime 收口为受控公开 API。Flow Builder 与 Root Runtime 的输入统一使用 tuple：单输入写 `(A,)`，多输入写 `(A, B, …)`，最多 16 个位置；`FlowBuilder::<(A,)>::start()`、`FlowBuilder::<(A, B, C)>::start()` 与 `Runtime::execute(&flow, (value,))` 使用同一约定。调用 Node 或控制器时仍按其签名传 `DataRef<T>` 或对应 tuple。调用方可从 crate 根使用 `DataRef`／`Data`／`Unit`／`Out2`、五种接线 Marker、`NodeCall0/1/2`、`FlowBuilder<I>`／`Flow`、`MatchBuilder`／`Match`、`EachBuilder`／`Each`、`LoopBuilder`／`Loop`、`Runtime::execute` 与公开错误类型（`BuildError`／`RunError`／`BodyError`）。输入形状映射 trait 不从 crate 根导出；`core` 模块与全部内部身份（`Definition`／`CallSite`／`RefId`／`ScopeId`／`DataId`、存储与生命周期操作、注入钩子与测试支持）仍不对外可达；Rustdoc 以 `#![warn(missing_docs)]` 与 `RUSTDOCFLAGS="-D warnings"` 把关，`examples/minimal_flow.rs` 与 `examples/controller_chain.rs` 离线可运行。当前 Builder／Root 输入支持 1～16 个位置，Node 函数仍支持 0／1／2 个输入；`Unit`／`Data`／`Out2` 输出、函数／结构体／`Arc<具体 Node>`、Flow／Match／Each／Loop 组合；`()` Flow Input、Retry 次数／耗尽与 Iter 停止规则仍为开放项；`crates.io` 发布与版本策略不在本轮范围。
+
+历史 T01～T08 和 G1～G3 的通过记录对应旧 v2.0，不表示新实现完成。[P01～P07 Probe](docs/SRFlow_Core_Compile_Probe_Results_v0.1.md) 是局部可行性证据，正式调用链仍需重新验收。
+
+## 开发入口
+
+先阅读 [AGENTS](AGENTS.md)、[任务入口](docs/tasks/README.md)和当前经审定的详细任务书，再阅读任务涉及的设计章节。当前开发工具链基线为 Rust 1.97、edition 2024；离线检查命令为：
+
+```sh
+cargo check --offline --all-targets
+cargo test --offline --all-targets
+cargo test --offline --doc
+cargo clippy --offline --all-targets -- -D warnings
+cargo fmt --all -- --check
+RUSTDOCFLAGS="-D warnings" cargo doc --offline --no-deps
+cargo run --offline --example minimal_flow
 ```
-cargo test --all-targets                  # 测试
-# 基础：执行协议与数据连接
-cargo run --example node_only             # 普通使用者：只实现 Node
-cargo run --example composite_executable  # 扩展者：组合型 Executable 经 Runtime 调用 child
-cargo run --example basic_flow            # 基础 Flow：Ref 复用与显式 Output
-# 数据装配：Binding 与 SubFlow
-cargo run --example binding_projection    # Binding：非 Clone 根 + 字段投影 + tuple
-cargo run --example binding_assembly      # Binding：四来源命名装配与嵌套装配
-cargo run --example subflow               # SubFlow：Flow 作为另一个 Flow 的普通 child
-# 控制语义：四种控制器
-cargo run --example retry                 # Retry：生成→检查→重做、早停、耗尽、作为 Flow child
-cargo run --example match                 # Match：JudgeNode 产出路由值、tuple Binding 组装 (K, I)、default
-cargo run --example each                  # Each：顺序逐项执行、Flow Body、非 Clone 元素、作为 Flow child
-cargo run --example iter                  # Iter：跨轮状态推进、不变上下文保持、非 Clone 状态、作为 Flow child
-# 端到端：四种控制器在同一条流程里组合
-cargo run --example story_workflow        # 计划 → 路由 → 逐项加工 → 逐轮推进 → 最终结果（全离线 Fake）
-```
+
+`tests/ui/` 下是编译负例夹具，不是 Cargo target；由 `docs/tasks/V21_12_PROBE/ui_check.py` 按 `ui_manifest.tsv`（装配模式＋主诊断码）逐项驱动核对。
+
+核心当前没有普通依赖。`futures` 仅作为开发依赖，用于离线测试、doc-test 与示例驱动异步代码（核心不绑定 executor）。
 
 ## 仓库协作约定
 
@@ -47,8 +50,8 @@ cargo run --example story_workflow        # 计划 → 路由 → 逐项加工 �
 - [当前总规范 v2.1](docs/SRFlow_Design_v2.1.md)
 - [Core 语义基线](docs/SRFlow_Core_Design_v0.1.md)
 - [Runtime 内部实现基线](docs/SRFlow_Core_Runtime_Implementation_Design_v0.1.md)
+- [Probe 第一轮结论](docs/SRFlow_Core_Compile_Probe_Results_v0.1.md)
+- [任务入口](docs/tasks/README.md)
 - [v2.0 历史规范](docs/SRFlow_Design_v2.0.md)
-- [开发任务总览](docs/tasks/README.md)
-- [仓库协作约定](AGENTS.md)
 
-设计文档中的 SES 场景用于验证框架语义；本工程不依赖 SES 仓库。详细任务按总览逐项编写、执行和复审。
+设计文档中的 SES 场景用于验证框架语义；本工程不依赖 SES 的构建或业务数据。
