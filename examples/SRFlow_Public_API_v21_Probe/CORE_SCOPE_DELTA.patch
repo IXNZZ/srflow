@@ -1,0 +1,73 @@
+--- original/f9b6e20/scope.rs
++++ probe/scope.rs
+@@ -565,6 +565,70 @@
+ }
+ 
+ impl ScopeCoordinator {
++    /// PROBE EXTENSION: preflight all state positions, promote their targets, then
++    /// close the round once. No parent RefId rebind and no owned value extraction.
++    pub(crate) fn promote_group_probe(
++        &mut self,
++        source: &ScopeId,
++        selected: &[RefId],
++        states: &[ControlStateId],
++    ) -> Result<(), ScopeError> {
++        self.collect_source_early_check(source)?;
++        assert_eq!(selected.len(), states.len());
++        let plans: Vec<_> = selected.iter().zip(states)
++            .map(|(position, state)| self.prepare_promote(source, position, state))
++            .collect::<Result<_, _>>()?;
++        self.registry.lookup_mut(source)?.state = ScopeState::Finalizing;
++        for plan in plans {
++            if plan.transferred {
++                let id = plan.target.data_id().expect("preflight complete Data");
++                self.registry.lookup_mut(source)?.owned.remove(id);
++                self.registry.lookup_mut(&plan.controller)?.owned.insert(id.clone());
++            }
++            let state = self.registry.states.get_mut(&plan.state_key).expect("preflight state");
++            state.target = Some(plan.target);
++            if let Some(old) = plan.replaced_pending
++                && !state.pending.contains(&old) {
++                state.pending.push(old);
++            }
++        }
++        self.close_scope(source)
++    }
++
++    /// PROBE EXTENSION: consume all independent item outputs as one preflight /
++    /// commit boundary. Original production Core only consumes one output then
++    /// closes ItemScope. This method preserves Container ownership and rejects
++    /// imported values / duplicate DataId before any physical move.
++    pub(crate) fn consume_item_group_probe(
++        &mut self,
++        item: &ScopeId,
++        selected: &[RefId],
++        collectors: &[CollectorId],
++    ) -> Result<(), ScopeError> {
++        self.consume_item_early_check(item)?;
++        assert_eq!(selected.len(), collectors.len());
++        let mut plans = Vec::new();
++        for (position, collector) in selected.iter().zip(collectors) {
++            let plan = self.prepare_consume(item, position, collector)?;
++            if plans.iter().any(|p: &PreparedConsume| p.target.data_id() == plan.target.data_id()) {
++                return Err(ScopeError::DuplicateRootDataId {
++                    first_ref: selected[0].clone(),
++                    duplicate_ref: position.clone(),
++                    data_id: plan.target.data_id().unwrap().clone(),
++                });
++            }
++            plans.push(plan);
++        }
++        self.registry.lookup_mut(item)?.state = ScopeState::Finalizing;
++        for plan in plans {
++            let id = plan.target.data_id().expect("preflight complete Data");
++            self.container.move_into_collector(&plan.collector, id)
++                .map_err(|source| ScopeError::Storage { source })?;
++            self.registry.lookup_mut(item)?.owned.remove(id);
++        }
++        self.close_scope(item)
++    }
++
+     /// 以驱动创建一次的 ExecutionIdentity 建立协调组件与内部 RootScope。
+     ///
+     /// registry、Container 与 ScopeId 分配器共享同一身份根；不创建第二个身份根或

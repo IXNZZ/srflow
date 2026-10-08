@@ -1,0 +1,19 @@
+[package]
+name = "srflow-public-api-v21-probe"
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.97"
+publish = false
+
+[workspace]
+members = ["data-derive"]
+
+[lib]
+test = false
+doctest = false
+
+[dependencies]
+srflow-data-derive-probe = { path = "data-derive" }
+
+[dev-dependencies]
+futures = { version = "0.3", default-features = false, features = ["executor"] }
