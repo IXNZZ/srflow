@@ -10,7 +10,7 @@
 //! 预期输出：`ok: 42`。
 
 use futures::executor::block_on;
-use srflow::{BodyError, Data, DataRef, Flow, FlowBuilder, Runtime, SyncFnSig};
+use srflow::legacy::{BodyError, Data, DataRef, Flow, FlowBuilder, Runtime, SyncFnSig};
 
 #[derive(Debug, PartialEq, Eq)]
 struct Value(u32);

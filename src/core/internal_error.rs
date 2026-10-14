@@ -298,6 +298,37 @@ pub(crate) enum ScopeError {
         /// 本次操作声明的类型名。
         actual: &'static str,
     },
+    /// 成组 Promote 的两个槽指向同一个目的控制状态；整组目的必须逐槽唯一。
+    ///
+    /// 与 [`Self::DuplicateOwner`]／[`Self::DuplicateRootDataId`] 的区别：这里拒绝的是
+    /// **目的** state 句柄的重复，不涉及 target；两个槽指向同一 target（合法 alias）或
+    /// 同一来源位置仍按各槽独立预检，不在本变体覆盖范围内。
+    DuplicateStateDestination {
+        /// 被重复指定的目的状态句柄。
+        state: ControlStateId,
+    },
+    /// 成组 Consume 的两个槽解析到同一物理 `DataId`；整组消费必须逐槽唯一。
+    ///
+    /// 与 [`Self::DuplicateOwner`] 的区别：两个槽各自的绑定与 owner 都可以合法，只是同一
+    /// 实例被要求移动两次；与 [`Self::DuplicateRootDataId`] 的区别：本变体描述的是成组
+    /// **消费**在物理移动前对重复目标的诊断，不复用 Root 提取的语义。同类型不同 `DataId`
+    /// 或不同 collector 一律合法，不在本变体覆盖范围内。
+    DuplicateConsumeTarget {
+        /// 声明顺序中首个解析到该实例的位置。
+        first_position: RefId,
+        /// 重复解析到同一实例的位置。
+        duplicate_position: RefId,
+        /// 被重复选择的物理实例。
+        data_id: DataId,
+    },
+    /// 成组 Consume 的两个槽指向同一个目的 collector；整组目的必须逐槽唯一。
+    ///
+    /// 与 [`Self::DuplicateStateDestination`] 同形但作用于 collector 句柄；两个槽类型相同
+    /// 但 `CollectorId` 不同仍合法。
+    DuplicateCollectorDestination {
+        /// 被重复指定的目的 collector 句柄。
+        collector: CollectorId,
+    },
     /// CollectorId 属于另一次 Execution；在 registry 查表前拒绝。
     CollectorForeignExecution {
         /// 被拒绝的 CollectorId。
@@ -488,6 +519,22 @@ impl fmt::Display for ScopeError {
             } => write!(
                 f,
                 "{state} holds `{expected}` state, but `{actual}` was declared"
+            ),
+            Self::DuplicateStateDestination { state } => write!(
+                f,
+                "promote group repeats a destination control state: {state}"
+            ),
+            Self::DuplicateConsumeTarget {
+                first_position,
+                duplicate_position,
+                data_id,
+            } => write!(
+                f,
+                "consume group selects {first_position} and {duplicate_position} for the same {data_id}"
+            ),
+            Self::DuplicateCollectorDestination { collector } => write!(
+                f,
+                "consume group repeats a destination collector: {collector}"
             ),
             Self::CollectorForeignExecution { collector } => {
                 write!(f, "{collector} belongs to another execution")

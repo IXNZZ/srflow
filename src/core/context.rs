@@ -26,8 +26,8 @@ use super::identity::{CollectorId, DataId, ExecutionIdentity, ScopeId};
 use super::internal_error::ScopeError;
 use super::ref_id::RefId;
 use super::scope::{
-    ConsumeOutcome, ControlStateId, DiscardOutcome, ExportSlot, ImportSlot, PreparedRootExtraction,
-    PromoteOutcome, ScopeCoordinator, ScopeState, StateImportSlot,
+    AliasSlot, ConsumeGroupOutcome, ControlStateId, ExportSlot, ImportSlot, PreparedRootExtraction,
+    PromoteGroupOutcome, ScopeCoordinator, ScopeState, StateImportSlot,
 };
 /// 首次终止类别：执行失败或取消。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -44,23 +44,28 @@ pub(crate) enum TerminationKind {
 #[derive(Debug, Clone)]
 pub(crate) struct ExecutionTermination {
     kind: TerminationKind,
+    #[allow(dead_code)] // 仅由 cfg(test) 验收与观察路径使用（非 test 构建无消费者）
     scope: Option<ScopeId>,
+    #[allow(dead_code)] // 仅由 cfg(test) 验收与观察路径使用（非 test 构建无消费者）
     note: &'static str,
     #[allow(dead_code)] // 仅由 cfg(test) 验收与观察路径使用（非 test 构建无消费者）
     scope_error: Option<ScopeError>,
 }
 impl ExecutionTermination {
     /// 终止类别。
+    #[allow(dead_code)] // 仅由 cfg(test) 验收与观察路径使用（非 test 构建无消费者）
     pub(crate) fn kind(&self) -> TerminationKind {
         self.kind
     }
 
     /// 相关 Scope（如有）。
+    #[allow(dead_code)] // 仅由 cfg(test) 验收与观察路径使用（非 test 构建无消费者）
     pub(crate) fn scope(&self) -> Option<&ScopeId> {
         self.scope.as_ref()
     }
 
     /// 说明文本。
+    #[allow(dead_code)] // 仅由 cfg(test) 验收与观察路径使用（非 test 构建无消费者）
     pub(crate) fn note(&self) -> &'static str {
         self.note
     }
@@ -108,39 +113,52 @@ pub(crate) enum InvocationKind {
     /// 沿用 caller Scope 的轻量叶子调用。
     Leaf,
 }
-/// Item 边界的私有接收许可：只授权"当前 Item frame 把自身完整 owned 输出消费进其
-/// 直接 parent（EachScope）的固定 collector"。
+/// 成组 Item 边界的私有收口许可：只授权"当前 Item frame 把**完整声明输出组**一次消费进
+/// 其直接 parent（EachScope）的对应 collector 组"。
 ///
-/// 来源是**结构性**的：它只由 Each 的受控会话在每个 Item 边界内构造，其中的
-/// `collector` 只能经 `EachScopeTransfer::begin_each_session` 建立。普通调用者既拿不
-/// 到可变 Context，也无法凭空取得合法 CollectorId；它不授予任何 ancestor 读取、abort
-/// 或修改能力，也不放宽 `require_call_scope`。
+/// 与单项 Item 收口许可同形，但承载整组：`group` 是本次统一静态 Body 的完整声明
+/// 输出位置组，`collectors` 与之一一对应，二者都只能由 Each 的受控会话在每个 Item 边界内
+/// 构造。许可只授予"本次收口把固定声明组写入固定 parent owner 的 collector 组"，不授予
+/// 任意读取、abort、owned 注入、替换其它 collector 或修改 ancestor 的能力，也不放宽
+/// `require_call_scope`：它不通过泛化 ancestor 修改权修改 Item frame 访问 parent 的门禁。
+///
+/// 不提供任何公开／`pub` 构造器：本类型只在 crate 内可见，字段即 `pub(crate)`，构造需同时
+/// 持有真实的 item／each 句柄、完整声明组位置与已登记的目的 collector。
 #[derive(Debug, Clone)]
-pub(crate) struct ItemConsumePermit {
-    /// Each 调用的 Scope（collector 的 owner、Item frame 的调用父 Scope）。
+pub(crate) struct ItemGroupPermit {
+    /// 本次 Item 的 Scope（当前 frame 必须等于它）。
+    pub(crate) item: ScopeId,
+    /// Each 调用的 Scope（collector 组 owner、Item frame 的调用父 Scope）。
     pub(crate) each: ScopeId,
-    /// 本次 Each 的 collector。
-    pub(crate) collector: CollectorId,
+    /// 本次统一静态 Body 的完整声明输出位置组。
+    pub(crate) group: Vec<RefId>,
+    /// 与声明组逐槽对应的 collector。
+    pub(crate) collectors: Vec<CollectorId>,
 }
 
-/// Round 边界的私有收口许可：只授权"当前 Round frame 把**登记包装的唯一声明输出**
-/// 提交到固定 parent Loop 的固定控制状态"（Promote），或"丢弃本轮结果并关闭该 Round"。
+/// 成组 Round 边界的私有收口许可：只授权"当前 Round frame 把**完整声明输出组**一次
+/// 提交到固定 parent controller 的多个控制状态"（成组 Promote），或"只关闭当前 Round、
+/// 不更新任何状态"（close）。
 ///
-/// 来源是**结构性**的：它只由 Loop 的受控会话在每个 Round 边界内构造，其中
-/// `state` 只能由该会话在固定 Loop 上登记得到，`wrapper_output` 只能取自登记包装的
-/// 唯一输出位置。普通调用者既拿不到可变 Context，也无法凭空取得合法 `ControlStateId`
-/// （该句柄没有 `pub(crate)` 按字段构造器）；它不授予任何 ancestor 读取、abort、owned
-/// 注入或替换其它 state 的能力，也不放宽 `require_call_scope`。
+/// 来源是**结构性**的：`group` 只能取自本次统一静态 Body 的完整声明组，`states` 只能由
+/// 受控会话在固定 controller 上登记得到；普通调用者既拿不到可变 Context，也无法凭空
+/// 取得合法 `ControlStateId`（该句柄没有按字段构造器）。与前代单项许可
+/// 的单 state／单输出硬编码不同，本许可承载整组，但不授予任何 ancestor 读取、abort、
+/// owned 注入、替换其它 state 或扩大访问的能力，也不放宽 [`ExecutionContext`] 的
+/// `require_call_scope`。
+///
+/// 不提供任何公开／`pub` 构造器：本类型只在 crate 内可见，字段即 `pub(crate)`，构造需
+/// 同时持有真实的 controller／round 句柄、声明组位置与正式登记的控制状态。
 #[derive(Clone)]
-pub(crate) struct RoundCollectPermit {
-    /// Loop 调用的 Scope（目标 state 的 owner、Round frame 的调用父 Scope）。
-    pub(crate) loop_scope: ScopeId,
-    /// 本次收口固定的控制状态。
-    pub(crate) state: ControlStateId,
+pub(crate) struct RoundGroupPermit {
+    /// 本次 Round 的 controller Scope（全部目标 state 的 owner、Round frame 的调用父）。
+    pub(crate) controller: ScopeId,
     /// 本次 Round 的 Scope。
     pub(crate) round: ScopeId,
-    /// 登记包装的唯一声明输出位置。
-    pub(crate) wrapper_output: RefId,
+    /// 本次统一静态 Body 的完整声明输出位置组。
+    pub(crate) group: Vec<RefId>,
+    /// 与声明组逐槽对应的目标控制状态；"只关闭"路径为空。
+    pub(crate) states: Vec<ControlStateId>,
 }
 
 /// 一个调用 frame 的元数据。
@@ -254,6 +272,7 @@ impl ExecutionContext {
     /// 首次终止原因的副本，供 Root 收口写入 [`RootExit`](super::runtime::RootExit)。
     ///
     /// 只返回副本：终止状态本身不可被活跃调用或诊断移交清除。
+    #[allow(dead_code)] // 仅由 cfg(test) 验收与观察路径使用（非 test 构建无消费者）
     pub(crate) fn termination_report(&self) -> Option<ExecutionTermination> {
         self.termination.clone()
     }
@@ -336,7 +355,6 @@ impl ExecutionContext {
                 termination.kind(),
                 termination.scope().cloned(),
                 termination.note(),
-                termination.scope_error().cloned(),
             );
             self.termination = Some(termination);
         }
@@ -344,8 +362,26 @@ impl ExecutionContext {
 
     /// 记录首个清理失败；后续清理故障不覆盖首个诊断。
     pub(crate) fn record_cleanup_failure(&mut self, scope: ScopeId, error: ScopeError) {
-        if self.cleanup_failure.is_none() {
+        let stored_first = self.cleanup_failure.is_none();
+        #[cfg(test)]
+        super::test_support::record_cleanup_failure_probe(
+            scope.clone(),
+            error.clone(),
+            stored_first,
+        );
+        if stored_first {
             self.cleanup_failure = Some(CleanupDiagnostic { scope, error });
+            #[cfg(test)]
+            if let Some(later) = super::test_support::take_later_cleanup_diagnostic() {
+                let scope = self
+                    .cleanup_failure
+                    .as_ref()
+                    .expect("just stored the first diagnostic")
+                    .scope()
+                    .clone();
+                // 第二次调用：stored_first == false，只登记、不覆盖首诊断。
+                self.record_cleanup_failure(scope, later);
+            }
         }
     }
 
@@ -459,6 +495,17 @@ impl ExecutionContext {
         self.coordinator.resolve::<T>(scope, position)
     }
 
+    /// 整组本地 alias 装配：来源必须是本 Scope 已绑定的位置；不移动业务值。
+    pub(crate) fn bind_local_aliases(
+        &mut self,
+        scope: &ScopeId,
+        aliases: &[AliasSlot],
+    ) -> Result<(), ScopeError> {
+        self.require_running()?;
+        self.require_call_scope(scope)?;
+        self.coordinator.bind_local_aliases(scope, aliases)
+    }
+
     /// 输出位置预检：终止／可见范围检查后，校验该位置尚未被绑定。
     ///
     /// 叶子 site 在业务体运行前调用；失败时业务体不执行，诊断保留真实 `RefAlreadyBound`。
@@ -470,23 +517,6 @@ impl ExecutionContext {
         self.require_running()?;
         self.require_call_scope(scope)?;
         self.coordinator.precheck_output_position(scope, position)
-    }
-
-    /// 位置校验：不借用业务值，只校验 Scope 访问关系与容器归属 → 存活 → 类型。
-    ///
-    /// Orchestrator 输入 pack 的擦除后校验入口；它不建立长期借用，也不跳过访问关系
-    /// 检查，与 `resolve` 使用同一检查顺序。
-    pub(crate) fn validate_position(
-        &self,
-        scope: &ScopeId,
-        position: &RefId,
-        expected: std::any::TypeId,
-        expected_name: &'static str,
-    ) -> Result<(), ScopeError> {
-        self.require_running()?;
-        self.require_call_scope(scope)?;
-        self.coordinator
-            .validate_position(scope, position, expected, expected_name)
     }
 
     /// 从有效 Active parent 建立 child Scope。
@@ -587,19 +617,6 @@ impl ExecutionContext {
         self.coordinator.snapshot_targets_probe(scope)
     }
 
-    /// 测试故障注入：替换某位置 CollectionItem 的访问描述／下标（只改元数据）。
-    #[cfg(test)]
-    pub(crate) fn corrupt_item_access_probe(
-        &mut self,
-        scope: &ScopeId,
-        position: &RefId,
-        access: super::scope::ItemAccess,
-        index: Option<usize>,
-    ) -> Result<(), ScopeError> {
-        self.coordinator
-            .corrupt_item_access_probe(scope, position, access, index)
-    }
-
     /// cfg(test) 只读观察：下一个将被分配的 `DataId` 序号。
     #[cfg(test)]
     pub(crate) fn next_data_id_probe(&self) -> Option<u64> {
@@ -621,15 +638,6 @@ impl ExecutionContext {
             .inject_target_probe(scope, position, target);
     }
 
-    /// cfg(test) 只读观察：某 Scope 的直接 parent。
-    #[cfg(test)]
-    pub(crate) fn parent_scope_probe(
-        &self,
-        scope: &ScopeId,
-    ) -> Result<Option<ScopeId>, ScopeError> {
-        self.coordinator.parent_of(scope)
-    }
-
     /// 测试故障注入：把某个位置上的 CollectionItem 的 lifetime cap 换成指定 Scope。
     ///
     /// 只用于构造"上一 Item 已关闭"的 cap 失效反例；不改变其它元数据，也不成为生产入口。
@@ -644,16 +652,6 @@ impl ExecutionContext {
             .replace_item_cap_probe(scope, position, cap);
     }
 
-    /// 测试故障注入：把一份 owned 实例的责任移到指定 Scope（构造"非 Root owner"反例）。
-    #[cfg(test)]
-    pub(crate) fn relocate_ownership_probe(
-        &mut self,
-        id: &DataId,
-        to: &ScopeId,
-    ) -> Result<(), ScopeError> {
-        self.coordinator.relocate_ownership_probe(id, to)
-    }
-
     /// 窄只读观察：某位置当前绑定的完整 Data 身份（item 目标返回空）。
     #[cfg(test)]
     pub(crate) fn target_data_id_probe(
@@ -662,12 +660,6 @@ impl ExecutionContext {
         position: &RefId,
     ) -> Result<Option<super::identity::DataId>, ScopeError> {
         self.coordinator.target_data_id_probe(scope, position)
-    }
-
-    /// 测试故障注入：把一个 Scope 标记为 Finalizing（构造"controller 非 Active"）。
-    #[cfg(test)]
-    pub(crate) fn set_finalizing_probe(&mut self, scope: &ScopeId) -> Result<(), ScopeError> {
-        self.coordinator.set_finalizing_probe(scope)
     }
 
     /// 测试故障注入：直接销毁存储中的某个 Data entry（构造"清理前提失败"）。
@@ -690,127 +682,132 @@ impl ExecutionContext {
         self.coordinator.collector_moves_probe(collector)
     }
 
-    /// 受控 Item 收口：把当前 Item 的完整 owned 输出消费进其直接 parent 的 collector。
+    /// 受控成组 Item 收口：把当前 Item 的**完整声明输出组**一次预检、一次消费进对应的
+    /// collector 组，并在整组提交后只关闭 Item 一次。
     ///
-    /// 与通用 [`Self::consume_item`] 不同，它不要求父 EachScope 落在 `require_call_scope`
-    /// 的可见范围内（Item frame 请求父 Scope 会被该门禁拒绝），而是要求调用方持有
-    /// [`ItemConsumePermit`]：当前 frame 必须是该 Item、其调用父 frame 的 Scope 必须是
-    /// 许可登记的 Each、collector 必须由该 Each 负责。许可只授予"本次收口写入固定
-    /// parent collector"，不授予任意读取、abort 或修改 ancestor 的能力，也不放宽通用门禁。
-    pub(crate) fn consume_in_item_boundary(
+    /// 与单项收口同序，但承载整组：许可 [`ItemGroupPermit`]
+    /// 的声明组与本次 `selected` 必须逐槽一致、长度相等且非空，全部 collector 必须由该
+    /// Each 负责。许可只授予"本次收口把固定声明组写入固定 parent owner 的 collector 组"，
+    /// 不授予任意读取、abort、owned 注入、替换其它 collector 的能力，也不放宽通用门禁。
+    pub(crate) fn consume_group_in_item_boundary(
         &mut self,
         item: &ScopeId,
-        selected: &RefId,
-        permit: &ItemConsumePermit,
-    ) -> ConsumeOutcome {
-        if let Err(violated) = self.require_item_boundary(item, permit) {
-            return ConsumeOutcome::Rejected {
+        selected: &[RefId],
+        permit: &ItemGroupPermit,
+    ) -> ConsumeGroupOutcome {
+        if let Err(violated) = self.require_item_boundary_group(item, selected, permit) {
+            return ConsumeGroupOutcome::Rejected {
                 primary: violated,
                 cleanup_failure: None,
             };
         }
         self.coordinator
-            .consume_item_report(item, selected, &permit.collector)
+            .consume_item_group_report(item, selected, &permit.collectors)
     }
 
-    /// 受控 Round 收口：把当前 Round 登记包装的声明输出提交到固定 parent Loop 的控制状态。
+    /// 受控成组 Round 收口：把当前 Round 的**完整声明输出组**一次提交到固定 parent
+    /// controller 的多个控制状态。
     ///
-    /// 与通用 [`Self::promote`] 不同，它不要求父 LoopScope 落在 `require_call_scope` 的
-    /// 可见范围内（Round frame 请求父 Scope 会被该门禁拒绝），而是要求调用方持有
-    /// [`RoundCollectPermit`]：当前 frame 必须是该 Round、其调用父 frame 的 Scope 必须是
-    /// 许可登记的 Loop、Round 必须是该 Loop 的直接 child、目标 state owner 必须是该 Loop、
-    /// 且被选位置必须等于登记包装的唯一声明输出。许可只授予"本次收口写入固定 parent
-    /// state"，不授予任意读取、abort、owned 注入或替换其它 state 的能力，也不放宽通用门禁。
-    pub(crate) fn promote_in_round_boundary(
+    /// 与单项收口同序，但承载整组：许可
+    /// [`RoundGroupPermit`] 的声明组与本次 `selected` 必须逐槽一致，全部目标 state 由
+    /// 许可登记的 controller 负责。许可只授予"本次收口写入固定 controller 的登记状态
+    /// 组"，不授予任意读取、abort、owned 注入或替换其它 state 的能力，也不放宽通用门禁。
+    pub(crate) fn promote_group_in_round_boundary(
         &mut self,
         round: &ScopeId,
-        selected: &RefId,
-        permit: &RoundCollectPermit,
-    ) -> PromoteOutcome {
-        if let Err(violated) = self.require_round_boundary(round, permit) {
-            return PromoteOutcome::Rejected {
+        selected: &[RefId],
+        permit: &RoundGroupPermit,
+    ) -> PromoteGroupOutcome {
+        if let Err(violated) = self.require_round_boundary_group(round, selected, permit) {
+            return PromoteGroupOutcome::Rejected {
                 primary: violated,
-                cleanup_failure: None,
-            };
-        }
-        if selected != &permit.wrapper_output {
-            return PromoteOutcome::Rejected {
-                primary: ScopeError::Invariant {
-                    violated: "round promote requires the registered wrapper's only declared output",
-                },
                 cleanup_failure: None,
             };
         }
         self.coordinator
-            .promote_report(round, selected, &permit.state)
+            .promote_group_report(round, selected, &permit.states)
     }
 
-    /// 受控 Round 丢弃：关闭当前 Round 并处置其 owned，不绑定任何输出、不更新控制状态。
-    pub(crate) fn discard_in_round_boundary(
-        &mut self,
-        round: &ScopeId,
-        permit: &RoundCollectPermit,
-    ) -> DiscardOutcome {
-        if let Err(violated) = self.require_round_boundary(round, permit) {
-            return DiscardOutcome::Rejected {
-                primary: violated,
-                cleanup_failure: None,
-            };
-        }
-        // 来源与固定 state 都已由许可核对；观察参数只用于 cfg(test) 快照。
-        #[cfg(test)]
-        let selected = permit.wrapper_output.clone();
-        self.coordinator.discard_report(
-            round,
-            #[cfg(test)]
-            Some(&selected),
-            #[cfg(test)]
-            Some(&permit.state),
-        )
-    }
-
-    /// Round 收口的许可检查：当前 frame 就是该 Round，其父 frame 是许可登记的 Loop，
-    /// Round 是该 Loop 的直接 child，目标 state 由该 Loop 负责。
-    fn require_round_boundary(
+    /// 成组 Round 收口的许可检查：在公共结构核对之上，再要求本次 `selected` 与许可的
+    /// 完整声明组逐槽一致、长度相等且非空（空组不得读成 unit Iter 合法）。
+    fn require_round_boundary_group(
         &self,
         round: &ScopeId,
-        permit: &RoundCollectPermit,
+        selected: &[RefId],
+        permit: &RoundGroupPermit,
+    ) -> Result<(), ScopeError> {
+        self.require_round_boundary_group_shape(round, permit)?;
+        if permit.group.is_empty() {
+            return Err(ScopeError::Invariant {
+                violated: "group round collection requires a non-empty declared group",
+            });
+        }
+        if selected.len() != permit.group.len() {
+            return Err(ScopeError::Invariant {
+                violated: "group round collection length does not match the declared group",
+            });
+        }
+        for (index, position) in selected.iter().enumerate() {
+            if position != &permit.group[index] {
+                return Err(ScopeError::Invariant {
+                    violated: "group round collection slot does not match the declared group position",
+                });
+            }
+        }
+        Ok(())
+    }
+
+    /// 成组许可的公共结构核对：当前 frame 就是该 Round，其父 frame 是许可登记的
+    /// controller，Round 是该 controller 的直接 child，许可的声明组与目标 state 逐槽
+    /// 一一对应且全部 state 由该 controller 负责。空 `states`（配合空 `group`）表示
+    /// "只关闭不更新状态"。
+    fn require_round_boundary_group_shape(
+        &self,
+        round: &ScopeId,
+        permit: &RoundGroupPermit,
     ) -> Result<(), ScopeError> {
         self.require_running()?;
         if round != &permit.round {
             return Err(ScopeError::Invariant {
-                violated: "round collect requires the permitted round scope",
+                violated: "group round collect requires the permitted round scope",
             });
         }
         let Some(frame) = self.frames.last() else {
             return Err(ScopeError::Invariant {
-                violated: "round collection requires an active round frame",
+                violated: "group round collection requires an active round frame",
             });
         };
         if frame.scope.as_ref() != Some(round) {
             return Err(ScopeError::Invariant {
-                violated: "round collection requires the current frame to be the round scope",
+                violated: "group round collection requires the current frame to be the round scope",
             });
         }
         let Some(parent_index) = frame.parent else {
             return Err(ScopeError::Invariant {
-                violated: "round frame must have a caller frame",
+                violated: "group round frame must have a caller frame",
             });
         };
-        if self.frames[parent_index].scope.as_ref() != Some(&permit.loop_scope) {
+        if self.frames[parent_index].scope.as_ref() != Some(&permit.controller) {
             return Err(ScopeError::Invariant {
-                violated: "round frame caller is not the registered loop scope",
+                violated: "group round frame caller is not the registered controller scope",
             });
         }
-        if self.coordinator.parent_of(round)? != Some(permit.loop_scope.clone()) {
+        if self.coordinator.parent_of(round)? != Some(permit.controller.clone()) {
             return Err(ScopeError::Invariant {
-                violated: "round is not a direct child of the registered loop scope",
+                violated: "round is not a direct child of the registered controller scope",
             });
         }
-        if self.coordinator.state_owner(&permit.state)? != permit.loop_scope {
+        if permit.states.len() != permit.group.len() {
             return Err(ScopeError::Invariant {
-                violated: "round permit state is not owned by the registered loop scope",
+                violated: "group round permit state count does not match the declared group",
             });
+        }
+        for state in &permit.states {
+            if self.coordinator.state_owner(state)? != permit.controller {
+                return Err(ScopeError::Invariant {
+                    violated: "group round permit state is not owned by the registered controller",
+                });
+            }
         }
         Ok(())
     }
@@ -818,7 +815,8 @@ impl ExecutionContext {
     /// 受控 Item 创建：为刚建立的直接 child（ItemScope）绑定集合元素目标。
     ///
     /// 只允许当前调用 Scope 自己调用（调用方必须是 frame 栈顶的 Scope），只接受其本地
-    /// 已绑定的完整 `Vec<T>` 集合，不接受任意 DataId／ScopeId／owned item 注入。
+    /// 已绑定的 `Vec<T>` 集合来源——完整 Data，或合法的受限 item 借用（其元素自身是
+    /// `Vec<T>` 的嵌套集合）；不接受任意 DataId／ScopeId／owned item 注入。
     pub(crate) fn bind_item_input<T: Any>(
         &mut self,
         item_scope: &ScopeId,
@@ -839,38 +837,77 @@ impl ExecutionContext {
             .bind_item_input::<T>(item_scope, caller, source, target, index)
     }
 
-    /// Item 收口的许可检查：当前 frame 就是该 Item，其父 frame 是许可登记的 Each，
-    /// collector 由该 Each 负责。
-    fn require_item_boundary(
+    /// 成组 Item 收口的许可检查：当前 frame 就是该 Item，其父 frame 是许可登记的 Each，
+    /// Item 是该 Each 的直接 child，许可的声明组与本次 `selected` 逐槽一致、长度相等且
+    /// 非空，且全部目的 collector 由该 Each 负责。
+    ///
+    /// 声明组不能被裁剪、重排或换项：`selected` 必须与 `permit.group` 逐槽相等。空组在此
+    /// 拒绝，不得读成 unit（unit 走既有合法正常关闭路径，不调用本入口）。
+    fn require_item_boundary_group(
         &self,
         item: &ScopeId,
-        permit: &ItemConsumePermit,
+        selected: &[RefId],
+        permit: &ItemGroupPermit,
     ) -> Result<(), ScopeError> {
         self.require_running()?;
+        if item != &permit.item {
+            return Err(ScopeError::Invariant {
+                violated: "group item collect requires the permitted item scope",
+            });
+        }
         let Some(frame) = self.frames.last() else {
             return Err(ScopeError::Invariant {
-                violated: "item consumption requires an active item frame",
+                violated: "group item consumption requires an active item frame",
             });
         };
         if frame.scope.as_ref() != Some(item) {
             return Err(ScopeError::Invariant {
-                violated: "item consumption requires the current frame to be the item scope",
+                violated: "group item consumption requires the current frame to be the item scope",
             });
         }
         let Some(parent_index) = frame.parent else {
             return Err(ScopeError::Invariant {
-                violated: "item frame must have a caller frame",
+                violated: "group item frame must have a caller frame",
             });
         };
         if self.frames[parent_index].scope.as_ref() != Some(&permit.each) {
             return Err(ScopeError::Invariant {
-                violated: "item frame caller is not the registered each scope",
+                violated: "group item frame caller is not the registered each scope",
             });
         }
-        if self.coordinator.collector_owner(&permit.collector)? != permit.each {
+        if self.coordinator.parent_of(item)? != Some(permit.each.clone()) {
             return Err(ScopeError::Invariant {
-                violated: "item permit collector is not owned by the registered each scope",
+                violated: "item is not a direct child of the registered each scope",
             });
+        }
+        if permit.group.is_empty() {
+            return Err(ScopeError::Invariant {
+                violated: "group item collection requires a non-empty declared group",
+            });
+        }
+        if permit.collectors.len() != permit.group.len() {
+            return Err(ScopeError::Invariant {
+                violated: "group item permit collector count does not match the declared group",
+            });
+        }
+        if selected.len() != permit.group.len() {
+            return Err(ScopeError::Invariant {
+                violated: "group item collection length does not match the declared group",
+            });
+        }
+        for (index, position) in selected.iter().enumerate() {
+            if position != &permit.group[index] {
+                return Err(ScopeError::Invariant {
+                    violated: "group item collection slot does not match the declared group position",
+                });
+            }
+        }
+        for collector in &permit.collectors {
+            if self.coordinator.collector_owner(collector)? != permit.each {
+                return Err(ScopeError::Invariant {
+                    violated: "group item permit collector is not owned by the registered each scope",
+                });
+            }
         }
         Ok(())
     }
@@ -916,6 +953,7 @@ impl ExecutionContext {
     }
 
     /// 登记尚未初始化的控制状态位置。
+    #[allow(dead_code)] // 仅由 cfg(test) 验收与观察路径使用（非 test 构建无消费者）
     pub(crate) fn register_uninitialized_state<T: Any>(
         &mut self,
         controller: &ScopeId,
@@ -924,19 +962,6 @@ impl ExecutionContext {
         self.require_call_scope(controller)?;
         self.coordinator
             .register_uninitialized_state::<T>(controller)
-    }
-
-    /// 把控制状态的当前 target 一次性绑定到最终声明的本地输出位置。
-    pub(crate) fn bind_state_output(
-        &mut self,
-        controller: &ScopeId,
-        state: &ControlStateId,
-        position: &RefId,
-    ) -> Result<(), ScopeError> {
-        self.require_running()?;
-        self.require_call_scope(controller)?;
-        self.coordinator
-            .bind_state_output(controller, state, position)
     }
 
     /// 受控回收：销毁满足条件的 pending 旧状态。
@@ -1010,83 +1035,6 @@ impl ExecutionContext {
         self.coordinator.coordinator_probe()
     }
 
-    /// 测试观测：只读快照某 Scope 的本地引用与责任集合（终止后仍允许，不授予读取权）。
-    #[cfg(test)]
-    pub(crate) fn snapshot_probe(
-        &self,
-        scope: &ScopeId,
-    ) -> Result<super::scope::ScopeSnapshot, ScopeError> {
-        self.coordinator.snapshot_probe(scope)
-    }
-
-    /// cfg(test) Round 收口 Before 观察（独立通道）。
-    #[cfg(test)]
-    pub(crate) fn record_round_collect_before_probe(
-        &self,
-        operation: super::test_support::RoundCollectOperation,
-        source: &ScopeId,
-        selected: Option<&RefId>,
-        state: Option<&ControlStateId>,
-    ) {
-        self.coordinator.record_round_collect_probe(
-            super::test_support::RoundCollectSnapshotPhase::Before,
-            operation,
-            source,
-            selected,
-            state,
-        );
-    }
-
-    /// cfg(test) Round 收口 AfterReject 观察（prepare 拒绝后、cleanup 前）。
-    #[cfg(test)]
-    pub(crate) fn record_round_collect_after_reject_probe(
-        &self,
-        operation: super::test_support::RoundCollectOperation,
-        source: &ScopeId,
-        selected: Option<&RefId>,
-        state: Option<&ControlStateId>,
-    ) {
-        self.coordinator.record_round_collect_probe(
-            super::test_support::RoundCollectSnapshotPhase::AfterReject,
-            operation,
-            source,
-            selected,
-            state,
-        );
-    }
-
-    /// cfg(test) 最终绑定 Before 观察（独立通道）。
-    #[cfg(test)]
-    pub(crate) fn record_final_bind_before_probe(
-        &self,
-        controller: &ScopeId,
-        state: &ControlStateId,
-        position: &RefId,
-    ) {
-        self.coordinator.record_final_bind_probe(
-            super::test_support::FinalBindSnapshotPhase::Before,
-            controller,
-            state,
-            position,
-        );
-    }
-
-    /// cfg(test) 最终绑定 AfterReject 观察（拒绝后、guard cleanup 前）。
-    #[cfg(test)]
-    pub(crate) fn record_final_bind_after_reject_probe(
-        &self,
-        controller: &ScopeId,
-        state: &ControlStateId,
-        position: &RefId,
-    ) {
-        self.coordinator.record_final_bind_probe(
-            super::test_support::FinalBindSnapshotPhase::AfterReject,
-            controller,
-            state,
-            position,
-        );
-    }
-
     /// cfg(test) 只读：控制器当前登记的待回收旧值。
     #[cfg(test)]
     pub(crate) fn pending_probe(
@@ -1094,15 +1042,6 @@ impl ExecutionContext {
         controller: &ScopeId,
     ) -> Option<Vec<super::identity::DataId>> {
         self.coordinator.pending_probe(controller)
-    }
-
-    /// cfg(test) 窄故障：把控制状态改回"未初始化"。
-    #[cfg(test)]
-    pub(crate) fn uninitialize_state_probe(
-        &mut self,
-        state: &ControlStateId,
-    ) -> Result<(), ScopeError> {
-        self.coordinator.uninitialize_state_probe(state)
     }
 
     /// cfg(test) 窄故障：写入坏 state metadata（声明类型）。
@@ -1127,27 +1066,6 @@ impl ExecutionContext {
     ) -> Result<(), ScopeError> {
         self.coordinator
             .corrupt_item_cap_probe(scope, position, cap)
-    }
-
-    /// cfg(test) 窄故障：替换 state target 的 cap Scope。
-    #[cfg(test)]
-    pub(crate) fn corrupt_state_cap_probe(
-        &mut self,
-        state: &ControlStateId,
-        cap: ScopeId,
-    ) -> Result<(), ScopeError> {
-        self.coordinator.corrupt_state_cap_probe(state, cap)
-    }
-
-    /// cfg(test) 窄构造：把一个存活 DataId 绑定为该 Scope 的真实本地 alias。
-    #[cfg(test)]
-    pub(crate) fn bind_alias_probe(
-        &mut self,
-        scope: &ScopeId,
-        position: &RefId,
-        id: &super::identity::DataId,
-    ) -> Result<(), ScopeError> {
-        self.coordinator.bind_alias_probe(scope, position, id)
     }
 
     /// 测试观测：某 DataId 是否仍在本 Execution 内存活（只读诊断，不授予读取权）。
@@ -1306,6 +1224,8 @@ impl InvocationGuard<'_> {
             .scope
             .clone()
             .or_else(|| this.responsible.first().cloned());
+        #[cfg(test)]
+        super::test_support::record_guard_failure(scope.clone(), this.responsible.clone());
         this.context.terminate(
             TerminationKind::BodyError,
             scope,
@@ -1351,7 +1271,14 @@ impl Drop for InvocationGuard<'_> {
             }
             let mut failure: Option<(ScopeId, ScopeError)> = None;
             for scope in &scopes {
-                if let Err(error) = self.context.coordinator.abort(scope)
+                let cleanup = self.context.coordinator.abort(scope);
+                #[cfg(test)]
+                super::test_support::record_guard_cleanup(
+                    frame_scope.clone(),
+                    scope.clone(),
+                    cleanup.is_ok(),
+                );
+                if let Err(error) = cleanup
                     && failure.is_none()
                 {
                     failure = Some((scope.clone(), error));
@@ -1521,11 +1448,6 @@ impl BodyError {
     /// 内的 Scope 诊断（如有）。
     pub(crate) fn scope_error(&self) -> Option<&ScopeError> {
         self.scope.as_ref()
-    }
-}
-impl From<super::signature::BuildError> for BodyError {
-    fn from(source: super::signature::BuildError) -> Self {
-        Self::new(source.note())
     }
 }
 
@@ -1803,24 +1725,6 @@ pub(crate) mod creation_counts {
     /// guard 退出清理的累计次数。
     pub(crate) fn guard_cleanups() -> usize {
         GUARD_CLEANUPS.with(Cell::get)
-    }
-
-    /// 已创建的 ExecutionContext 次数。
-    #[cfg(test)]
-    pub(crate) fn contexts() -> usize {
-        CONTEXTS.with(Cell::get)
-    }
-
-    /// 已创建的 Coordinator 次数。
-    #[cfg(test)]
-    pub(crate) fn coordinators() -> usize {
-        COORDINATORS.with(Cell::get)
-    }
-
-    /// 已创建的 Container 次数。
-    #[cfg(test)]
-    pub(crate) fn containers() -> usize {
-        CONTAINERS.with(Cell::get)
     }
 
     pub(crate) fn count_context() {
@@ -6307,5 +6211,172 @@ mod tests {
         // 收尾：丢弃残留 frame 后正常结束 Root frame。
         root_guard.context.frames.truncate(1);
         root_guard.complete();
+    }
+
+    // ---- 成组 Consume 的窄许可（WE-T05 §5.1） ----
+
+    #[test]
+    fn g10_group_consume_in_item_boundary_moves_all_slots_and_closes_item_once() {
+        crate::core::test_support::reset_observations();
+        let mut f = Fixture::new();
+        let root = f.root();
+        let p0 = f.ref_id();
+        let p1 = f.ref_id();
+        let drops = Arc::clone(&f.drops);
+        {
+            let ctx = f.context_mut();
+            let mut root_guard = ctx.enter(InvocationKind::Root, &root, true).unwrap();
+            let each = root_guard.create_child(&root).unwrap();
+            let c0 = root_guard.begin_collector::<Tracked>(&each).unwrap();
+            let c1 = root_guard.begin_collector::<Tracked>(&each).unwrap();
+            let mut each_guard = root_guard
+                .enter(InvocationKind::Boundary, &each, true)
+                .unwrap();
+            let item = each_guard.create_child(&each).unwrap();
+            each_guard
+                .register_owned(&item, &p0, tracked_num(1, &drops))
+                .unwrap();
+            each_guard
+                .register_owned(&item, &p1, tracked_num(2, &drops))
+                .unwrap();
+            let mut item_guard = each_guard
+                .enter(InvocationKind::Boundary, &item, true)
+                .unwrap();
+            let permit = super::ItemGroupPermit {
+                item: item.clone(),
+                each: each.clone(),
+                group: vec![p0.clone(), p1.clone()],
+                collectors: vec![c0.clone(), c1.clone()],
+            };
+            let outcome = item_guard.consume_group_in_item_boundary(
+                &item,
+                &[p0.clone(), p1.clone()],
+                &permit,
+            );
+            assert!(
+                matches!(outcome, super::ConsumeGroupOutcome::Consumed),
+                "got {outcome:?}"
+            );
+            assert_eq!(item_guard.coordinator.collector_moves(&c0).unwrap(), 1);
+            assert_eq!(item_guard.coordinator.collector_moves(&c1).unwrap(), 1);
+            assert_eq!(item_guard.coordinator.collector_len(&c0).unwrap(), 1);
+            assert_eq!(item_guard.coordinator.collector_len(&c1).unwrap(), 1);
+            assert_eq!(
+                item_guard.state(&item).unwrap(),
+                ScopeState::Closed,
+                "Item 只关闭一次"
+            );
+            assert_eq!(
+                item_guard.state(&each).unwrap(),
+                ScopeState::Active,
+                "collector owner 仍存活"
+            );
+            item_guard.release_responsibility(&item);
+            item_guard.complete();
+            // each／root 由各自 guard 的清理收口（销毁未完成 collector）。
+            drop(each_guard);
+            root_guard.complete();
+        }
+        assert_eq!(
+            drops.load(Ordering::SeqCst),
+            2,
+            "两个业务值随 collector 各析构一次"
+        );
+    }
+
+    #[test]
+    fn g11_group_consume_permit_rejects_mismatch_before_any_move() {
+        crate::core::test_support::reset_observations();
+        let mut f = Fixture::new();
+        let root = f.root();
+        let p0 = f.ref_id();
+        let p1 = f.ref_id();
+        let drops = Arc::clone(&f.drops);
+        {
+            let ctx = f.context_mut();
+            let mut root_guard = ctx.enter(InvocationKind::Root, &root, true).unwrap();
+            let each = root_guard.create_child(&root).unwrap();
+            let c0 = root_guard.begin_collector::<Tracked>(&each).unwrap();
+            let c1 = root_guard.begin_collector::<Tracked>(&each).unwrap();
+            // 另一个 Each（外来 collector owner）。
+            let foreign_each = root_guard.create_child(&root).unwrap();
+            let foreign = root_guard
+                .begin_collector::<Tracked>(&foreign_each)
+                .unwrap();
+            let mut each_guard = root_guard
+                .enter(InvocationKind::Boundary, &each, true)
+                .unwrap();
+            let item = each_guard.create_child(&each).unwrap();
+            each_guard
+                .register_owned(&item, &p0, tracked_num(1, &drops))
+                .unwrap();
+            each_guard
+                .register_owned(&item, &p1, tracked_num(2, &drops))
+                .unwrap();
+            let mut item_guard = each_guard
+                .enter(InvocationKind::Boundary, &item, true)
+                .unwrap();
+
+            let permit = super::ItemGroupPermit {
+                item: item.clone(),
+                each: each.clone(),
+                group: vec![p0.clone(), p1.clone()],
+                collectors: vec![c0.clone(), c1.clone()],
+            };
+            // (1) 声明组被裁剪（selected 少一槽）。
+            match item_guard.consume_group_in_item_boundary(
+                &item,
+                std::slice::from_ref(&p0),
+                &permit,
+            ) {
+                super::ConsumeGroupOutcome::Rejected { primary, .. } => assert!(
+                    matches!(&primary, ScopeError::Invariant { violated }
+                        if *violated == "group item collection length does not match the declared group"),
+                    "got {primary:?}"
+                ),
+                other => panic!("expected rejection, got {other:?}"),
+            }
+            // (2) 换项：selected 位置与声明组不一致（长度相同）。
+            let swapped = vec![p1.clone(), p0.clone()];
+            match item_guard.consume_group_in_item_boundary(&item, &swapped, &permit) {
+                super::ConsumeGroupOutcome::Rejected { primary, .. } => assert!(
+                    matches!(&primary, ScopeError::Invariant { violated }
+                        if *violated == "group item collection slot does not match the declared group position"),
+                    "got {primary:?}"
+                ),
+                other => panic!("expected rejection, got {other:?}"),
+            }
+            // (3) 外来 collector（owner 不是许可 Each）。
+            let foreign_permit = super::ItemGroupPermit {
+                item: item.clone(),
+                each: each.clone(),
+                group: vec![p0.clone(), p1.clone()],
+                collectors: vec![c0.clone(), foreign.clone()],
+            };
+            match item_guard.consume_group_in_item_boundary(
+                &item,
+                &[p0.clone(), p1.clone()],
+                &foreign_permit,
+            ) {
+                super::ConsumeGroupOutcome::Rejected { primary, .. } => assert!(
+                    matches!(&primary, ScopeError::Invariant { violated }
+                        if *violated == "group item permit collector is not owned by the registered each scope"),
+                    "got {primary:?}"
+                ),
+                other => panic!("expected rejection, got {other:?}"),
+            }
+
+            // 冻结前的许可拒绝：Item 保持 Active、零物理移动。
+            assert_eq!(item_guard.state(&item).unwrap(), ScopeState::Active);
+            assert_eq!(item_guard.coordinator.collector_moves(&c0).unwrap(), 0);
+            assert_eq!(item_guard.coordinator.collector_moves(&c1).unwrap(), 0);
+            assert_eq!(item_guard.coordinator.owned_len_probe(&item).unwrap(), 2);
+
+            item_guard.release_responsibility(&item);
+            item_guard.complete();
+            drop(each_guard);
+            root_guard.complete();
+        }
+        assert_eq!(drops.load(Ordering::SeqCst), 2);
     }
 }

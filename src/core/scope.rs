@@ -20,7 +20,7 @@
 //! 本阶段只处理完整 `Data(DataId)` 目标；CollectionItem 与 cap 属 V21-08，Promote／
 //! Consume 属 V21-03，ExecutionContext／Invocation 与异步清理由 V21-04 接入。
 
-use std::any::{Any, TypeId, type_name};
+use std::any::{Any, TypeId, type_name, type_name_of_val};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
@@ -118,22 +118,56 @@ struct CollectorRecord {
 /// Execution 内部的运行时目标：完整 Data 实例，或受 lifetime cap 保护的集合元素。
 ///
 /// 目标只是定位信息，不拥有业务 Data；CollectionItem 不取得独立 DataId，也不拥有
-/// 业务值。它只在 ItemScope 存活且请求方位于 cap 内时可临时借用。
+/// 业务值。它只在 ItemScope 存活且请求方位于 cap 内时可临时借用。集合来源既可以是
+/// 容器里的完整 `Vec<T>`，也可以是另一个受限 item 借用（它的元素自身就是集合），
+/// 因此 SPEC §8 的 `Ref<Vec<T>>` 来源可以合法地嵌套；两种来源都只记录定位元数据。
 #[derive(Debug, Clone)]
 pub(crate) enum RefTarget {
     /// 已存储在 DataContainer 中的完整 Data 实例。
     Data(DataId),
-    /// 某个 `Vec<T>` 集合内部、有效期不超过 ItemScope 的 item。
+    /// 某个集合内部、有效期不超过 ItemScope 的 item。
     CollectionItem {
-        /// 来源集合的完整 Data 身份。
-        collection: DataId,
-        /// 元素下标。
+        /// 直接集合来源：完整 `Vec<T>` Data，或（嵌套时）另一个受限 item 借用。
+        collection: CollectionRoot,
+        /// 元素在该来源集合中的下标。
         index: usize,
         /// item 的有效期上限（ItemScope）。
         lifetime_cap: ScopeId,
         /// 封闭的元素访问描述（由 typed `Vec<T>` 工厂创建）。
         access: ItemAccess,
     },
+}
+
+/// 一个受限 item 借用的集合来源（真实根数据 + 定位关系）。
+///
+/// `Data` 是容器中承载真实 `Vec<T>` 的完整 Data；`Item` 递归保存上游 item 目标——它的
+/// 元素就是本 item 的直接集合。两种来源都**不拥有业务值、不分配 DataId、不移动或复制
+/// 集合**，也不赋予来源任何消费权：嵌套读取只借用外层真实根数据的元素。上游目标随其
+/// 所属 Scope 记录一并失效，因此关闭／取消后不会留下悬空引用，逐层 cap 保持原责任链。
+#[derive(Debug, Clone)]
+pub(crate) enum CollectionRoot {
+    /// 容器中的完整 `Vec<T>` Data（顶层 Each 的集合来源）。
+    Data(DataId),
+    /// 另一个受限 item 借用：它的值本身就是本 item 的直接集合。
+    Item(Box<RefTarget>),
+}
+
+impl CollectionRoot {
+    /// 整条来源链最外层的真实根 Data：承载 `Vec<..>` 的 owned 值。
+    ///
+    /// 只读元数据，供 target 投影（观察真实根）使用；运行期路径不依赖本访问器：
+    /// [`ScopeCoordinator::collection_value`] 与 [`ScopeCoordinator::require_collection_visible`]
+    /// 逐层校验链上的存活、实际类型、下标与 cap，因此即使不回溯也保持责任链。
+    #[cfg(test)]
+    fn root_data(&self) -> Option<&DataId> {
+        match self {
+            Self::Data(id) => Some(id),
+            Self::Item(target) => match target.as_ref() {
+                RefTarget::Data(id) => Some(id),
+                RefTarget::CollectionItem { collection, .. } => collection.root_data(),
+            },
+        }
+    }
 }
 
 impl RefTarget {
@@ -152,8 +186,8 @@ impl RefTarget {
         })
     }
 
-    /// CollectionItem 元数据；完整 Data 返回空。
-    fn item(&self) -> Option<(&DataId, usize, &ScopeId, &ItemAccess)> {
+    /// CollectionItem 的受限借用元数据；完整 Data 返回空。
+    fn item(&self) -> Option<(&CollectionRoot, usize, &ScopeId, &ItemAccess)> {
         match self {
             Self::Data(_) => None,
             Self::CollectionItem {
@@ -163,6 +197,11 @@ impl RefTarget {
                 access,
             } => Some((collection, *index, lifetime_cap, access)),
         }
+    }
+
+    /// CollectionItem 的 lifetime cap；完整 Data 返回空。
+    fn item_cap(&self) -> Option<&ScopeId> {
+        self.item().map(|(_, _, cap, _)| cap)
     }
 }
 
@@ -299,10 +338,62 @@ impl ExportSlot {
     }
 }
 
+/// 受控本地 alias 装配槽位：把同一 Scope 内已绑定位置的 target 复制到该 Scope 的新位置。
+///
+/// 只建立引用（alias），不移动业务值、不改变 owner，也不产生跨边界能力。
+#[derive(Debug, Clone)]
+pub(crate) struct AliasSlot {
+    source: RefId,
+    target: RefId,
+    expected: TypeId,
+    expected_name: &'static str,
+}
+
+impl AliasSlot {
+    /// 以 `T` 声明目的位置类型。
+    #[allow(dead_code)] // 由定向测试使用；生产路径按登记类型构造
+    pub(crate) fn new<T: Any>(source: &RefId, target: RefId) -> Self {
+        Self::with_type(source, target, TypeId::of::<T>(), type_name::<T>())
+    }
+
+    /// 以运行时类型声明目的位置：Definition 的登记类型决定。
+    pub(crate) fn with_type(
+        source: &RefId,
+        target: RefId,
+        expected: TypeId,
+        expected_name: &'static str,
+    ) -> Self {
+        Self {
+            source: source.clone(),
+            target,
+            expected,
+            expected_name,
+        }
+    }
+}
+
 /// 直接 Consume 的结果报告：原始拒绝与其后的清理诊断分别保留。
 #[derive(Debug)]
 pub(crate) enum ConsumeOutcome {
     /// 消费成功：值已移入 collector，ItemScope 已关闭。
+    Consumed,
+    /// 拒绝：`primary` 是原始原因，`cleanup_failure` 是其后的清理失败（若有）。
+    Rejected {
+        /// 原始拒绝原因。
+        primary: ScopeError,
+        /// prepare 拒绝后 `cleanup_subtree` 的诊断（若有）。
+        cleanup_failure: Option<ScopeError>,
+    },
+}
+
+/// 成组 Consume 的结果报告：整组独立于单项 [`ConsumeOutcome`]。
+///
+/// 与 [`ConsumeOutcome`] 同形：整组全部槽通过预检并提交后才报告 [`Self::Consumed`]；
+/// 结构拒绝或任一槽预检拒绝走 [`Self::Rejected`]，原始原因与其后的清理失败分别保留，
+/// 不使用单项 convenience 的 `cleanup_failure.unwrap_or(primary)` 覆盖原拒绝。
+#[derive(Debug)]
+pub(crate) enum ConsumeGroupOutcome {
+    /// 整组消费成功：全部业务值已移入各自 collector、逐 `DataId` 撤销 Item owned、Item 只关闭一次。
     Consumed,
     /// 拒绝：`primary` 是原始原因，`cleanup_failure` 是其后的清理失败（若有）。
     Rejected {
@@ -331,26 +422,23 @@ pub(crate) enum PromoteOutcome {
     },
 }
 
-/// Round discard 的结果报告：不绑定任何输出，只关闭并清理来源。
+/// 成组 Promote 的结果报告：整组独立于单项 [`PromoteOutcome`]。
 ///
-/// 与 [`ConsumeOutcome`]／[`PromoteOutcome`] 同形；用于 Iter 之外的 Retry Continue 与
-/// 内部丢弃路径。
+/// 与 [`PromoteOutcome`] 同形：整组全部槽通过预检并提交后才报告 [`Self::Promoted`]；
+/// 结构拒绝或任一槽预检拒绝走 [`Self::Rejected`]，原始原因与其后的清理失败分别保留，
+/// 不使用单项 convenience 的 `cleanup_failure.unwrap_or(primary)` 覆盖原拒绝。
 #[derive(Debug)]
-pub(crate) enum DiscardOutcome {
-    /// 已关闭：本地引用失效、owned 处置、留 tombstone。
-    Discarded,
+pub(crate) enum PromoteGroupOutcome {
+    /// 整组保留成功：全部状态 target 已更新、责任按去重后的 `DataId` 转移、来源只关闭一次。
+    Promoted,
     /// 拒绝：`primary` 是原始原因，`cleanup_failure` 是其后的清理失败（若有）。
     Rejected {
         /// 原始拒绝原因。
         primary: ScopeError,
-        /// prepare 拒绝后清理来源的诊断（若有）。
+        /// 拒绝后清理来源的诊断（若有）。
         cleanup_failure: Option<ScopeError>,
     },
 }
-
-/// 测试观测用的 Scope 元数据快照：本地引用集合与责任集合（均按本地序号排序）。
-#[cfg(test)]
-pub(crate) type ScopeSnapshot = (Vec<(RefId, DataId)>, Vec<DataId>);
 
 /// 测试观测用的 target-aware 快照类型：`(refs, owned)`。
 #[cfg(test)]
@@ -365,7 +453,7 @@ pub(crate) enum TargetSnapshot {
     Data(DataId),
     /// 集合元素目标（含来源集合、下标、cap 与声明类型）。
     CollectionItem {
-        /// 来源集合。
+        /// 来源集合：整条来源链最外层的真实根 Data（嵌套 item-backed 集合亦然）。
         collection: DataId,
         /// 元素下标。
         index: usize,
@@ -390,7 +478,10 @@ impl TargetSnapshot {
                 lifetime_cap,
                 access,
             } => Self::CollectionItem {
-                collection: collection.clone(),
+                collection: collection
+                    .root_data()
+                    .expect("an item collection source always resolves to a real root Data")
+                    .clone(),
                 index: *index,
                 lifetime_cap: lifetime_cap.clone(),
                 collection_type: access.collection_type(),
@@ -516,6 +607,28 @@ struct PreparedConsume {
     collector: CollectorId,
 }
 
+/// 成组 Consume 的单个预检槽：声明位置、完整 Data 目标与目的 collector。
+#[derive(Debug)]
+struct PreparedConsumeSlot {
+    /// 声明输出位置；生产提交段按目标移动，`position` 只由 cfg(test) 的整组快照读取。
+    #[allow(dead_code)] // 仅由 cfg(test) 观察路径使用（非 test 构建无消费者）
+    position: RefId,
+    target: RefTarget,
+    collector: CollectorId,
+}
+
+/// 成组 Consume 的预检结果。
+///
+/// 只由 [`ScopeCoordinator::consume_item_group_report`] 在同一次独占操作内生成并提交；
+/// 逐槽复用 [`ScopeCoordinator::prepare_consume`] 的完整校验（声明绑定／完整 Data／存活／
+/// 元素类型／collector 物理建构值与登记身份／Item-owned／清理前提），并在整组层面补上
+/// 重复目标与重复目的 collector 的拒绝。不含任何已移动的值，因此拒绝时不留下半提交。
+#[derive(Debug)]
+struct PreparedConsumeGroup {
+    item: ScopeId,
+    slots: Vec<PreparedConsumeSlot>,
+}
+
 /// Export 的预检结果。
 ///
 /// 只由 `prepare_export` 生成，并在同一次独占操作内被 `commit_export` 消费；
@@ -544,6 +657,7 @@ pub(crate) struct PreparedRootExtraction {
 
 impl PreparedRootExtraction {
     /// 本次计划要提取的实例数（Unit 为 0）。
+    #[allow(dead_code)] // 仅由 cfg(test) 验收与观察路径使用（非 test 构建无消费者）
     pub(crate) fn take_count(&self) -> usize {
         self.selections.len()
     }
@@ -643,23 +757,6 @@ impl ScopeCoordinator {
         {
             *lifetime_cap = cap.clone();
         }
-    }
-
-    /// 测试故障注入：把一份 owned 实例的责任移到指定 Scope。
-    ///
-    /// 只用于构造"Root 输出 target 由非 Root Scope 负责"的防御反例（`to` 可以是已关闭
-    /// Scope 的 tombstone 身份）；不改变任何判断路径，也不成为生产入口。
-    #[cfg(test)]
-    pub(crate) fn relocate_ownership_probe(
-        &mut self,
-        id: &DataId,
-        to: &ScopeId,
-    ) -> Result<(), ScopeError> {
-        for record in self.registry.scopes.values_mut() {
-            record.owned.remove(id);
-        }
-        self.registry.lookup_mut(to)?.owned.insert(id.clone());
-        Ok(())
     }
 
     /// 测试观测：一个 Scope 的 owned 数量。
@@ -884,24 +981,21 @@ impl ScopeCoordinator {
         }
     }
 
-    /// CollectionItem 借用：cap 有效且请求方在 cap 内 → 集合存活与实际 `Vec<T>` 类型 →
-    /// index／元素类型 → 责任链。返回的 `&T` 绑定组件的 `&self`，与其他借用同寿命上限。
+    /// CollectionItem 借用：cap 有效且请求方在 cap 内 → 集合来源链（真实根数据、逐层
+    /// 类型／下标／cap）→ 元素类型 → 责任链。返回的 `&T` 绑定组件的 `&self`，与其他
+    /// 借用同寿命上限。
     fn borrow_item<'a, T: Any>(
         &'a self,
         target: &'a RefTarget,
         scope: &ScopeId,
         position: &RefId,
     ) -> Result<&'a T, ScopeError> {
-        let (_, _, cap, access) = target
+        let (collection, index, cap, access) = target
             .item()
             .expect("borrow_item is only called for item targets");
         self.require_in_cap(position, cap, scope)?;
         self.check_item(position, target, TypeId::of::<T>(), type_name::<T>())?;
-        let (collection, index, _, _) = target.item().expect("item target");
-        let value = self
-            .container
-            .borrow_any(collection)
-            .map_err(|source| ScopeError::from_storage(position.clone(), source))?;
+        let value = self.collection_value(position, collection, cap, access)?;
         let projected =
             access
                 .project(value, index)
@@ -918,9 +1012,10 @@ impl ScopeCoordinator {
             })
     }
 
-    /// item 目标的共享检查：cap 有效 → cap 内转移目的 → 集合存活与实际 `Vec<T>` 类型 →
-    /// 元素声明类型 → index 在界 → 责任链（cap 仍能看到来源集合）。请求方范围由调用方
-    /// 按语义给出诊断（业务读取用 `ItemOutsideCap`，跨 Scope 转移用 `ItemCapEscape`）。
+    /// item 目标的共享检查：cap 有效 → 集合来源存活与实际类型（嵌套时逐层向上）→
+    /// 元素声明类型 → index 在界 → 责任链（cap 仍能看到来源链的真实根数据）。请求方
+    /// 范围由调用方按语义给出诊断（业务读取用 `ItemOutsideCap`，跨 Scope 转移用
+    /// `ItemCapEscape`）。
     fn check_item(
         &self,
         position: &RefId,
@@ -932,19 +1027,7 @@ impl ScopeCoordinator {
             .item()
             .expect("check_item is only called for item targets");
         self.require_live_cap(position, cap)?;
-        if self.container.borrow_any(collection).is_err() {
-            return Err(ScopeError::ItemCollectionNotAlive {
-                position: position.clone(),
-                collection: collection.clone(),
-            });
-        }
-        self.container
-            .validate_type(
-                collection,
-                access.collection_type(),
-                access.collection_name(),
-            )
-            .map_err(|source| ScopeError::from_storage(position.clone(), source))?;
+        let value = self.collection_value(position, collection, cap, access)?;
         if access.element_type() != expected {
             return Err(ScopeError::TypeMismatch {
                 position: position.clone(),
@@ -952,11 +1035,7 @@ impl ScopeCoordinator {
                 actual: access.element_name(),
             });
         }
-        self.require_visible_target(collection, cap)?;
-        let value = self
-            .container
-            .borrow_any(collection)
-            .map_err(|source| ScopeError::from_storage(position.clone(), source))?;
+        self.require_collection_visible(position, collection, cap)?;
         if access.project(value, index).is_none() {
             return Err(ScopeError::ItemIndexOutOfRange {
                 position: position.clone(),
@@ -964,6 +1043,80 @@ impl ScopeCoordinator {
             });
         }
         Ok(())
+    }
+
+    /// 定位 item 目标的**直接集合**值：完整 `Vec<T>` 直接借用容器 entry；嵌套来源则
+    /// 逐层回溯上游 item 的真实元素，直到真实根 Data。
+    ///
+    /// 每层都校验来源存活、实际类型与声明的集合类型一致（对真实值 `TypeId` 复核，不靠
+    /// 元数据背书）、下标在界，并复核上游 cap 仍有效且包含本层 cap。返回值与组件 `&self`
+    /// 同寿命：链上不产生长期 borrow、DataId 或 owner 登记。
+    fn collection_value<'a>(
+        &'a self,
+        position: &RefId,
+        collection: &CollectionRoot,
+        cap: &ScopeId,
+        access: &ItemAccess,
+    ) -> Result<&'a dyn Any, ScopeError> {
+        match collection {
+            CollectionRoot::Data(id) => {
+                let value = self.container.borrow_any(id).map_err(|_| {
+                    ScopeError::ItemCollectionNotAlive {
+                        position: position.clone(),
+                        collection: id.clone(),
+                    }
+                })?;
+                self.container
+                    .validate_type(id, access.collection_type(), access.collection_name())
+                    .map_err(|source| ScopeError::from_storage(position.clone(), source))?;
+                Ok(value)
+            }
+            CollectionRoot::Item(outer) => {
+                let (outer_collection, outer_index, outer_cap, outer_access) = outer
+                    .item()
+                    .expect("a nested collection source is an item target");
+                // 上游 cap 仍有效，且本层 cap 落在它之内：原责任链不被拉长。
+                self.require_live_cap(position, outer_cap)?;
+                self.require_in_cap(position, outer_cap, cap)?;
+                let outer_value =
+                    self.collection_value(position, outer_collection, outer_cap, outer_access)?;
+                let value = outer_access
+                    .project(outer_value, outer_index)
+                    .ok_or_else(|| ScopeError::ItemIndexOutOfRange {
+                        position: position.clone(),
+                        index: outer_index,
+                    })?;
+                // 上游元素的**实际**类型必须就是本层的直接集合类型。
+                if value.type_id() != access.collection_type() {
+                    return Err(ScopeError::TypeMismatch {
+                        position: position.clone(),
+                        expected: access.collection_name(),
+                        actual: type_name_of_val(value),
+                    });
+                }
+                Ok(value)
+            }
+        }
+    }
+
+    /// 来源链的责任链校验：完整集合 Data 必须由 cap 自身或其后代负责；嵌套来源则要求
+    /// 链上每一跳都位于 cap 内，并继续校验其真实根数据仍由可达的责任方持有。
+    fn require_collection_visible(
+        &self,
+        position: &RefId,
+        collection: &CollectionRoot,
+        cap: &ScopeId,
+    ) -> Result<(), ScopeError> {
+        match collection {
+            CollectionRoot::Data(id) => self.require_visible_target(id, cap),
+            CollectionRoot::Item(outer) => {
+                let (outer_collection, _, outer_cap, _) = outer
+                    .item()
+                    .expect("a nested collection source is an item target");
+                self.require_in_cap(position, outer_cap, cap)?;
+                self.require_collection_visible(position, outer_collection, outer_cap)
+            }
+        }
     }
 
     /// 请求方必须在 item 的 lifetime cap 内（业务读取与位置校验）。
@@ -1026,27 +1179,6 @@ impl ScopeCoordinator {
             .map_err(|source| ScopeError::Storage { source })
     }
 
-    /// 测试观测：只读快照某个 Scope 的本地引用与责任集合（终止后仍允许）。
-    ///
-    /// 只查表、不要求 Active、不授予读取权；用于证明失败的整组导出没有留下部分绑定或
-    /// 责任转移。返回按本地序号排序的确定性列表。本投影**只接受完整 Data 绑定**：
-    /// 出现 CollectionItem 时显式报"不适用"，不把集合 DataId 扁平化成 item 身份
-    /// （target-aware 观察见 [`Self::snapshot_targets_probe`]）。
-    #[cfg(test)]
-    pub(crate) fn snapshot_probe(&self, scope: &ScopeId) -> Result<ScopeSnapshot, ScopeError> {
-        let (refs, owned) = self.snapshot_targets_probe(scope)?;
-        let mut projected: Vec<(RefId, DataId)> = Vec::with_capacity(refs.len());
-        for (position, target) in refs {
-            match target {
-                TargetSnapshot::Data(id) => projected.push((position, id)),
-                TargetSnapshot::CollectionItem { .. } => {
-                    return Err(ScopeError::NonCompleteTarget { position });
-                }
-            }
-        }
-        Ok((projected, owned))
-    }
-
     /// target-aware 只读快照：refs 区分完整 Data 与 CollectionItem（含来源集合、下标、
     /// cap 与声明类型），owned 仍是完整 DataId 集合；不做任何扁平化。
     #[cfg(test)]
@@ -1086,54 +1218,66 @@ impl ScopeCoordinator {
         Ok(())
     }
 
-    /// 位置校验：只校验归属、存活与声明类型，不借用业务值。
+    /// 整组本地 alias 装配：把 Scope 内已绑定位置的 target 复制到同一 Scope 的新位置。
     ///
-    /// 供 Orchestrator 输入 pack 的擦除后校验使用：它走与 [`Self::resolve`] 相同的
-    /// Scope 访问关系与容器归属 → 存活 → 类型检查路径，不建立第二条可能漂移的顺序，
-    /// 也不产生长期 `&T`。
-    pub(crate) fn validate_position(
-        &self,
+    /// 逐项预检（来源已绑定 → 存活与类型 → owner 合法 → 目的位置未绑定 → 批内目的
+    /// 位置不重复），全部通过后一次提交。它不移动业务值、不改变 owner，也不放宽
+    /// cap 或 Ref 单赋值。
+    pub(crate) fn bind_local_aliases(
+        &mut self,
         scope: &ScopeId,
-        position: &RefId,
-        expected: TypeId,
-        expected_name: &'static str,
+        aliases: &[AliasSlot],
     ) -> Result<(), ScopeError> {
         let record = self.registry.lookup(scope)?;
         record.require_active()?;
-        let target = record
-            .refs
-            .get(position)
-            .ok_or_else(|| ScopeError::RefNotBound {
-                scope: scope.clone(),
-                position: position.clone(),
-            })?;
-        match target {
-            RefTarget::Data(id) => {
-                self.container
-                    .validate_type(id, expected, expected_name)
-                    .map_err(|source| ScopeError::from_storage(position.clone(), source))?;
-                self.require_visible_target(id, scope)
+        let mut planned: Vec<(RefId, RefTarget)> = Vec::with_capacity(aliases.len());
+        for slot in aliases {
+            let target = record
+                .refs
+                .get(&slot.source)
+                .ok_or_else(|| ScopeError::RefNotBound {
+                    scope: scope.clone(),
+                    position: slot.source.clone(),
+                })?;
+            match target {
+                RefTarget::Data(id) => {
+                    self.container
+                        .validate_type(id, slot.expected, slot.expected_name)
+                        .map_err(|source| ScopeError::from_storage(slot.source.clone(), source))?;
+                    let owner = self.owner_of(id)?;
+                    if !self.is_ancestor_or_self(&owner, scope) {
+                        return Err(ScopeError::IllegalOwner {
+                            id: id.clone(),
+                            owner,
+                            boundary: scope.clone(),
+                        });
+                    }
+                }
+                RefTarget::CollectionItem { .. } => {
+                    self.check_item(&slot.source, target, slot.expected, slot.expected_name)?;
+                    // 请求方 Scope 也必须在 item cap 内；alias 不能把 cap 外来源写成可读绑定。
+                    let cap = target.item_cap().expect("item target matched by variant");
+                    self.require_in_cap(&slot.source, cap, scope)?;
+                }
             }
-            RefTarget::CollectionItem { .. } => {
-                self.validate_item(position, target, scope, expected, expected_name)
+            if record.refs.contains_key(&slot.target) {
+                return Err(ScopeError::RefAlreadyBound {
+                    scope: scope.clone(),
+                    position: slot.target.clone(),
+                });
             }
+            if planned.iter().any(|(seen, _)| seen == &slot.target) {
+                return Err(ScopeError::DuplicatePosition {
+                    position: slot.target.clone(),
+                });
+            }
+            planned.push((slot.target.clone(), target.clone()));
         }
-    }
-
-    /// CollectionItem 的位置校验：不建立长期借用，顺序与 [`Self::borrow_item`] 一致。
-    fn validate_item(
-        &self,
-        position: &RefId,
-        target: &RefTarget,
-        scope: &ScopeId,
-        expected: TypeId,
-        expected_name: &'static str,
-    ) -> Result<(), ScopeError> {
-        let (_, _, cap, _) = target
-            .item()
-            .expect("validate_item is only called for item targets");
-        self.require_in_cap(position, cap, scope)?;
-        self.check_item(position, target, expected, expected_name)
+        let record = self.registry.lookup_mut(scope)?;
+        for (position, target) in planned {
+            record.refs.insert(position, target);
+        }
+        Ok(())
     }
 
     /// 整组 Import（本地引用来源）：[`Self::import_batch_with_states`] 的 convenience 入口。
@@ -1199,7 +1343,7 @@ impl ScopeCoordinator {
                     RefTarget::CollectionItem { .. } => {
                         // item 只作为 alias 导入：来源与目的都必须在 cap 内，不产生 item-owned
                         // 登记；合法目的不能替非法来源背书。
-                        let (_, _, cap, _) = target.item().expect("item target matched by variant");
+                        let cap = target.item_cap().expect("item target matched by variant");
                         self.check_item(&slot.source, &target, slot.expected, slot.expected_name)?;
                         self.require_in_cap(&slot.source, cap, caller)?;
                         self.require_destination_in_cap(&slot.source, cap, child)?;
@@ -1255,8 +1399,9 @@ impl ScopeCoordinator {
                         }
                     }
                     RefTarget::CollectionItem { .. } => {
-                        let (_, _, cap, _) =
-                            state_target.item().expect("item target matched by variant");
+                        let cap = state_target
+                            .item_cap()
+                            .expect("item target matched by variant");
                         self.check_item(
                             &slot.target,
                             &state_target,
@@ -1307,7 +1452,7 @@ impl ScopeCoordinator {
                     self.require_visible_target(id, controller)?;
                 }
                 RefTarget::CollectionItem { .. } => {
-                    let (_, _, cap, _) = target.item().expect("item target matched by variant");
+                    let cap = target.item_cap().expect("item target matched by variant");
                     self.require_in_cap(from_local, cap, controller)?;
                     self.check_item(from_local, target, TypeId::of::<T>(), type_name::<T>())?;
                 }
@@ -1327,6 +1472,7 @@ impl ScopeCoordinator {
     /// 用于"完成前为空"的控制器状态：Iter 的当前状态由本地初始引用设置（见
     /// [`Self::register_state`]），而 Retry 的最终结果状态在首轮完成前没有目标，只能
     /// 由首次合法 Promote 初始化。该形态的推进策略属 V21-09，本任务只交付机制。
+    #[allow(dead_code)] // 仅由 cfg(test) 验收与观察路径使用（非 test 构建无消费者）
     pub(crate) fn register_uninitialized_state<T: Any>(
         &mut self,
         controller: &ScopeId,
@@ -1417,19 +1563,35 @@ impl ScopeCoordinator {
         }
     }
 
-    /// Round discard：在无可绑定输出的收口里关闭来源并处置其 owned。
+    /// 成组 Promote 的报告形状：与 [`Self::promote_report`] 同序，把来源 Round 的
+    /// **完整声明输出组**一次预检、一次提交到同一控制器的多个控制状态，并在整组提交
+    /// 完成后只关闭来源一次。
     ///
-    /// 与 Promote 共用同一早检与清理纪律，但**不更新任何控制状态、不转移责任、不绑定
-    /// Definition RefId**；用于 Retry 的 Continue（本轮结果随 Round 结束丢弃）。返回
-    /// 报告形状，供真实 Round runner 区分"已关闭"与"拒绝"。
-    pub(crate) fn discard_report(
+    /// 次序：来源 Active 且无活跃 descendant → 结构校验（空组、长度不等、重复目的 state
+    /// 均为 typed 拒绝，且在任何状态变更之前完成）→ 冻结 → 观察 `Before` → 逐槽
+    /// [`Self::prepare_promote`] → 全部成功后逐槽 [`Self::apply_promote_effects`] → 整组
+    /// 只 [`Self::close_scope`] 一次 → 登记提交现场。任一槽预检拒绝：观察 `AfterReject`
+    /// （cleanup 之前）→ [`Self::cleanup_subtree`] → `Rejected`。提交段没有 cleanup 分支
+    /// （与单项一致）：预检（含清理前提）已全部完成。
+    ///
+    /// 责任转移以 `DataId` 为单位去重：多个槽共享同一实例时只转移一次（`owned` 集合
+    /// 语义本身幂等，提交现场记录额外保留去重后的集合）。整组不绑定父 Definition RefId、
+    /// 不提取业务值，也不循环调用单项 `promote`／`commit_promote`。
+    pub(crate) fn promote_group_report(
         &mut self,
         source: &ScopeId,
-        #[cfg(test)] selected: Option<&RefId>,
-        #[cfg(test)] state: Option<&ControlStateId>,
-    ) -> DiscardOutcome {
+        selected: &[RefId],
+        states: &[ControlStateId],
+    ) -> PromoteGroupOutcome {
         if let Err(primary) = self.collect_source_early_check(source) {
-            return DiscardOutcome::Rejected {
+            return PromoteGroupOutcome::Rejected {
+                primary,
+                cleanup_failure: None,
+            };
+        }
+        // 结构校验先于冻结：纯形状错误不改变来源状态，因此没有清理分支。
+        if let Err(primary) = self.check_promote_group_shape(selected, states) {
+            return PromoteGroupOutcome::Rejected {
                 primary,
                 cleanup_failure: None,
             };
@@ -1439,43 +1601,82 @@ impl ScopeCoordinator {
             .lookup_mut(source)
             .map(|record| record.state = ScopeState::Finalizing)
         {
-            return DiscardOutcome::Rejected {
+            return PromoteGroupOutcome::Rejected {
                 primary,
                 cleanup_failure: None,
             };
         }
         #[cfg(test)]
-        self.record_round_collect_probe(
+        self.record_round_collect_group_probe(
             super::test_support::RoundCollectSnapshotPhase::Before,
-            super::test_support::RoundCollectOperation::Discard,
             source,
             selected,
-            state,
+            states,
         );
-        let prepared = self.cleanup_targets(source);
-        match prepared {
-            Ok(targets) => match self.close_validated(source, targets) {
-                Ok(()) => DiscardOutcome::Discarded,
-                Err(primary) => DiscardOutcome::Rejected {
-                    primary,
-                    cleanup_failure: None,
-                },
-            },
-            Err(primary) => {
-                #[cfg(test)]
-                self.record_round_collect_probe(
-                    super::test_support::RoundCollectSnapshotPhase::AfterReject,
-                    super::test_support::RoundCollectOperation::Discard,
-                    source,
-                    selected,
-                    state,
-                );
-                DiscardOutcome::Rejected {
-                    primary,
-                    cleanup_failure: self.cleanup_subtree(source).err(),
+        let mut plans = Vec::with_capacity(selected.len());
+        for (position, state) in selected.iter().zip(states) {
+            match self.prepare_promote(source, position, state) {
+                Ok(plan) => plans.push(plan),
+                Err(primary) => {
+                    #[cfg(test)]
+                    self.record_round_collect_group_probe(
+                        super::test_support::RoundCollectSnapshotPhase::AfterReject,
+                        source,
+                        selected,
+                        states,
+                    );
+                    return PromoteGroupOutcome::Rejected {
+                        primary,
+                        cleanup_failure: self.cleanup_subtree(source).err(),
+                    };
                 }
             }
         }
+        for plan in &plans {
+            self.apply_promote_effects(plan)
+                .expect("promote group preflight guarantees infallible effects");
+        }
+        #[cfg(test)]
+        self.record_promote_group_state_probe(&plans);
+        if let Err(primary) = self.close_scope(source) {
+            return PromoteGroupOutcome::Rejected {
+                primary,
+                cleanup_failure: None,
+            };
+        }
+        PromoteGroupOutcome::Promoted
+    }
+
+    /// 成组 Promote 的结构校验：整组非空、声明组与目的 state 长度一致、目的控制状态
+    /// 逐槽唯一。在任何状态变更之前执行；空组与长度不等用 [`ScopeError::Invariant`]
+    /// （与 Context 许可层判定一致），重复目的 state 用
+    /// [`ScopeError::DuplicateStateDestination`]。明确不让空组读成 unit Iter 合法。
+    fn check_promote_group_shape(
+        &self,
+        selected: &[RefId],
+        states: &[ControlStateId],
+    ) -> Result<(), ScopeError> {
+        if selected.is_empty() {
+            return Err(ScopeError::Invariant {
+                violated: "promote group must declare at least one output slot",
+            });
+        }
+        if selected.len() != states.len() {
+            return Err(ScopeError::Invariant {
+                violated: "promote group selected and destination state counts must match",
+            });
+        }
+        let mut seen: Vec<(u64, u64)> = Vec::with_capacity(states.len());
+        for state in states {
+            let key = (state.owner().seq(), state.seq());
+            if seen.contains(&key) {
+                return Err(ScopeError::DuplicateStateDestination {
+                    state: state.clone(),
+                });
+            }
+            seen.push(key);
+        }
+        Ok(())
     }
 
     /// 收口早检：来源存在、Active、且没有仍存活的 descendant。不做任何状态变更。
@@ -1551,6 +1752,7 @@ impl ScopeCoordinator {
     /// 只用于最终输出准备：状态必须属于该控制器且已初始化，target 必须存活、类型相符
     /// 且责任链对该控制器可见；位置保持单赋值，不存在解绑／重绑接口。逐轮可变位置不
     /// 使用本入口。调用时机与决策属 V21-09。
+    #[allow(dead_code)] // 仅由 cfg(test) 验收与观察路径使用（非 test 构建无消费者）
     pub(crate) fn bind_state_output(
         &mut self,
         controller: &ScopeId,
@@ -1591,7 +1793,7 @@ impl ScopeCoordinator {
                     self.require_visible_target(id, controller)?;
                 }
                 RefTarget::CollectionItem { .. } => {
-                    let (_, _, cap, _) = target.item().expect("item target matched by variant");
+                    let cap = target.item_cap().expect("item target matched by variant");
                     self.require_in_cap(position, cap, controller)?;
                     self.check_item(
                         position,
@@ -1751,40 +1953,276 @@ impl ScopeCoordinator {
         }
     }
 
-    /// cfg(test) 元数据故障注入：把某位置上的 CollectionItem 目标替换为给定的访问描述／下标。
+    /// 成组 Consume 的报告形状：与 [`Self::consume_item_report`] 同序，把当前 Item 的
+    /// **完整声明输出组**一次预检、一次提交进对应的 collector 组，并在整组提交完成后
+    /// 只关闭 Item 一次。
     ///
-    /// 只改目标**元数据**，不新增业务数据通道；解析仍走真实向量／元素校验。
-    #[cfg(test)]
-    pub(crate) fn corrupt_item_access_probe(
+    /// 次序严格对齐成组 Consume 纪律：Item 存在／Active／无 live descendant（早检）→
+    /// 整组结构校验（非空、长度相等、位置唯一、目的 collector 唯一）→ 冻结（Finalizing）
+    /// → 观察 `Before` → 逐槽 [`Self::prepare_consume`]（声明绑定、完整 Data、存活、元素
+    /// 类型、collector 物理建构值与登记身份、Item-owned、清理前提）并按 `DataId` 拒绝重复
+    /// 目标 → 全部通过后逐槽 [`DataContainer::move_into_collector`]／撤销 Item owned →
+    /// 整组只 [`Self::close_scope`] 一次。
+    ///
+    /// 任一槽预检拒绝：观察 `AfterReject`（cleanup 之前）→ [`Self::cleanup_subtree`] →
+    /// `Rejected`；其前的全部槽都不移动、不追加、不撤销 owner、不使 `DataId` 失效。提交段
+    /// 在完整预检之后没有可恢复的普通失败（全部前提已逐槽校验），因此不设 rollback 或
+    /// 假成功分支。
+    pub(crate) fn consume_item_group_report(
         &mut self,
-        scope: &ScopeId,
-        position: &RefId,
-        access: ItemAccess,
-        index: Option<usize>,
-    ) -> Result<(), ScopeError> {
-        let record = self.registry.lookup_mut(scope)?;
-        let target = record
-            .refs
-            .get_mut(position)
-            .ok_or_else(|| ScopeError::RefNotBound {
-                scope: scope.clone(),
-                position: position.clone(),
-            })?;
-        match target {
-            RefTarget::CollectionItem {
-                access: slot_access,
-                index: slot_index,
-                ..
-            } => {
-                *slot_access = access;
-                if let Some(index) = index {
-                    *slot_index = index;
+        item: &ScopeId,
+        selected: &[RefId],
+        collectors: &[CollectorId],
+    ) -> ConsumeGroupOutcome {
+        if let Err(primary) = self.consume_item_early_check(item) {
+            return ConsumeGroupOutcome::Rejected {
+                primary,
+                cleanup_failure: None,
+            };
+        }
+        // 结构校验先于冻结：纯形状错误保持 Active 且零副作用，因此没有清理分支。
+        if let Err(primary) = self.check_consume_group_shape(selected, collectors) {
+            return ConsumeGroupOutcome::Rejected {
+                primary,
+                cleanup_failure: None,
+            };
+        }
+        if let Err(primary) = self
+            .registry
+            .lookup_mut(item)
+            .map(|record| record.state = ScopeState::Finalizing)
+        {
+            return ConsumeGroupOutcome::Rejected {
+                primary,
+                cleanup_failure: None,
+            };
+        }
+        #[cfg(test)]
+        self.inject_consume_group_cleanup_fault(item, selected);
+        #[cfg(test)]
+        self.record_consume_group_probe(
+            super::test_support::ConsumeGroupSnapshotPhase::Before,
+            item,
+            selected,
+            collectors,
+        );
+
+        let mut plans: Vec<PreparedConsumeSlot> = Vec::with_capacity(selected.len());
+        let mut seen: Vec<(RefId, DataId)> = Vec::with_capacity(selected.len());
+        for (index, (position, collector)) in selected.iter().zip(collectors).enumerate() {
+            match self.prepare_consume_slot(index, item, position, collector, &seen) {
+                Ok(slot) => {
+                    let id = slot
+                        .target
+                        .data_id()
+                        .expect("prepared consume slot targets complete Data")
+                        .clone();
+                    seen.push((position.clone(), id));
+                    plans.push(slot);
                 }
-                Ok(())
+                Err(primary) => {
+                    #[cfg(test)]
+                    self.record_consume_group_probe(
+                        super::test_support::ConsumeGroupSnapshotPhase::AfterReject,
+                        item,
+                        selected,
+                        collectors,
+                    );
+                    return ConsumeGroupOutcome::Rejected {
+                        primary,
+                        cleanup_failure: self.cleanup_subtree(item).err(),
+                    };
+                }
             }
-            RefTarget::Data(_) => Err(ScopeError::Invariant {
-                violated: "metadata fault injection requires a collection item target",
-            }),
+        }
+
+        match self.commit_consume_group(PreparedConsumeGroup {
+            item: item.clone(),
+            slots: plans,
+        }) {
+            Ok(()) => ConsumeGroupOutcome::Consumed,
+            Err(primary) => ConsumeGroupOutcome::Rejected {
+                primary,
+                cleanup_failure: None,
+            },
+        }
+    }
+
+    /// 成组 Consume 单槽预检：先按 test-only 故障钩子判定"后项预检失败"，再复用单项
+    /// [`Self::prepare_consume`] 的完整校验，最后在整组范围内拒绝"同一物理 `DataId` 被
+    /// 两个槽消费"。所有判定都不改变任何状态；`seen` 按声明顺序保存此前的 `(位置, 实例)`。
+    fn prepare_consume_slot(
+        &self,
+        index: usize,
+        item: &ScopeId,
+        position: &RefId,
+        collector: &CollectorId,
+        seen: &[(RefId, DataId)],
+    ) -> Result<PreparedConsumeSlot, ScopeError> {
+        let _ = index;
+        #[cfg(test)]
+        if super::test_support::take_consume_group_fault_if(|fault| {
+            matches!(
+                fault,
+                super::test_support::ConsumeGroupFault::RejectPreflightAt(at) if *at == index
+            )
+        })
+        .is_some()
+        {
+            return Err(ScopeError::Invariant {
+                violated: "test-injected consume group preflight failure",
+            });
+        }
+        let plan = self.prepare_consume(item, position, collector)?;
+        if let Some(id) = plan.target.data_id()
+            && let Some((first_position, _)) = seen.iter().find(|(_, target)| target == id)
+        {
+            return Err(ScopeError::DuplicateConsumeTarget {
+                first_position: first_position.clone(),
+                duplicate_position: position.clone(),
+                data_id: id.clone(),
+            });
+        }
+        Ok(PreparedConsumeSlot {
+            position: position.clone(),
+            target: plan.target,
+            collector: plan.collector,
+        })
+    }
+
+    /// 成组 Consume 的结构校验：整组非空、声明组与目的 collector 长度一致、声明位置与
+    /// 目的 collector 逐槽唯一。在任何状态变更之前执行；空组与长度不等用
+    /// [`ScopeError::Invariant`]（与 Context 许可层判定一致），重复位置用
+    /// [`ScopeError::DuplicatePosition`]，重复目的 collector 用
+    /// [`ScopeError::DuplicateCollectorDestination`]。明确不让空组读成 unit Each 合法。
+    fn check_consume_group_shape(
+        &self,
+        selected: &[RefId],
+        collectors: &[CollectorId],
+    ) -> Result<(), ScopeError> {
+        if selected.is_empty() {
+            return Err(ScopeError::Invariant {
+                violated: "consume group must declare at least one output slot",
+            });
+        }
+        if selected.len() != collectors.len() {
+            return Err(ScopeError::Invariant {
+                violated: "consume group selected and destination collector counts must match",
+            });
+        }
+        let mut positions: Vec<&RefId> = Vec::with_capacity(selected.len());
+        for position in selected {
+            if positions.contains(&position) {
+                return Err(ScopeError::DuplicatePosition {
+                    position: position.clone(),
+                });
+            }
+            positions.push(position);
+        }
+        let mut seen_collectors: Vec<&CollectorId> = Vec::with_capacity(collectors.len());
+        for collector in collectors {
+            if seen_collectors.contains(&collector) {
+                return Err(ScopeError::DuplicateCollectorDestination {
+                    collector: collector.clone(),
+                });
+            }
+            seen_collectors.push(collector);
+        }
+        Ok(())
+    }
+
+    /// 成组 Consume 提交段：逐槽在 Container 内部移动业务值进各自建构区、逐 `DataId`
+    /// 撤销 Item owned；全部槽完成后整组只 [`Self::close_scope`] 一次。旧 `DataId` 在移动
+    /// 后立即失效，collector 收到每槽恰一个值。
+    ///
+    /// 提交段没有可恢复的普通失败分支：`prepare_consume_slot` 已逐槽确认目标为 Item 唯一
+    /// 负责的完整 Data、元素类型相符、collector 与登记身份一致，因此 `move_into_collector`
+    /// 的归属／存活／类型三类拒绝在提交前都已被排除。容器诊断只用于报告不变量破坏。
+    fn commit_consume_group(&mut self, plan: PreparedConsumeGroup) -> Result<(), ScopeError> {
+        for (index, slot) in plan.slots.iter().enumerate() {
+            #[cfg(test)]
+            if super::test_support::take_consume_group_fault_if(|fault| {
+                matches!(
+                    fault,
+                    super::test_support::ConsumeGroupFault::FailCommitAt(at) if *at == index
+                )
+            })
+            .is_some()
+            {
+                return Err(ScopeError::Invariant {
+                    violated: "test-injected consume group commit failure",
+                });
+            }
+            #[cfg(not(test))]
+            let _ = index;
+            let data_id = slot
+                .target
+                .data_id()
+                .expect("prepare_consume only plans complete Data targets");
+            self.container
+                .move_into_collector(&slot.collector, data_id)
+                .map_err(|source| ScopeError::Storage { source })?;
+            self.registry.lookup_mut(&plan.item)?.owned.remove(data_id);
+        }
+        #[cfg(test)]
+        {
+            let selected: Vec<RefId> = plan
+                .slots
+                .iter()
+                .map(|slot| slot.position.clone())
+                .collect();
+            let collectors: Vec<CollectorId> = plan
+                .slots
+                .iter()
+                .map(|slot| slot.collector.clone())
+                .collect();
+            self.record_consume_group_probe(
+                super::test_support::ConsumeGroupSnapshotPhase::AfterCommit,
+                &plan.item,
+                &selected,
+                &collectors,
+            );
+        }
+        self.close_scope(&plan.item)
+    }
+
+    /// cfg(test) 故障注入：销毁 Item 的一个待清理 owned 的存储 entry，使清理前提在预检
+    /// 阶段真实失败（优先选择不在 `selected` 中的实例）。
+    ///
+    /// 只改存储前提，不新增业务数据旁路，也不修改前提检查本体：随后 `prepare_consume`
+    /// 的 `cleanup_targets` 会按真实判据拒绝，拒绝路径的 `cleanup_subtree` 也会因同一前提
+    /// 失败而给出独立的 `cleanup_failure`。
+    #[cfg(test)]
+    fn inject_consume_group_cleanup_fault(&mut self, item: &ScopeId, selected: &[RefId]) {
+        if super::test_support::take_consume_group_fault_if(|fault| {
+            matches!(fault, super::test_support::ConsumeGroupFault::FailCleanup)
+        })
+        .is_none()
+        {
+            return;
+        }
+        let Ok(record) = self.registry.lookup(item) else {
+            return;
+        };
+        let mut selected_ids: Vec<DataId> = Vec::new();
+        for position in selected {
+            if let Some(id) = record
+                .refs
+                .get(position)
+                .and_then(|target| target.data_id())
+            {
+                selected_ids.push(id.clone());
+            }
+        }
+        let candidate = record
+            .owned
+            .iter()
+            .filter(|id| !selected_ids.iter().any(|selected| selected == *id))
+            .min_by_key(|id| id.seq())
+            .cloned()
+            .or_else(|| selected_ids.first().cloned());
+        if let Some(id) = candidate {
+            self.container.destroy(&id).ok();
         }
     }
 
@@ -1941,6 +2379,292 @@ impl ScopeCoordinator {
         );
     }
 
+    /// cfg(test) 完整只读观察（成组 Promote）：`Before` 在冻结之后、任何槽 `prepare` 之前，
+    /// `AfterReject` 在某个槽 `prepare` 拒绝之后、内部 cleanup 之前。
+    ///
+    /// 记录来源侧与控制器侧的完整 target-aware refs／owned、逐槽声明位置与目标身份／
+    /// 责任方／存活、逐槽控制状态 target／pending 与下一个 `DataId` 序号；观察失败以
+    /// `observation_error` 显式记录，不静默降级为默认值。
+    #[cfg(test)]
+    pub(crate) fn record_round_collect_group_probe(
+        &self,
+        phase: super::test_support::RoundCollectSnapshotPhase,
+        source: &ScopeId,
+        selected: &[RefId],
+        states: &[ControlStateId],
+    ) {
+        let mut error: Option<String> = None;
+        let mut note = |message: String| {
+            if error.is_none() {
+                error = Some(message);
+            }
+        };
+        let (source_refs, source_owned) = match self.snapshot_targets_probe(source) {
+            Ok((refs, owned)) => (refs, owned),
+            Err(err) => {
+                note(format!("source snapshot: {err:?}"));
+                (Vec::new(), Vec::new())
+            }
+        };
+        let controller = states
+            .first()
+            .map(|state| state.owner().clone())
+            .or_else(|| {
+                self.registry
+                    .lookup(source)
+                    .ok()
+                    .and_then(|record| record.parent.clone())
+            });
+        let (controller_refs, controller_owned) = match controller.as_ref() {
+            Some(controller) => match self.snapshot_targets_probe(controller) {
+                Ok((refs, owned)) => (refs, owned),
+                Err(err) => {
+                    note(format!("controller snapshot: {err:?}"));
+                    (Vec::new(), Vec::new())
+                }
+            },
+            None => (Vec::new(), Vec::new()),
+        };
+        let mut slots = Vec::with_capacity(selected.len());
+        for position in selected {
+            let target_value = self
+                .registry
+                .lookup(source)
+                .ok()
+                .and_then(|record| record.refs.get(position).cloned());
+            let target = target_value.as_ref().map(TargetSnapshot::of);
+            let slot = match &target_value {
+                Some(RefTarget::Data(id)) => super::test_support::GroupSlotSnapshot {
+                    position: position.clone(),
+                    target,
+                    owner: self.owner_of(id).ok(),
+                    alive: self.container.borrow_any(id).is_ok(),
+                },
+                Some(RefTarget::CollectionItem { .. }) => super::test_support::GroupSlotSnapshot {
+                    position: position.clone(),
+                    target,
+                    owner: None,
+                    alive: false,
+                },
+                None => {
+                    note(format!(
+                        "selected position {:?} is not bound",
+                        position.seq()
+                    ));
+                    super::test_support::GroupSlotSnapshot {
+                        position: position.clone(),
+                        target: None,
+                        owner: None,
+                        alive: false,
+                    }
+                }
+            };
+            slots.push(slot);
+        }
+        let mut state_snapshots = Vec::with_capacity(states.len());
+        for state in states {
+            let snapshot = match self.lookup_state(state) {
+                Ok(record) => {
+                    let target = record.target.clone();
+                    let alive = target.as_ref().is_some_and(|target| match target {
+                        RefTarget::Data(id) => self.container.borrow_any(id).is_ok(),
+                        RefTarget::CollectionItem { .. } => false,
+                    });
+                    super::test_support::GroupStateSnapshot {
+                        owner: record.owner.clone(),
+                        seq: state.seq(),
+                        target: target.map(|target| TargetSnapshot::of(&target)),
+                        alive,
+                        pending: record.pending.clone(),
+                    }
+                }
+                Err(err) => {
+                    note(format!("state lookup: {err:?}"));
+                    super::test_support::GroupStateSnapshot {
+                        owner: state.owner().clone(),
+                        seq: state.seq(),
+                        target: None,
+                        alive: false,
+                        pending: Vec::new(),
+                    }
+                }
+            };
+            state_snapshots.push(snapshot);
+        }
+        super::test_support::record_round_collect_group(
+            super::test_support::RoundCollectGroupSnapshot {
+                phase,
+                source: source.clone(),
+                selected: slots,
+                states: state_snapshots,
+                source_refs,
+                source_owned,
+                controller_refs,
+                controller_owned,
+                next_data_id: self.next_data_id_probe(),
+                observation_error: error,
+            },
+        );
+    }
+
+    /// cfg(test) 成组 Consume 的完整整组前后观察：`Before` 在冻结之后、逐槽 prepare 之前，
+    /// `AfterReject` 在某槽 prepare 拒绝之后、内部 cleanup 之前，`AfterCommit` 在全部槽
+    /// 物理移动与撤销 owner 之后、`close_scope` 之前。
+    ///
+    /// 记录 Item 侧与 Each（直接 parent）侧的完整 target-aware refs／owned、每槽的声明位置／
+    /// 目标／完整 DataId／owner／存活／目的 collector 的元素类型与 moves、以及下一个
+    /// `DataId` 序号；观察失败以 `observation_error` 显式记录，不静默降级为默认值。
+    #[cfg(test)]
+    fn record_consume_group_probe(
+        &self,
+        phase: super::test_support::ConsumeGroupSnapshotPhase,
+        item: &ScopeId,
+        selected: &[RefId],
+        collectors: &[CollectorId],
+    ) {
+        let mut error: Option<String> = None;
+        let mut note = |message: String| {
+            if error.is_none() {
+                error = Some(message);
+            }
+        };
+        let item_state = self.registry.lookup(item).ok().map(|record| record.state);
+        let (item_refs, item_owned) = match self.snapshot_targets_probe(item) {
+            Ok((refs, owned)) => (refs, owned),
+            Err(err) => {
+                note(format!("item snapshot: {err:?}"));
+                (Vec::new(), Vec::new())
+            }
+        };
+        let each = self
+            .registry
+            .lookup(item)
+            .ok()
+            .and_then(|record| record.parent.clone());
+        let (each_refs, each_owned) = match each.as_ref() {
+            Some(each) => match self.snapshot_targets_probe(each) {
+                Ok((refs, owned)) => (refs, owned),
+                Err(err) => {
+                    note(format!("each snapshot: {err:?}"));
+                    (Vec::new(), Vec::new())
+                }
+            },
+            None => (Vec::new(), Vec::new()),
+        };
+        let mut slots = Vec::with_capacity(selected.len().max(collectors.len()));
+        for (index, position) in selected.iter().enumerate() {
+            let target_value = self
+                .registry
+                .lookup(item)
+                .ok()
+                .and_then(|record| record.refs.get(position).cloned());
+            let target = target_value.as_ref().map(TargetSnapshot::of);
+            let (data_id, owner, alive) = match &target_value {
+                Some(RefTarget::Data(id)) => (
+                    Some(id.clone()),
+                    self.owner_of(id).ok(),
+                    self.container.borrow_any(id).is_ok(),
+                ),
+                _ => (None, None, false),
+            };
+            let (collector, collector_element, collector_owner, collector_moves) =
+                match collectors.get(index) {
+                    Some(collector) => match self.lookup_collector(collector) {
+                        Ok(record) => (
+                            Some(collector.clone()),
+                            Some(record.element_name),
+                            Some(record.owner.clone()),
+                            self.container.collector_moves(collector).ok(),
+                        ),
+                        Err(err) => {
+                            note(format!("collector lookup {index}: {err:?}"));
+                            (
+                                Some(collector.clone()),
+                                None,
+                                None,
+                                self.container.collector_moves(collector).ok(),
+                            )
+                        }
+                    },
+                    None => (None, None, None, None),
+                };
+            slots.push(super::test_support::ConsumeGroupSlotSnapshot {
+                position: position.clone(),
+                target,
+                data_id,
+                owner,
+                alive,
+                collector,
+                collector_element,
+                collector_owner,
+                collector_moves,
+            });
+        }
+        super::test_support::record_consume_group(super::test_support::ConsumeGroupSnapshot {
+            phase,
+            item: item.clone(),
+            item_state,
+            item_refs,
+            item_owned,
+            each,
+            each_refs,
+            each_owned,
+            slots,
+            next_data_id: self.next_data_id_probe(),
+            observation_error: error,
+        });
+    }
+
+    /// cfg(test) 成组 Promote 提交现场记录：在全部 `apply_promote_effects` 之后、来源
+    /// `close_scope` 之前，逐槽记录控制状态现场与去重后的 transferred 集合。
+    #[cfg(test)]
+    fn record_promote_group_state_probe(&self, plans: &[PreparedPromote]) {
+        let Some(first) = plans.first() else {
+            return;
+        };
+        let controller = first.controller.clone();
+        let source = first.source.clone();
+        let mut states = Vec::with_capacity(plans.len());
+        for plan in plans {
+            let (target, pending) = self
+                .registry
+                .states
+                .get(&plan.state_key)
+                .map(|state| {
+                    (
+                        state.target.as_ref().map(TargetSnapshot::of),
+                        state.pending.clone(),
+                    )
+                })
+                .unwrap_or((None, Vec::new()));
+            states.push((plan.controller.clone(), plan.state_key.1, target, pending));
+        }
+        let mut transferred: Vec<DataId> = Vec::new();
+        for plan in plans {
+            if plan.transferred
+                && let Some(id) = plan.target.data_id()
+                && !transferred.iter().any(|seen| seen == id)
+            {
+                transferred.push(id.clone());
+            }
+        }
+        let mut controller_owned: Vec<DataId> = self
+            .registry
+            .lookup(&controller)
+            .map(|record| record.owned.iter().cloned().collect())
+            .unwrap_or_default();
+        controller_owned.sort_by_key(DataId::seq);
+        super::test_support::record_promote_group_state(
+            super::test_support::PromoteGroupStateRecord {
+                controller,
+                source,
+                states,
+                transferred,
+                controller_owned,
+            },
+        );
+    }
+
     /// cfg(test) 完整只读观察：`phase = Before` 在 prepare 之前，`AfterReject` 在 prepare
     /// 拒绝之后、内部 cleanup 之前。记录两侧完整 target-aware refs／owned（含身份）、
     /// collector 状态与被选输出责任方；观察失败以 `observation_error` 显式记录，不静默降级。
@@ -2038,9 +2762,11 @@ impl ScopeCoordinator {
 
     /// 在 `item_scope` 中绑定一个 CollectionItem 输入位置（item 创建入口）。
     ///
-    /// 只接受 `caller`（EachScope）本地已绑定的完整 `Vec<T>` 集合：cap 设为刚建立的
-    /// `item_scope`，不分配 DataId、不移动业务值、不增加 owner。`index` 必须在实际
-    /// 长度内；目标位置必须尚未绑定。
+    /// 集合来源是 `caller`（EachScope）本地已绑定的 `Ref<Vec<T>>`：既可以是完整
+    /// `Vec<T>` Data，也可以是合法的受限 item 借用（外层 Each 的 item，其元素自身就是
+    /// `Vec<T>`；SPEC §8 接受任意 `Ref<Vec<T>>` 来源）。两条路径都只记录定位元数据：
+    /// cap 设为刚建立的 `item_scope`，不分配 DataId、不移动／复制业务值、不增加 owner，
+    /// 也不让来源取得任何独立消费权。`index` 必须在实际长度内；目标位置必须尚未绑定。
     pub(crate) fn bind_item_input<T: Any>(
         &mut self,
         item_scope: &ScopeId,
@@ -2069,22 +2795,36 @@ impl ScopeCoordinator {
                     scope: caller.clone(),
                     position: source.clone(),
                 })?;
-            let id = bound.require_data(source)?.clone();
-            self.container
-                .validate_type(&id, TypeId::of::<Vec<T>>(), type_name::<Vec<T>>())
-                .map_err(|source_error| ScopeError::from_storage(source.clone(), source_error))?;
-            self.require_visible_target(&id, caller)?;
-            id
+            match bound {
+                RefTarget::Data(id) => {
+                    self.container
+                        .validate_type(id, TypeId::of::<Vec<T>>(), type_name::<Vec<T>>())
+                        .map_err(|source_error| {
+                            ScopeError::from_storage(source.clone(), source_error)
+                        })?;
+                    self.require_visible_target(id, caller)?;
+                    CollectionRoot::Data(id.clone())
+                }
+                inner @ RefTarget::CollectionItem { .. } => {
+                    // item-backed 集合：上游必须是合法、可读、元素类型为 `Vec<T>` 的受限
+                    // 借用。这里只复核并复用其定位元数据，不移动、不复制、不登记 owned。
+                    let cap = inner.item_cap().expect("item target matched by variant");
+                    self.check_item(source, inner, TypeId::of::<Vec<T>>(), type_name::<Vec<T>>())?;
+                    self.require_in_cap(source, cap, caller)?;
+                    CollectionRoot::Item(Box::new(inner.clone()))
+                }
+            }
         };
         let access = ItemAccess::for_collection::<T>();
         let length = {
-            let value = self
-                .container
-                .borrow_any(&collection)
-                .map_err(|source_error| ScopeError::from_storage(source.clone(), source_error))?;
+            let value = self.collection_value(source, &collection, item_scope, &access)?;
             value
                 .downcast_ref::<Vec<T>>()
-                .expect("validate_type checked the collection type")
+                .ok_or_else(|| ScopeError::TypeMismatch {
+                    position: source.clone(),
+                    expected: type_name::<Vec<T>>(),
+                    actual: type_name_of_val(value),
+                })?
                 .len()
         };
         if index >= length {
@@ -2468,7 +3208,7 @@ impl ScopeCoordinator {
                 }
                 RefTarget::CollectionItem { .. } => {
                     // item 不能逃出 cap：来源 child 与目的 caller 都必须位于 cap 内。
-                    let (_, _, cap, _) = target.item().expect("item target matched by variant");
+                    let cap = target.item_cap().expect("item target matched by variant");
                     self.check_item(&slot.child, target, slot.expected, slot.expected_name)?;
                     self.require_in_cap(&slot.child, cap, child)?;
                     self.require_destination_in_cap(&slot.child, cap, caller)?;
@@ -2826,99 +3566,6 @@ impl ScopeCoordinator {
         Some(pending)
     }
 
-    /// cfg(test) 最终绑定的完整前后观察：控制器 refs／owned／状态、控制状态 target／pending、
-    /// 目标位置当前身份／owner／存活与下一个 `DataId` 序号；观察失败显式记录。
-    #[cfg(test)]
-    pub(crate) fn record_final_bind_probe(
-        &self,
-        phase: super::test_support::FinalBindSnapshotPhase,
-        controller: &ScopeId,
-        state: &ControlStateId,
-        position: &RefId,
-    ) {
-        let mut error: Option<String> = None;
-        let mut note = |message: String| {
-            if error.is_none() {
-                error = Some(message);
-            }
-        };
-        let controller_state = self
-            .registry
-            .lookup(controller)
-            .ok()
-            .map(|record| record.state);
-        let (controller_refs, controller_owned) = match self.snapshot_targets_probe(controller) {
-            Ok((refs, owned)) => (Some(refs), Some(owned)),
-            Err(err) => {
-                note(format!("controller snapshot: {err:?}"));
-                (None, None)
-            }
-        };
-        let (state_target, state_pending) = match self.lookup_state(state) {
-            Ok(record) => (
-                record
-                    .target
-                    .clone()
-                    .map(|target| TargetSnapshot::of(&target)),
-                Some(record.pending.clone()),
-            ),
-            Err(err) => {
-                note(format!("state lookup: {err:?}"));
-                (None, None)
-            }
-        };
-        let bound = self
-            .registry
-            .lookup(controller)
-            .ok()
-            .and_then(|record| record.refs.get(position).cloned());
-        let position_target = bound.as_ref().map(TargetSnapshot::of);
-        let (position_data, position_owner, position_alive) = match bound {
-            Some(RefTarget::Data(id)) => (
-                Some(id.clone()),
-                self.owner_of(&id).ok(),
-                self.container.borrow_any(&id).is_ok(),
-            ),
-            Some(RefTarget::CollectionItem { .. }) => (None, None, false),
-            None => (None, None, false),
-        };
-        super::test_support::record_final_bind_pre_cleanup(
-            super::test_support::FinalBindPreCleanupSnapshot {
-                phase,
-                controller: Some(controller.clone()),
-                controller_state,
-                controller_refs,
-                controller_owned,
-                state_target,
-                state_pending,
-                position_data,
-                position_target,
-                position_owner,
-                position_alive,
-                next_data_id: self.next_data_id_probe(),
-                observation_error: error,
-            },
-        );
-    }
-
-    /// cfg(test) 窄故障：把控制状态改回"未初始化"（最终绑定前置反例）。
-    #[cfg(test)]
-    pub(crate) fn uninitialize_state_probe(
-        &mut self,
-        state: &ControlStateId,
-    ) -> Result<(), ScopeError> {
-        let key = (state.owner().seq(), state.seq());
-        let record =
-            self.registry
-                .states
-                .get_mut(&key)
-                .ok_or_else(|| ScopeError::StateNotRegistered {
-                    state: state.clone(),
-                })?;
-        record.target = None;
-        Ok(())
-    }
-
     /// cfg(test) 窄故障：把控制状态 target 的声明类型改为指定元数据。
     #[cfg(test)]
     pub(crate) fn corrupt_state_type_probe(
@@ -2958,59 +3605,6 @@ impl ScopeCoordinator {
                 violated: "item cap fault requires a collection item target",
             }),
         }
-    }
-
-    /// cfg(test) 窄故障：把控制状态 item target 的 cap 换成指定 Scope。
-    #[cfg(test)]
-    pub(crate) fn corrupt_state_cap_probe(
-        &mut self,
-        state: &ControlStateId,
-        cap: ScopeId,
-    ) -> Result<(), ScopeError> {
-        let key = (state.owner().seq(), state.seq());
-        let record =
-            self.registry
-                .states
-                .get_mut(&key)
-                .ok_or_else(|| ScopeError::StateNotRegistered {
-                    state: state.clone(),
-                })?;
-        match record.target.as_mut() {
-            Some(RefTarget::CollectionItem { lifetime_cap, .. }) => {
-                *lifetime_cap = cap;
-                Ok(())
-            }
-            _ => Err(ScopeError::Invariant {
-                violated: "state cap fault requires a collection item target",
-            }),
-        }
-    }
-
-    /// cfg(test) 窄构造：把一个已存活 DataId 作为**真实本地 alias** 绑定到该 Scope 的位置。
-    ///
-    /// 只用于构造"旧值仍被合法别名引用"的延迟回收条件；要求该 DataId 的 owner 是本 Scope
-    /// 的祖先或自身，否则拒绝（不制造跨边界 alias）。
-    #[cfg(test)]
-    pub(crate) fn bind_alias_probe(
-        &mut self,
-        scope: &ScopeId,
-        position: &RefId,
-        id: &DataId,
-    ) -> Result<(), ScopeError> {
-        self.registry.lookup(scope)?.require_active()?;
-        let owner = self.owner_of(id)?;
-        if !self.is_ancestor_or_self(&owner, scope) {
-            return Err(ScopeError::IllegalOwner {
-                id: id.clone(),
-                owner,
-                boundary: scope.clone(),
-            });
-        }
-        self.registry
-            .lookup_mut(scope)?
-            .refs
-            .insert(position.clone(), RefTarget::Data(id.clone()));
-        Ok(())
     }
 
     /// 测试夹具：把一个控制器 Scope 的状态位置序号设为近上限起点。
@@ -3091,7 +3685,7 @@ impl ScopeCoordinator {
                 }
             }
             RefTarget::CollectionItem { .. } => {
-                let (_, _, cap, _) = target.item().expect("item target matched by variant");
+                let cap = target.item_cap().expect("item target matched by variant");
                 // 来源与目的都必须位于 cap 内。
                 self.require_in_cap(selected, cap, source)?;
                 self.require_in_cap(selected, cap, &parent)?;
@@ -3132,10 +3726,14 @@ impl ScopeCoordinator {
         })
     }
 
-    /// Promote 提交段：更新状态、必要时转移责任、关闭来源、登记待回收旧值。
+    /// Promote 提交段的**副作用**：更新状态、必要时转移责任、登记待回收旧值。
     ///
-    /// 提交段没有可恢复失败分支：预检（含清理前提）已全部完成。
-    fn commit_promote(&mut self, plan: PreparedPromote) -> Result<(), ScopeError> {
+    /// 从 [`Self::commit_promote`] 逐字抽出，供单项与成组路径共用；不含关闭来源，也
+    /// 不做任何可恢复失败判定。计划里的来源／控制器／状态键都来自本 registry，因此这里
+    /// 的查表不会失败。责任转移以 `DataId` 为单位：对同一 `DataId` 重复调用是幂等的
+    /// （`owned` 集合的 remove／insert 不产生第二份责任），成组提交可直接对共享实例
+    /// 逐槽调用，无需另设去重索引。
+    fn apply_promote_effects(&mut self, plan: &PreparedPromote) -> Result<(), ScopeError> {
         if plan.transferred {
             let id = plan
                 .target
@@ -3154,40 +3752,20 @@ impl ScopeCoordinator {
                 .get_mut(&plan.state_key)
                 .expect("promote plan came from this registry");
             state.target = Some(plan.target.clone());
-            if let Some(old) = plan.replaced_pending
-                && !state.pending.iter().any(|pending| pending == &old)
+            if let Some(old) = plan.replaced_pending.as_ref()
+                && !state.pending.iter().any(|pending| pending == old)
             {
-                state.pending.push(old);
+                state.pending.push(old.clone());
             }
         }
-        #[cfg(test)]
-        {
-            // 只读元数据：提交后的控制状态与控制器责任（drop 前直读的实际现场）。
-            let controller_owned: Vec<DataId> = self
-                .registry
-                .lookup(&plan.controller)
-                .map(|record| record.owned.iter().cloned().collect())
-                .unwrap_or_default();
-            let (state_target, pending) = self
-                .registry
-                .states
-                .get(&plan.state_key)
-                .map(|state| {
-                    (
-                        state.target.as_ref().map(super::scope::TargetSnapshot::of),
-                        state.pending.clone(),
-                    )
-                })
-                .unwrap_or((None, Vec::new()));
-            super::test_support::record_promote_state(super::test_support::PromoteStateRecord {
-                controller: plan.controller.clone(),
-                source: plan.source.clone(),
-                state_target,
-                controller_owned,
-                pending,
-                transferred: plan.transferred,
-            });
-        }
+        Ok(())
+    }
+
+    /// Promote 提交段：更新状态、必要时转移责任、关闭来源、登记待回收旧值。
+    ///
+    /// 提交段没有可恢复失败分支：预检（含清理前提）已全部完成。
+    fn commit_promote(&mut self, plan: PreparedPromote) -> Result<(), ScopeError> {
+        self.apply_promote_effects(&plan)?;
         self.close_scope(&plan.source)
     }
 
@@ -3480,8 +4058,8 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use super::{
-        CollectorRecord, ControlState, ControlStateId, ExportSlot, ImportSlot, RefTarget, Scope,
-        ScopeCoordinator, ScopeRegistry, ScopeState, StateImportSlot,
+        CollectionRoot, CollectorRecord, ControlState, ControlStateId, ExportSlot, ImportSlot,
+        RefTarget, Scope, ScopeCoordinator, ScopeRegistry, ScopeState, StateImportSlot,
     };
     use crate::core::identity::{
         CollectorId, DataId, ExecutionIdentity, ScopeId, ScopeIdAllocator,
@@ -4976,12 +5554,20 @@ mod tests {
                     lifetime_cap,
                     access,
                 } => {
-                    let _: &DataId = collection;
+                    let _: &CollectionRoot = collection;
                     let _: &usize = index;
                     let _: &ScopeId = lifetime_cap;
                     let _: &super::ItemAccess = access;
                     let _: TypeId = access.element_type();
                     let _: TypeId = access.collection_type();
+                    match collection {
+                        CollectionRoot::Data(id) => {
+                            let _: &DataId = id;
+                        }
+                        CollectionRoot::Item(inner) => {
+                            let _: &RefTarget = inner;
+                        }
+                    }
                 }
             }
         }
@@ -8003,5 +8589,482 @@ mod tests {
             "rejected finish consumed no ordinary DataId"
         );
         assert_eq!(f.coordinator.collector_len(&c0).unwrap(), 0);
+    }
+
+    // ---- 成组 Consume（WE-T05 Core 侧；§5.2 全组预检／§5.3 提交与关闭） ----
+
+    use crate::core::test_support::ConsumeGroupSnapshotPhase as GroupPhase;
+
+    /// 建立 root→each→item 的真实 Scope 链，返回 (each, item)。
+    fn group_chain(f: &mut Fixture) -> (ScopeId, ScopeId) {
+        let root = f.root();
+        let each = f.child(&root);
+        let item = f.child(&each);
+        (each, item)
+    }
+
+    fn group_snapshots(phase: GroupPhase) -> Vec<crate::core::test_support::ConsumeGroupSnapshot> {
+        crate::core::test_support::take_consume_group()
+            .into_iter()
+            .filter(|snapshot| snapshot.phase == phase)
+            .collect()
+    }
+
+    #[test]
+    fn g01_group_consume_moves_every_slot_and_closes_item_once() {
+        crate::core::test_support::reset_observations();
+        let mut f = Fixture::new();
+        let (each, item) = group_chain(&mut f);
+        let c0 = f.collector::<Tracked>(&each);
+        let c1 = f.collector::<Other>(&each);
+        let p0 = f.ref_id();
+        let p1 = f.ref_id();
+        let id0 = f
+            .coordinator
+            .register_owned(&item, &p0, f.tracked(1))
+            .unwrap();
+        let id1 = f.coordinator.register_owned(&item, &p1, Other(2)).unwrap();
+
+        let outcome = f.coordinator.consume_item_group_report(
+            &item,
+            &[p0.clone(), p1.clone()],
+            &[c0.clone(), c1.clone()],
+        );
+        assert!(
+            matches!(outcome, super::ConsumeGroupOutcome::Consumed),
+            "got {outcome:?}"
+        );
+
+        // 每槽恰移动一次；Item 只关闭一次；旧 DataId 失效；owned／refs 撤销。
+        assert_eq!(f.coordinator.collector_moves(&c0).unwrap(), 1);
+        assert_eq!(f.coordinator.collector_moves(&c1).unwrap(), 1);
+        assert_eq!(f.coordinator.collector_len(&c0).unwrap(), 1);
+        assert_eq!(f.coordinator.collector_len(&c1).unwrap(), 1);
+        assert!(!f.alive(&id0));
+        assert!(!f.alive(&id1));
+        assert_eq!(f.scope_state(&item), ScopeState::Closed);
+        assert_eq!(f.owned_len(&item), 0);
+        assert_eq!(f.refs_len(&item), 0);
+        assert_eq!(
+            f.scope_state(&each),
+            ScopeState::Active,
+            "collector owner remains alive after group consume"
+        );
+
+        let snapshots = crate::core::test_support::take_consume_group();
+        assert_eq!(snapshots.len(), 2, "Before + AfterCommit");
+        assert!(
+            snapshots
+                .iter()
+                .all(|snapshot| snapshot.observation_error.is_none()),
+            "no observation failure"
+        );
+        let before = snapshots
+            .iter()
+            .find(|snapshot| snapshot.phase == GroupPhase::Before)
+            .expect("Before");
+        let after = snapshots
+            .iter()
+            .find(|snapshot| snapshot.phase == GroupPhase::AfterCommit)
+            .expect("AfterCommit");
+        assert!(
+            before
+                .slots
+                .iter()
+                .all(|slot| slot.collector_moves == Some(0))
+        );
+        assert!(before.slots.iter().all(|slot| slot.alive));
+        assert_eq!(before.item_owned.len(), 2);
+        assert!(
+            after
+                .slots
+                .iter()
+                .all(|slot| slot.collector_moves == Some(1))
+        );
+        assert!(after.slots.iter().all(|slot| !slot.alive));
+        assert!(after.item_owned.is_empty());
+        assert_eq!(after.item_state, Some(ScopeState::Finalizing));
+        assert_eq!(
+            after.item_refs.len(),
+            2,
+            "close 之前 refs 仍在（只在 close 一次时清空）"
+        );
+    }
+
+    #[test]
+    fn g02_later_slot_reject_leaves_first_slot_unmoved() {
+        crate::core::test_support::reset_observations();
+        let mut f = Fixture::new();
+        let (each, item) = group_chain(&mut f);
+        let c0 = f.collector::<Tracked>(&each);
+        let c1 = f.collector::<Tracked>(&each); // 目的元素是 Tracked，而 p1 是 Other
+        let p0 = f.ref_id();
+        let p1 = f.ref_id();
+        let _id0 = f
+            .coordinator
+            .register_owned(&item, &p0, f.tracked(1))
+            .unwrap();
+        let _id1 = f.coordinator.register_owned(&item, &p1, Other(2)).unwrap();
+
+        let outcome = f.coordinator.consume_item_group_report(
+            &item,
+            &[p0.clone(), p1.clone()],
+            &[c0.clone(), c1.clone()],
+        );
+        match outcome {
+            super::ConsumeGroupOutcome::Rejected {
+                primary,
+                cleanup_failure,
+            } => {
+                assert!(
+                    matches!(&primary, ScopeError::TypeMismatch { position, .. } if position == &p1),
+                    "got {primary:?}"
+                );
+                assert!(
+                    cleanup_failure.is_none(),
+                    "clean item cleans up: {cleanup_failure:?}"
+                );
+            }
+            other => panic!("expected rejection, got {other:?}"),
+        }
+
+        // 拒绝时点（cleanup 之前）：首槽零移动、两值仍存活、owned 未撤销。
+        let rejected = group_snapshots(GroupPhase::AfterReject);
+        assert_eq!(rejected.len(), 1);
+        let rejected = &rejected[0];
+        assert!(rejected.observation_error.is_none());
+        assert!(
+            rejected
+                .slots
+                .iter()
+                .all(|slot| slot.collector_moves == Some(0))
+        );
+        assert!(rejected.slots.iter().all(|slot| slot.alive));
+        assert_eq!(rejected.item_owned.len(), 2);
+        assert_eq!(rejected.item_state, Some(ScopeState::Finalizing));
+
+        // 拒绝收口后：collector 依旧完整、零移动；Item 已按失败路径关闭。
+        assert_eq!(f.coordinator.collector_moves(&c0).unwrap(), 0);
+        assert_eq!(f.coordinator.collector_moves(&c1).unwrap(), 0);
+        assert_eq!(f.coordinator.collector_len(&c0).unwrap(), 0);
+        assert_eq!(f.coordinator.collector_len(&c1).unwrap(), 0);
+        assert_eq!(f.scope_state(&item), ScopeState::Closed);
+        assert_eq!(f.scope_state(&each), ScopeState::Active);
+    }
+
+    #[test]
+    fn g03_duplicate_destination_collector_is_typed_reject_before_freeze() {
+        crate::core::test_support::reset_observations();
+        let mut f = Fixture::new();
+        let (each, item) = group_chain(&mut f);
+        let c0 = f.collector::<Tracked>(&each);
+        let p0 = f.ref_id();
+        let p1 = f.ref_id();
+        let id0 = f
+            .coordinator
+            .register_owned(&item, &p0, f.tracked(1))
+            .unwrap();
+        let id1 = f
+            .coordinator
+            .register_owned(&item, &p1, f.tracked(2))
+            .unwrap();
+
+        let outcome =
+            f.coordinator
+                .consume_item_group_report(&item, &[p0, p1], &[c0.clone(), c0.clone()]);
+        match outcome {
+            super::ConsumeGroupOutcome::Rejected { primary, .. } => assert!(
+                matches!(&primary, ScopeError::DuplicateCollectorDestination { collector } if collector == &c0),
+                "got {primary:?}"
+            ),
+            other => panic!("expected rejection, got {other:?}"),
+        }
+        // 纯结构错误：冻结前完成，Item 保持 Active／零副作用。
+        assert_eq!(f.scope_state(&item), ScopeState::Active);
+        assert!(f.alive(&id0) && f.alive(&id1));
+        assert_eq!(f.owned_len(&item), 2);
+        assert_eq!(f.coordinator.collector_moves(&c0).unwrap(), 0);
+        assert_eq!(crate::core::test_support::take_consume_group().len(), 0);
+    }
+
+    #[test]
+    fn g04_duplicate_consumed_data_id_is_rejected_before_any_move() {
+        crate::core::test_support::reset_observations();
+        let mut f = Fixture::new();
+        let (each, item) = group_chain(&mut f);
+        let c0 = f.collector::<Tracked>(&each);
+        let c1 = f.collector::<Tracked>(&each);
+        let p0 = f.ref_id();
+        let p1 = f.ref_id();
+        let id0 = f
+            .coordinator
+            .register_owned(&item, &p0, f.tracked(1))
+            .unwrap();
+        // p1 也指向同一物理实例（合法 alias），不同逻辑位置、同型不同 collector。
+        f.inject_target(&item, &p1, RefTarget::Data(id0.clone()));
+
+        let outcome = f.coordinator.consume_item_group_report(
+            &item,
+            &[p0.clone(), p1.clone()],
+            &[c0.clone(), c1.clone()],
+        );
+        match outcome {
+            super::ConsumeGroupOutcome::Rejected { primary, .. } => assert!(
+                matches!(
+                    &primary,
+                    ScopeError::DuplicateConsumeTarget { first_position, duplicate_position, data_id }
+                        if first_position == &p0 && duplicate_position == &p1 && data_id == &id0
+                ),
+                "got {primary:?}"
+            ),
+            other => panic!("expected rejection, got {other:?}"),
+        }
+        let rejected = group_snapshots(GroupPhase::AfterReject);
+        assert_eq!(rejected.len(), 1);
+        assert!(
+            rejected[0]
+                .slots
+                .iter()
+                .all(|slot| slot.collector_moves == Some(0))
+        );
+        assert_eq!(f.coordinator.collector_moves(&c0).unwrap(), 0);
+        assert_eq!(f.coordinator.collector_moves(&c1).unwrap(), 0);
+    }
+
+    #[test]
+    fn g05_empty_group_and_length_mismatch_are_rejected_before_freeze() {
+        crate::core::test_support::reset_observations();
+        let mut f = Fixture::new();
+        let (each, item) = group_chain(&mut f);
+        let c0 = f.collector::<Tracked>(&each);
+        let c1 = f.collector::<Tracked>(&each);
+        let p0 = f.ref_id();
+        let id0 = f
+            .coordinator
+            .register_owned(&item, &p0, f.tracked(1))
+            .unwrap();
+
+        match f.coordinator.consume_item_group_report(&item, &[], &[]) {
+            super::ConsumeGroupOutcome::Rejected { primary, .. } => assert!(
+                matches!(&primary, ScopeError::Invariant { violated }
+                    if *violated == "consume group must declare at least one output slot"),
+                "got {primary:?}"
+            ),
+            other => panic!("expected rejection, got {other:?}"),
+        }
+        match f.coordinator.consume_item_group_report(
+            &item,
+            std::slice::from_ref(&p0),
+            &[c0.clone(), c1.clone()],
+        ) {
+            super::ConsumeGroupOutcome::Rejected { primary, .. } => assert!(
+                matches!(&primary, ScopeError::Invariant { violated }
+                    if *violated == "consume group selected and destination collector counts must match"),
+                "got {primary:?}"
+            ),
+            other => panic!("expected rejection, got {other:?}"),
+        }
+        assert_eq!(f.scope_state(&item), ScopeState::Active);
+        assert!(f.alive(&id0));
+        assert_eq!(f.owned_len(&item), 1);
+        assert_eq!(crate::core::test_support::take_consume_group().len(), 0);
+    }
+
+    #[test]
+    fn g06_live_descendant_blocks_group_consume_before_freeze() {
+        crate::core::test_support::reset_observations();
+        let mut f = Fixture::new();
+        let (each, item) = group_chain(&mut f);
+        let c0 = f.collector::<Tracked>(&each);
+        let p0 = f.ref_id();
+        let id0 = f
+            .coordinator
+            .register_owned(&item, &p0, f.tracked(1))
+            .unwrap();
+        let _grand = f.child(&item);
+
+        match f.coordinator.consume_item_group_report(
+            &item,
+            std::slice::from_ref(&p0),
+            std::slice::from_ref(&c0),
+        ) {
+            super::ConsumeGroupOutcome::Rejected { primary, .. } => {
+                assert!(
+                    matches!(&primary, ScopeError::ActiveDescendants { scope } if scope == &item),
+                    "got {primary:?}"
+                );
+            }
+            other => panic!("expected rejection, got {other:?}"),
+        }
+        assert_eq!(f.scope_state(&item), ScopeState::Active);
+        assert!(f.alive(&id0));
+        assert_eq!(f.coordinator.collector_moves(&c0).unwrap(), 0);
+    }
+
+    #[test]
+    fn g07_cleanup_precondition_fault_reports_primary_and_cleanup_failure() {
+        crate::core::test_support::reset_observations();
+        let mut f = Fixture::new();
+        let (each, item) = group_chain(&mut f);
+        let c0 = f.collector::<Tracked>(&each);
+        let p0 = f.ref_id();
+        let extra = f.ref_id();
+        let id0 = f
+            .coordinator
+            .register_owned(&item, &p0, f.tracked(1))
+            .unwrap();
+        let _extra = f
+            .coordinator
+            .register_owned(&item, &extra, f.tracked(9))
+            .unwrap();
+        crate::core::test_support::install_consume_group_fault(
+            crate::core::test_support::ConsumeGroupFault::FailCleanup,
+        );
+
+        match f.coordinator.consume_item_group_report(
+            &item,
+            std::slice::from_ref(&p0),
+            std::slice::from_ref(&c0),
+        ) {
+            super::ConsumeGroupOutcome::Rejected {
+                primary,
+                cleanup_failure,
+            } => {
+                assert!(
+                    matches!(&primary, ScopeError::Invariant { violated }
+                        if *violated == "owned entry must exist until its scope closes"),
+                    "got {primary:?}"
+                );
+                assert!(
+                    matches!(&cleanup_failure, Some(ScopeError::Invariant { .. })),
+                    "cleanup 前提不足需独立报告: {cleanup_failure:?}"
+                );
+            }
+            other => panic!("expected rejection, got {other:?}"),
+        }
+        // 首槽零移动；Item 未关闭（清理前提不足，不得宣称 Closed）。
+        let rejected = group_snapshots(GroupPhase::AfterReject);
+        assert_eq!(rejected.len(), 1);
+        assert!(
+            rejected[0]
+                .slots
+                .iter()
+                .all(|slot| slot.collector_moves == Some(0))
+        );
+        assert_eq!(f.coordinator.collector_moves(&c0).unwrap(), 0);
+        assert_ne!(f.scope_state(&item), ScopeState::Closed);
+        assert_ne!(f.scope_state(&item), ScopeState::Active);
+        assert!(f.alive(&id0));
+    }
+
+    #[test]
+    fn g08_preflight_later_slot_fault_and_commit_fault_leave_no_move() {
+        crate::core::test_support::reset_observations();
+        let mut f = Fixture::new();
+        let (each, item) = group_chain(&mut f);
+        let c0 = f.collector::<Tracked>(&each);
+        let c1 = f.collector::<Tracked>(&each);
+        let p0 = f.ref_id();
+        let p1 = f.ref_id();
+        let _id0 = f
+            .coordinator
+            .register_owned(&item, &p0, f.tracked(1))
+            .unwrap();
+        let _id1 = f
+            .coordinator
+            .register_owned(&item, &p1, f.tracked(2))
+            .unwrap();
+
+        // 后项预检失败：首槽不得移动。
+        crate::core::test_support::install_consume_group_fault(
+            crate::core::test_support::ConsumeGroupFault::RejectPreflightAt(1),
+        );
+        let outcome = f.coordinator.consume_item_group_report(
+            &item,
+            &[p0.clone(), p1.clone()],
+            &[c0.clone(), c1.clone()],
+        );
+        assert!(matches!(
+            outcome,
+            super::ConsumeGroupOutcome::Rejected { .. }
+        ));
+        assert_eq!(f.coordinator.collector_moves(&c0).unwrap(), 0);
+        assert_eq!(f.coordinator.collector_moves(&c1).unwrap(), 0);
+
+        // commit 段故障（不可恢复的不变量破坏）：不得回滚伪造成功，首槽零移动。
+        let item2 = f.child(&each);
+        let c2 = f.collector::<Tracked>(&each);
+        let q0 = f.ref_id();
+        let q1 = f.ref_id();
+        let _q0 = f
+            .coordinator
+            .register_owned(&item2, &q0, f.tracked(3))
+            .unwrap();
+        let _q1 = f
+            .coordinator
+            .register_owned(&item2, &q1, f.tracked(4))
+            .unwrap();
+        let c3 = f.collector::<Tracked>(&each);
+        crate::core::test_support::install_consume_group_fault(
+            crate::core::test_support::ConsumeGroupFault::FailCommitAt(0),
+        );
+        let outcome = f.coordinator.consume_item_group_report(
+            &item2,
+            &[q0.clone(), q1.clone()],
+            &[c2.clone(), c3.clone()],
+        );
+        match outcome {
+            super::ConsumeGroupOutcome::Rejected {
+                primary,
+                cleanup_failure,
+            } => {
+                assert!(
+                    matches!(&primary, ScopeError::Invariant { violated }
+                        if *violated == "test-injected consume group commit failure"),
+                    "got {primary:?}"
+                );
+                assert!(cleanup_failure.is_none());
+            }
+            other => panic!("expected rejection, got {other:?}"),
+        }
+        assert_eq!(f.coordinator.collector_moves(&c2).unwrap(), 0);
+        assert_eq!(f.coordinator.collector_moves(&c3).unwrap(), 0);
+    }
+
+    #[test]
+    fn g09_commit_fault_after_first_slot_is_observable_and_not_rolled_back() {
+        crate::core::test_support::reset_observations();
+        let mut f = Fixture::new();
+        let (each, item) = group_chain(&mut f);
+        let c0 = f.collector::<Tracked>(&each);
+        let c1 = f.collector::<Tracked>(&each);
+        let p0 = f.ref_id();
+        let p1 = f.ref_id();
+        let _id0 = f
+            .coordinator
+            .register_owned(&item, &p0, f.tracked(1))
+            .unwrap();
+        let _id1 = f
+            .coordinator
+            .register_owned(&item, &p1, f.tracked(2))
+            .unwrap();
+        crate::core::test_support::install_consume_group_fault(
+            crate::core::test_support::ConsumeGroupFault::FailCommitAt(1),
+        );
+        let outcome = f.coordinator.consume_item_group_report(
+            &item,
+            &[p0.clone(), p1.clone()],
+            &[c0.clone(), c1.clone()],
+        );
+        // 生产提交段无可恢复失败；此注入仅证明不变量破坏不触发 rollback／假成功。
+        assert!(matches!(
+            outcome,
+            super::ConsumeGroupOutcome::Rejected {
+                primary: ScopeError::Invariant { .. },
+                cleanup_failure: None
+            }
+        ));
+        assert_eq!(f.coordinator.collector_moves(&c0).unwrap(), 1);
+        assert_eq!(f.coordinator.collector_moves(&c1).unwrap(), 0);
     }
 }

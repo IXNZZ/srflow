@@ -7,13 +7,13 @@
 //! ```
 //! 预期失败：E0308——双输入 tuple 与单输入 Root 形状不匹配（`OrchCall` 无对应实现）。
 
-use srflow::{Data, Flow, FlowBuilder, Runtime, SyncFnSig};
+use srflow::legacy::{Data, Flow, FlowBuilder, Runtime, SyncFnSig};
 
 fn main() {
     let (mut flow, input) = FlowBuilder::<u32>::start().expect("start");
     let out = flow
         .then::<_, SyncFnSig<(u32,), Data<u32>>, _>(
-            (|v: &u32| Ok(*v)) as fn(&u32) -> Result<u32, srflow::BodyError>,
+            (|v: &u32| Ok(*v)) as fn(&u32) -> Result<u32, srflow::legacy::BodyError>,
             input,
         )
         .expect("step");

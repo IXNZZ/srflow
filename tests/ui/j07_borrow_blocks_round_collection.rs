@@ -17,12 +17,12 @@ fn collect_while_borrowed(
     ctx: &mut ExecutionContext,
     scope: &ScopeId,
     round: &ScopeId,
-    permit: &core::context::RoundCollectPermit,
+    permit: &core::context::RoundGroupPermit,
     selected: &core::ref_id::RefId,
 ) -> Result<(), ScopeError> {
     // 业务借用仍未结束：这里对 Context 再取可变借用必须被拒绝。
     let borrowed: &u32 = ctx.resolve::<u32>(scope, selected)?;
-    let _ = ctx.promote_in_round_boundary(round, selected, permit);
+    let _ = ctx.promote_group_in_round_boundary(round, std::slice::from_ref(selected), permit);
     let _ = *borrowed;
     Ok(())
 }

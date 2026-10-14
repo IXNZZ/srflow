@@ -8,7 +8,7 @@
 //! 预期失败：E0277——`SyncFnSig<(u32,), Unit>` 对函数 item 没有构建实现；
 //! 推断形态 `then(unit_fn, x)` 才是 Definition 构建期返回 `UnsupportedFunctionUnitOutput`。
 
-use srflow::{BodyError, Data, FlowBuilder, SyncFnSig, Unit};
+use srflow::legacy::{BodyError, Data, FlowBuilder, SyncFnSig, Unit};
 
 fn unit_fn(_a: &u32) -> Result<(), BodyError> {
     Ok(())

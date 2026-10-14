@@ -86,11 +86,6 @@ impl RefId {
         self.seq
     }
 
-    /// 归属检查：本位置是否由给定来源根分配。
-    pub(crate) fn belongs_to(&self, source: &Arc<RefIdSource>) -> bool {
-        Arc::ptr_eq(&self.source, source)
-    }
-
     /// 归属检查：两个位置是否来自同一条来源序列（同一次 Definition 构建）。
     ///
     /// 与 [`Self::eq`] 相同地只比较来源分配地址与本地序号，不依赖来源字段值；它只
@@ -161,7 +156,12 @@ impl RefIdAllocator {
     ///
     /// 序列在同一次原子更新中推进 `count` 位：任何一个序号会溢出时整组失败，且**不
     /// 消耗任何序号、不留下部分分配**。`count == 0` 不接触序列。调用方据此先完成全部
-    /// 可恢复预检、再整组提交（V21-05 的 0／1／2 输出位置分配）。
+    /// 可恢复预检、再整组提交。
+    ///
+    /// 当前生产路径逐位分配（`allocate`）；整组 epsilon 语义只在验收中作为保留设施
+    /// 断言（见 `tests` 的 `v21_05_batch_allocation_is_atomic_on_exhaustion` 与
+    /// `e12_checked_group_allocation_fails_as_a_whole_on_exhaustion`），故仅在 test 构建存在。
+    #[cfg(test)]
     pub(crate) fn allocate_batch(&self, count: u64) -> Result<Vec<RefId>, InternalError> {
         if count == 0 {
             return Ok(Vec::new());
@@ -193,7 +193,7 @@ mod tests {
     use std::sync::Arc;
 
     use super::{RefId, RefIdAllocator, RefIdSource};
-    use crate::core::internal_error::InternalError;
+    use crate::core::internal_error::{IdKind, InternalError};
 
     #[test]
     fn b02_ref_ids_from_one_source_continue_the_original_sequence() {
@@ -258,5 +258,48 @@ mod tests {
         let id = allocator.allocate().unwrap();
         assert_eq!(id.seq(), 0);
         assert!(std::mem::size_of::<RefId>() <= 4 * std::mem::size_of::<usize>());
+    }
+
+    /// 由旧 `signature::tests::v21_05_batch_allocation_is_atomic_on_exhaustion` 迁移：
+    /// 保留不变量“整组分配耗尽时原子失败——不消耗任何序号、不留部分分配”，改用
+    /// `RefIdAllocator::allocate_batch` 的真实入口（旧 `Out2<..>::allocate` 封套已退出）。
+    #[test]
+    fn v21_05_batch_allocation_is_atomic_on_exhaustion() {
+        let source = RefIdSource::with_start(u64::MAX - 1);
+        let allocator = RefIdAllocator::new(source);
+        // 只剩一个序号时一次取 2 个：整组失败。
+        let error = allocator.allocate_batch(2).unwrap_err();
+        assert!(matches!(
+            error,
+            InternalError::IdSpaceExhausted { kind: IdKind::Ref }
+        ));
+        // 整组失败不消耗序号：仍然只有一个序号可用。
+        assert_eq!(allocator.next_probe(), u64::MAX - 1);
+        assert_eq!(allocator.allocate_batch(1).unwrap()[0].seq(), u64::MAX - 1);
+        assert!(allocator.allocate_batch(1).is_err());
+    }
+
+    /// 由旧 `v21_05_tests::e12_checked_group_allocation_fails_as_a_whole_on_exhaustion`
+    /// 迁移：保留不变量“checked 整组分配（Step／声明／序号均不变）的原子失败”，改用
+    /// `RefIdAllocator::allocate_batch`；组内任一序号溢出即整组拒绝且零消耗。
+    #[test]
+    fn e12_checked_group_allocation_fails_as_a_whole_on_exhaustion() {
+        let source = RefIdSource::with_start(u64::MAX - 2);
+        let allocator = RefIdAllocator::new(source);
+        // 整组 1 个成功、整组 3 个溢出：失败者不留任何消耗。
+        let one = allocator.allocate_batch(1).unwrap();
+        assert_eq!(one.len(), 1);
+        assert_eq!(one[0].seq(), u64::MAX - 2);
+        let error = allocator.allocate_batch(3).unwrap_err();
+        assert!(matches!(
+            error,
+            InternalError::IdSpaceExhausted { kind: IdKind::Ref }
+        ));
+        // 序号仍停在失败前：整组分配没有留下部分分配。
+        assert_eq!(allocator.next_probe(), u64::MAX - 1);
+        let last = allocator.allocate_batch(1).unwrap();
+        assert_eq!(last[0].seq(), u64::MAX - 1);
+        assert!(allocator.allocate_batch(1).is_err());
+        assert_eq!(allocator.next_probe(), u64::MAX);
     }
 }

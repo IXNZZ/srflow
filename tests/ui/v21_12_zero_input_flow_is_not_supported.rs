@@ -7,7 +7,7 @@
 //! ```
 //! 预期失败：E0282——未提供输入类型，Builder 无法推断输入 Data 类型。
 
-use srflow::FlowBuilder;
+use srflow::legacy::FlowBuilder;
 
 fn main() {
     let _ = FlowBuilder::start();

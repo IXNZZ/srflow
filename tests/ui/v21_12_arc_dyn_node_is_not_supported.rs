@@ -9,7 +9,7 @@
 
 use std::sync::Arc;
 
-use srflow::{ArcNodeSig, BodyError, Data, DataRef, FlowBuilder, NodeCall1, NodeFut};
+use srflow::legacy::{ArcNodeSig, BodyError, Data, DataRef, FlowBuilder, NodeCall1, NodeFut};
 
 struct Doubler;
 impl NodeCall1<u32, Data<u32>> for Doubler {

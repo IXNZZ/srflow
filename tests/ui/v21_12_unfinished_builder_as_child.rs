@@ -7,7 +7,7 @@
 //! ```
 //! 预期失败：E0277——`OrchSig` 只接受实现 `OrchCall` 的完成态。
 
-use srflow::{Data, DataRef, FlowBuilder, OrchSig};
+use srflow::legacy::{Data, DataRef, FlowBuilder, OrchSig};
 
 fn main() {
     let (mut root, input) = FlowBuilder::<u32>::start().expect("root");

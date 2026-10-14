@@ -7,7 +7,7 @@
 //! ```
 //! 预期失败：E0624（私有 `from_position`）／E0599（无 `new`）／E0308——没有公开构造入口。
 
-use srflow::DataRef;
+use srflow::legacy::DataRef;
 
 fn main() {
     let _ = DataRef::<u32>::from_position(0);

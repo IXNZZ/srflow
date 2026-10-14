@@ -7,7 +7,7 @@
 //! ```
 //! 预期失败：E0277／E0308——`DataRef<u32>` 不满足 `DataRef<u64>` 位置。
 
-use srflow::{BodyError, Data, FlowBuilder, SyncFnSig};
+use srflow::legacy::{BodyError, Data, FlowBuilder, SyncFnSig};
 
 fn main() {
     let (mut flow, input) = FlowBuilder::<u64>::start().expect("start");

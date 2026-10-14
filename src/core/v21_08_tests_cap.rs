@@ -1,27 +1,19 @@
-//! V21-08 item cap／target 切片（H09～H14、H16～H18、H22）。
+//! V21-08 item cap／target 切片（保留：H10～H14、H18、H22）。
 //!
-//! 本文件只做验收测试：不修改生产代码。H16／H17 必须来自**真实 body Flow**（把自身
-//! 输入原样声明为输出），其余条目直接使用协调组件的真实入口（`bind_item_input`、
-//! `import_batch`、`finalize`、`consume_item`、`begin_collector`、`finish_collector`），
-//! 以便在拒绝点前后取得 `snapshot_targets_probe` 的完整 refs／owned 证据。
+//! B 阶段只保留直接使用协调组件真实入口（`bind_item_input`、`import_batch`、`finalize`、
+//! `consume_item`、`begin_collector`、`finish_collector`）的条目：它们不使用旧 body Flow
+//! 外壳，删除旧上层协议后仍成立，并可在拒绝点前后取得 `snapshot_targets_probe` 的完整
+//! refs／owned 证据。旧 H09／H16／H17（经 FlowBuilder／EachBuilder 旧外壳）已退出，其
+//! 借用／收集不变量由 `engine` 的 `p07`／`p13` 系列承担。
 
 use std::any::TypeId;
 
-use super::builder::TypedCallBuilder;
-use super::context::BodyError;
-use super::each::{Each, EachBuilder, EachOnly, EachShared};
-use super::flow::{Flow, FlowBuilder};
 use super::identity::{DataId, ExecutionIdentity, ScopeId};
 use super::internal_error::ScopeError;
-use super::orchestrator::OrchCall;
 use super::ref_id::{RefId, RefIdAllocator, RefIdSource};
 use super::scope::{
-    ExportSlot, ImportSlot, ItemAccess, RefTarget, ScopeCoordinator, ScopeState, TargetSnapshot,
-};
-use super::signature::{AsyncFnSig, Data, OrchSig};
-use super::test_support::{
-    count, reset_observations, root_input, run_definition_in_root, run_definition_plain, saw,
-    take_shared_events,
+    CollectionRoot, ExportSlot, ImportSlot, ItemAccess, RefTarget, ScopeCoordinator, ScopeState,
+    TargetSnapshot,
 };
 
 // ---------------------------------------------------------------- 业务夹具类型
@@ -40,32 +32,9 @@ struct CapOut {
     key: u32,
 }
 
-/// 非 Clone shared Data。
-#[derive(Debug, PartialEq, Eq)]
-struct CapShared {
-    /// shared 值。
-    weight: u32,
-}
-
 /// 另一个业务类型（元素 metadata／collector 类型不符的对照）。
 #[derive(Debug, PartialEq, Eq)]
 struct OtherData(u32);
-
-/// H09 的 body 输出：带元素实际地址，证明借用来自原集合元素本身。
-#[derive(Debug, PartialEq, Eq)]
-struct AddressedOut {
-    /// 结果值。
-    key: u32,
-    /// body 内观察到的 item 地址。
-    address: usize,
-}
-
-async fn probe_cap_item(item: &CapItem, shared: &CapShared) -> Result<AddressedOut, BodyError> {
-    Ok(AddressedOut {
-        key: item.id + shared.weight,
-        address: item as *const CapItem as usize,
-    })
-}
 
 // ---------------------------------------------------------------- 协调组件夹具
 
@@ -151,125 +120,11 @@ fn cap_stack(f: &mut Fixture, index: usize) -> (ScopeId, ScopeId, DataId, RefId,
 /// 复现一个真实 CollectionItem 目标（同 collection／index／cap／access）。
 fn item_target(collection: &DataId, index: usize, cap: &ScopeId) -> RefTarget {
     RefTarget::CollectionItem {
-        collection: collection.clone(),
+        collection: CollectionRoot::Data(collection.clone()),
         index,
         lifetime_cap: cap.clone(),
         access: ItemAccess::for_collection::<CapItem>(),
     }
-}
-
-// ---------------------------------------------------------------- H09
-
-/// H09：非 Clone item／shared／O；地址相同、无 move／Clone、owner 不增、旧 O 身份失效、
-/// 物理移动次数匹配项数。
-#[test]
-fn h09_non_clone_items_are_borrowed_in_place_and_moved_once_each() {
-    reset_observations();
-    // 真实 Each：body 完成态 Flow（异步 Node 读取 item 与 shared）。
-    let (mut body, (item_ref, shared_ref)) =
-        FlowBuilder::<(CapItem, CapShared)>::start().expect("body");
-    let body_out = body
-        .then::<_, AsyncFnSig<(CapItem, CapShared), Data<AddressedOut>>, _>(
-            probe_cap_item,
-            (item_ref.clone(), shared_ref.clone()),
-        )
-        .expect("probe");
-    let body_flow: Flow<(CapItem, CapShared), Data<AddressedOut>> =
-        body.finish(body_out).expect("body finish");
-
-    let mut each_builder: EachBuilder<EachShared<CapItem, CapShared>, AddressedOut> =
-        EachBuilder::start().expect("each");
-    each_builder
-        .then_body::<_, OrchSig<(CapItem, CapShared), Data<AddressedOut>>>(body_flow)
-        .expect("each body");
-    let each: Each<EachShared<CapItem, CapShared>, AddressedOut> =
-        each_builder.finish().expect("each finish");
-
-    let (mut parent, (collection, shared)) =
-        FlowBuilder::<(Vec<CapItem>, CapShared)>::start().expect("parent");
-    let collected = parent
-        .then::<_, OrchSig<(Vec<CapItem>, CapShared), Data<Vec<AddressedOut>>>, _>(
-            each,
-            (collection.clone(), shared.clone()),
-        )
-        .expect("wire each");
-    let flow = parent
-        .finish::<Data<Vec<AddressedOut>>, _>(collected.clone())
-        .expect("parent finish");
-
-    let collection_position = collection.position().clone();
-    let collected_position = collected.position().clone();
-    run_definition_in_root(
-        flow.definition(),
-        vec![
-            root_input(
-                &collection,
-                vec![CapItem { id: 10 }, CapItem { id: 20 }, CapItem { id: 30 }],
-            ),
-            root_input(&shared, CapShared { weight: 7 }),
-        ],
-        |view| {
-            // 元素地址来自 Root 登记的原集合本身：解析同一 Vec 取得期望地址。
-            let expected: Vec<usize> = view
-                .resolve::<Vec<CapItem>>(&collection_position)?
-                .iter()
-                .map(|item| item as *const CapItem as usize)
-                .collect();
-            let outputs = view.resolve::<Vec<AddressedOut>>(&collected_position)?;
-            assert_eq!(
-                outputs.iter().map(|out| out.address).collect::<Vec<_>>(),
-                expected,
-                "每项借用都来自原集合元素本身（无 move／Clone）"
-            );
-            assert_eq!(
-                outputs.iter().map(|out| out.key).collect::<Vec<_>>(),
-                vec![17, 27, 37],
-                "结果按输入顺序且 shared 被逐项读取"
-            );
-            // owner 不增：集合仍由 Root 责任。
-            let collection_id = view.data_id_of(&collection_position)?;
-            let root_scope = view.root().clone();
-            assert_eq!(
-                view.probe().owner_probe(&collection_id).unwrap(),
-                root_scope,
-                "集合 owner 不增"
-            );
-            assert_eq!(
-                view.resolve::<Vec<CapItem>>(&collection_position)?.len(),
-                3,
-                "原集合内容原样保留"
-            );
-            Ok(())
-        },
-    )
-    .expect("each run");
-
-    // 物理移动次数匹配项数：每一项 Consume 恰好追加一次。
-    let shared_events = take_shared_events();
-    for index in 1..=3 {
-        assert_eq!(
-            count(&shared_events, &format!("collector-after:{index}")),
-            1,
-            "第 {index} 项移动一次: {shared_events:?}"
-        );
-    }
-
-    // 消费新 O 后旧标识失效：每项 owned 输出移入 collector 后不再存活。
-    let mut f = Fixture::new();
-    let (each_scope, item, _collection, _each_collection, item_position) = cap_stack(&mut f, 0);
-    let collector = f
-        .coordinator
-        .begin_collector::<CapOut>(&each_scope)
-        .unwrap();
-    let out_position = f.ref_id();
-    let out_id = f.register(&item, &out_position, CapOut { key: 1 });
-    assert!(f.coordinator.alive_probe(&out_id));
-    f.coordinator
-        .consume_item(&item, &out_position, &collector)
-        .unwrap();
-    assert!(!f.coordinator.alive_probe(&out_id), "消费后旧 O 身份失效");
-    assert_eq!(f.coordinator.collector_moves(&collector).unwrap(), 1);
-    let _ = item_position;
 }
 
 // ---------------------------------------------------------------- H10
@@ -775,7 +630,7 @@ fn h14_target_validation_rejects_every_broken_input() {
         &item,
         &wrong_vec,
         RefTarget::CollectionItem {
-            collection: other_collection,
+            collection: CollectionRoot::Data(other_collection),
             index: 0,
             lifetime_cap: item.clone(),
             access: ItemAccess::for_collection::<CapItem>(),
@@ -797,7 +652,7 @@ fn h14_target_validation_rejects_every_broken_input() {
         &item,
         &foreign_source,
         RefTarget::CollectionItem {
-            collection: foreign_collection,
+            collection: CollectionRoot::Data(foreign_collection),
             index: 0,
             lifetime_cap: item.clone(),
             access: ItemAccess::for_collection::<CapItem>(),
@@ -814,7 +669,7 @@ fn h14_target_validation_rejects_every_broken_input() {
         &item,
         &foreign_cap_source,
         RefTarget::CollectionItem {
-            collection: collection.clone(),
+            collection: CollectionRoot::Data(collection.clone()),
             index: 0,
             lifetime_cap: foreign.root(),
             access: ItemAccess::for_collection::<CapItem>(),
@@ -846,235 +701,6 @@ fn h14_target_validation_rejects_every_broken_input() {
         1
     );
     let _ = each;
-}
-
-// ---------------------------------------------------------------- H16
-
-/// H16：imported 完整 Data 不能收集——真实 body Flow 原样输出 shared ancestor Data；
-/// 真实 Item Consume 拒绝，移动次数 0，原 owner／内容不变，collector 未增，不返回部分 Vec。
-#[test]
-fn h16_re_exposed_shared_data_cannot_be_collected() {
-    reset_observations();
-    // 真实 body Flow：把自身 shared 输入（来自 ItemScope 的 imported alias）原样声明为输出。
-    let (body, (item_ref, shared_ref)) =
-        FlowBuilder::<(CapItem, CapShared)>::start().expect("body");
-    let body_flow: Flow<(CapItem, CapShared), Data<CapShared>> = body
-        .finish::<Data<CapShared>, _>(shared_ref.clone())
-        .expect("identity finish");
-    let _ = item_ref;
-
-    let mut each_builder: EachBuilder<EachShared<CapItem, CapShared>, CapShared> =
-        EachBuilder::start().expect("each");
-    each_builder
-        .then_body::<_, OrchSig<(CapItem, CapShared), Data<CapShared>>>(body_flow)
-        .expect("each body");
-    let each: Each<EachShared<CapItem, CapShared>, CapShared> =
-        each_builder.finish().expect("each finish");
-
-    let (mut parent, (collection, shared)) =
-        FlowBuilder::<(Vec<CapItem>, CapShared)>::start().expect("parent");
-    let produced = parent
-        .then::<_, OrchSig<(Vec<CapItem>, CapShared), Data<Vec<CapShared>>>, _>(
-            each,
-            (collection.clone(), shared.clone()),
-        )
-        .expect("wire each");
-    let flow = parent
-        .finish::<Data<Vec<CapShared>>, _>(produced)
-        .expect("parent finish");
-
-    let error = run_definition_plain(
-        flow.definition(),
-        vec![
-            root_input(&collection, vec![CapItem { id: 1 }]),
-            root_input(&shared, CapShared { weight: 5 }),
-        ],
-    )
-    .expect_err("imported shared 不能被 Consume");
-    assert!(
-        matches!(error.scope_error(), Some(ScopeError::IllegalOwner { .. })),
-        "期望 IllegalOwner，实际: {:?}",
-        error.scope_error()
-    );
-    let shared_events = take_shared_events();
-    assert_eq!(
-        count(&shared_events, "collector-before:0"),
-        1,
-        "拒绝点移动次数仍为 0: {shared_events:?}"
-    );
-    assert!(
-        !saw(&shared_events, "collector-after:1"),
-        "拒绝后 collector 未增: {shared_events:?}"
-    );
-    assert!(
-        !saw(&shared_events, "each-finish-refs:1"),
-        "拒绝后未 finish，不返回部分 Vec: {shared_events:?}"
-    );
-
-    // 协调组件证据：原 owner／内容不变、collector 未增、Each 两侧 refs／owned 不变。
-    let mut f = Fixture::new();
-    let root = f.root();
-    let shared_position = f.ref_id();
-    let shared_id = f.register(&root, &shared_position, CapShared { weight: 5 });
-    let each = f.child(&root);
-    let shared_alias = f.ref_id();
-    f.import::<CapShared>(&each, &root, &shared_position, &shared_alias);
-    let collector = f.coordinator.begin_collector::<CapShared>(&each).unwrap();
-    let item = f.child(&each);
-    let item_shared = f.ref_id();
-    f.import::<CapShared>(&item, &each, &shared_alias, &item_shared);
-    let before_each = f.targets(&each);
-    let rejected = f
-        .coordinator
-        .consume_item(&item, &item_shared, &collector)
-        .unwrap_err();
-    assert!(
-        matches!(rejected, ScopeError::IllegalOwner { .. }),
-        "imported ancestor Data 被拒绝: {rejected:?}"
-    );
-    assert_eq!(f.targets(&each), before_each, "Each refs／owned 不变");
-    assert_eq!(
-        f.coordinator.collector_len(&collector).unwrap(),
-        0,
-        "collector 未增"
-    );
-    assert_eq!(
-        f.coordinator.collector_moves(&collector).unwrap(),
-        0,
-        "移动次数 0"
-    );
-    assert!(f.coordinator.alive_probe(&shared_id), "原 Data 存活");
-    assert_eq!(
-        f.coordinator.owner_probe(&shared_id).unwrap(),
-        root,
-        "原 owner 不变"
-    );
-    assert_eq!(
-        f.coordinator
-            .resolve::<CapShared>(&root, &shared_position)
-            .unwrap(),
-        &CapShared { weight: 5 },
-        "原内容不变"
-    );
-}
-
-// ---------------------------------------------------------------- H17
-
-/// H17：CollectionItem 不能收集——真实 body Flow 原样输出 item；cap 内输出合法，但 Item
-/// Consume 因非完整 owned Data 拒绝；不 take 原集合／item；显式 Node `&T -> new O` 正例可收集。
-#[test]
-fn h17_item_alias_cannot_be_collected_but_new_owned_output_can() {
-    reset_observations();
-    // 真实 body Flow：把自身 item 输入原样声明为输出（cap 内 Export 合法）。
-    let (body, item_ref) = FlowBuilder::<(CapItem,)>::start().expect("body");
-    let body_flow: Flow<(CapItem,), Data<CapItem>> = body
-        .finish::<Data<CapItem>, _>(item_ref.clone())
-        .expect("identity finish");
-
-    let mut each_builder: EachBuilder<EachOnly<CapItem>, CapItem> =
-        EachBuilder::start().expect("each");
-    each_builder
-        .then_body::<_, OrchSig<CapItem, Data<CapItem>>>(body_flow)
-        .expect("each body");
-    let each: Each<EachOnly<CapItem>, CapItem> = each_builder.finish().expect("each finish");
-
-    let (mut parent, collection) = FlowBuilder::<(Vec<CapItem>,)>::start().expect("parent");
-    let produced = parent
-        .then::<_, OrchSig<Vec<CapItem>, Data<Vec<CapItem>>>, _>(each, collection.clone())
-        .expect("wire each");
-    let flow = parent
-        .finish::<Data<Vec<CapItem>>, _>(produced)
-        .expect("parent finish");
-
-    let collection_position = collection.position().clone();
-    let error = run_definition_plain(
-        flow.definition(),
-        vec![root_input(
-            &collection,
-            vec![CapItem { id: 1 }, CapItem { id: 2 }],
-        )],
-    )
-    .expect_err("item alias 不能被 Consume");
-    assert!(
-        matches!(
-            error.scope_error(),
-            Some(ScopeError::NonCompleteTarget { .. })
-        ),
-        "期望 NonCompleteTarget，实际: {:?}",
-        error.scope_error()
-    );
-    let shared_events = take_shared_events();
-    assert_eq!(
-        count(&shared_events, "collector-before:0"),
-        1,
-        "拒绝点移动次数仍为 0: {shared_events:?}"
-    );
-    assert!(
-        !saw(&shared_events, "collector-after:1"),
-        "拒绝后 collector 未增: {shared_events:?}"
-    );
-
-    // 协调组件证据 + 显式 Node `&T -> new O` 正例可收集。
-    let mut f = Fixture::new();
-    let root = f.root();
-    let collection_position_local = f.ref_id();
-    let collection_local = f.register(
-        &root,
-        &collection_position_local,
-        vec![CapItem { id: 1 }, CapItem { id: 2 }],
-    );
-    let each = f.child(&root);
-    let each_collection = f.ref_id();
-    f.import::<Vec<CapItem>>(&each, &root, &collection_position_local, &each_collection);
-    let collector = f.coordinator.begin_collector::<CapOut>(&each).unwrap();
-
-    // alias 版：ItemScope 的位置被绑定为 CollectionItem。
-    let item = f.child(&each);
-    let item_position = f.ref_id();
-    f.coordinator
-        .bind_item_input::<CapItem>(&item, &each, &each_collection, &item_position, 0)
-        .unwrap();
-    let before_collection = f.targets(&root);
-    let rejected = f
-        .coordinator
-        .consume_item(&item, &item_position, &collector)
-        .unwrap_err();
-    assert!(
-        matches!(rejected, ScopeError::NonCompleteTarget { .. }),
-        "CollectionItem 被拒绝: {rejected:?}"
-    );
-    assert_eq!(
-        f.coordinator.collector_moves(&collector).unwrap(),
-        0,
-        "不被 take"
-    );
-    assert_eq!(f.targets(&root), before_collection, "原集合未被 take");
-    assert!(
-        f.coordinator
-            .resolve::<Vec<CapItem>>(&root, &collection_position_local)
-            .unwrap()
-            .len()
-            == 2
-    );
-
-    // 正例：显式 Node 产生新的 owned O（`&T -> new O`），可被收集。
-    let item_ok = f.child(&each);
-    let alias_ok = f.ref_id();
-    f.coordinator
-        .bind_item_input::<CapItem>(&item_ok, &each, &each_collection, &alias_ok, 1)
-        .unwrap();
-    let new_out = f.ref_id();
-    f.register(&item_ok, &new_out, CapOut { key: 42 });
-    f.coordinator
-        .consume_item(&item_ok, &new_out, &collector)
-        .unwrap();
-    assert_eq!(
-        f.coordinator.collector_len(&collector).unwrap(),
-        1,
-        "新 owned O 可收集"
-    );
-    let _ = collection_local;
-    let _ = collection_position;
 }
 
 // ---------------------------------------------------------------- H18

@@ -1,4 +1,4 @@
-use srflow::FlowBuilder;
+use srflow::legacy::FlowBuilder;
 
 fn main() {
     let _ = FlowBuilder::<(

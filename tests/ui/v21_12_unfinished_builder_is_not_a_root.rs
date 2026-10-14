@@ -7,7 +7,7 @@
 //! ```
 //! 预期失败：E0277——`Runtime::execute` 只接受完成态 Orchestrator。
 
-use srflow::{Data, FlowBuilder, Runtime};
+use srflow::legacy::{Data, FlowBuilder, Runtime};
 
 fn main() {
     let (builder, _input) = FlowBuilder::<u32>::start().expect("start");

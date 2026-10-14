@@ -247,7 +247,7 @@ selector 为 Ref<K>，K 是已声明 Data 并支持 PartialEq 的业务键。cas
 
 所有 case / otherwise 的 OutputShape 和每个位置类型一致。运行时只执行一个选中 branch，未选分支不建立执行 Scope、不执行其 Node；其 Definition closure 仍在构建时运行。
 
-otherwise 可选，不要求编译期穷举。无匹配且无 otherwise 返回 RunError::NoMatchingCase；选中 branch 失败不改走 otherwise。重复 case 值、重复 otherwise、无任何分支的配置在构建时拒绝。不存在 predicate case 或 choose macro。
+otherwise 可选，不要求编译期穷举。无匹配且无 otherwise，且退出清理未发生故障时，返回 RunError::NoMatchingCase；若该失败退出同时发生清理故障，则返回 RunError::Runtime，其 `Error::source` 保留 NoMatchingCase 原因、`cleanup_source` 保留首个清理故障诊断——该例外仅适用于这一组合，不改变其他选择与失败行为。选中 branch 失败不改走 otherwise。重复 case 值、重复 otherwise、无任何分支的配置在构建时拒绝。不存在 predicate case 或 choose macro。
 
 ## 10. Retry
 
@@ -319,6 +319,8 @@ Each item 内的 IterBreak 会结束最近外层 Iter，并停止剩余 item；�
 
 找不到对应边界的 Control 形成 UnhandledControl。普通 Failure 立即终止路径，保留源错误；错误不驱动其他业务步骤，也不能作为未正式输出业务 state 的旁路。
 
+显式冻结的终止分类在失败退出叠加清理故障时，统一返回 RunError::Runtime：其 `Error::source` 保留原分类（`UnhandledControl` 保留原控制信号；`RetryExhausted`／`IterationLimitReached` 保留全部参数与最后动态原因），`cleanup_source` 保留首个清理故障诊断。此规则适用于 `UnhandledControl`、`RetryExhausted` 与 `IterationLimitReached`；`NoMatchingCase` 的同类组合已由 §9 单独规定。它不修改这些枚举变体的任何字段，也不把预算终止错误重新解释为控制信号。
+
 所有被退出作用域必须在相关借用结束后清理其责任数据，保留 ancestor-owned 数据。取消整个 Root Future 会结束其所有内部调用和业务数据寿命，不授予 child 脱离 Root 存活的能力。此约束不承诺回滚外部副作用或处理任意业务 panic。
 
 ## 13. Root 输出与别名
@@ -375,6 +377,10 @@ fn main() {
 ## 15. 冻结结果与后续边界
 
 2026-10-08 最终确认：用户明确确认“这个 API SPEC 就定下来了”。本版作为后续内部设计与实现的 Public API 基准；契约变更须明确记录原因、影响与验证证据，并经用户确认后修订，不得由实现细节静默改变。
+
+2026-10-12 确认修订（用户确认）：显式冻结的终止分类在失败退出叠加清理故障时统一返回 `RunError::Runtime`，`Error::source` 保留原分类、`cleanup_source` 保留首个清理故障诊断，覆盖 `UnhandledControl`、`RetryExhausted`、`IterationLimitReached`（`NoMatchingCase` 见 §9）。原因：`UnhandledControl` 的同型行为已按 Engine §8.8 实现并验收（WE-T02 R01，样本 `r01_root_control_with_cleanup_failure_becomes_runtime`）但未登记，而 `RetryExhausted`／`IterationLimitReached` 没有承载清理诊断的字段。影响：仅上述组合的公开错误分类，不修改枚举字段，不把预算终止错误重新解释为控制信号。确认依据：用户 2026-10-12 明确确认（条文起草见任务书 [WE_T04_Retry_Iter_And_Group_Promote_v0.1.md](workflow_engine_tasks/WE_T04_Retry_Iter_And_Group_Promote_v0.1.md) §7.3）。验证计划与证据：WE-T04 的 E26／E27 实际耗尽与匹配控制退出清理故障样本，以及既有 `r01_root_control_with_cleanup_failure_becomes_runtime` 回归；实施前尚未执行。
+
+2026-10-12 确认修订（用户确认）：Choose 的错误分类增加一条局部例外——无匹配且无 otherwise 且退出清理未发生故障时返回 `RunError::NoMatchingCase`；该失败退出同时发生清理故障时返回 `RunError::Runtime`，`Error::source` 保留 `NoMatchingCase` 原因、`cleanup_source` 保留首个清理故障诊断；仅适用于该组合，不修改枚举 payload、键约束或执行布局。原因：`RunError::NoMatchingCase` 是冻结的 unit 项，无法同时承载原终止原因与首清理诊断，而 T02 已确立“首错与首清理诊断不相互丢弃”。影响：仅上述组合的公开错误分类。确认依据：用户 2026-10-12 明确确认（条文起草见任务书 [WE_T03_Choose_v0.1.md](workflow_engine_tasks/WE_T03_Choose_v0.1.md) §11.5）。验证计划与实际证据：WE-T03 的 C18 样本（无匹配正常路径对照、一次与两次清理故障叠加的真实路径）见 [WE_T03_HANDOVER_v0.1.md](workflow_engine_tasks/WE_T03_HANDOVER_v0.1.md) §7／§12，已实测通过。
 
 2026-10-08 增补：Data 支持派生与手写两种实现形式；Root Input 支持 `()`。增补证据见 [Data 派生测试](../../v3/SRFlow_Public_API_v21_Probe/tests/data_derive.rs)、[零输入 Root 测试](../../v3/SRFlow_Public_API_v21_Probe/tests/zero_root.rs) 与 [派生借用逃逸拒绝样本](../../v3/SRFlow_Public_API_v21_Probe/tests/ui/derive_borrow_escape.rs)。其余契约保持本版已确认内容。
 

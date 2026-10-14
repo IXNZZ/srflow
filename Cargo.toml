@@ -8,8 +8,14 @@ rust-version = "1.97"
 description = "SRFlow: a strongly-typed execution framework centered on sequential flows"
 license = "MIT"
 
-# 当前核心保持零普通依赖；异步适配与线程约束按 v2.1 任务落实。
+[workspace]
+# 唯一辅助成员：只提供 Data derive 的编译期宏；运行时 Core 不拆包。
+members = ["srflow-data-derive"]
+
 [dependencies]
+# 编译期宏依赖：只为 `#[derive(Data)]` 服务，不进入运行时数据／执行逻辑。
+# 运行时核心仍不依赖第三方运行时库或 executor。
+srflow-data-derive = { path = "srflow-data-derive", version = "0.0.1" }
 
 [dev-dependencies]
 # 仅用于测试与示例中驱动异步代码。选择 `futures` 是因为它不提供全局运行时，
