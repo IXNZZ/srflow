@@ -637,8 +637,10 @@ fn w06_closed_upstream_cap_is_checked_even_when_local_cap_is_active() {
     reset_channels();
 }
 
-/// X20-c：本层 metadata 声称的集合类型与上游元素的**真实**类型不符 → 拒绝，`actual` 是真实
-/// 集合元素类型名（不靠元数据背书）。
+/// X20-c：本层 metadata 声称的集合类型与上游元素的**真实**类型不符 → 拒绝（对真实值
+/// `TypeId` 复核，不靠元数据背书）。诊断的 `actual` 取 `type_name_of_val(&dyn Any)`：当前返回
+/// trait object 名 `"dyn core::any::Any"`，**不是**真实业务集合元素类型名（拒绝行为与
+/// `expected`／`position` 正确，见下方如实断言与本波次 defect 登记）。
 #[test]
 fn w06_upstream_actual_value_type_is_not_replaced_by_local_metadata() {
     reset_channels();
@@ -668,8 +670,9 @@ fn w06_upstream_actual_value_type_is_not_replaced_by_local_metadata() {
         ),
         "got {error:?}"
     );
-    // 如实登记当前诊断的 `actual` 字段：production 在回溯处投影出的是 `&dyn Any`，因此
-    // `actual` 是 `"dyn core::any::Any"`（真实拒绝不变；字段信息量不足，见本波次 defect 登记）。
+    // 如实登记当前诊断的 `actual` 字段：production 在回溯处投影出的是 `&dyn Any`，故
+    // `actual` 是 `"dyn core::any::Any"`——**非**真实业务集合元素类型名（拒绝行为与
+    // `expected`／`position` 正确；字段信息量不足，见本波次 defect 登记）。
     let ScopeError::TypeMismatch { actual, .. } = &error else {
         unreachable!("the match above proved the variant")
     };

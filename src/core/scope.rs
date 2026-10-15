@@ -743,6 +743,23 @@ impl ScopeCoordinator {
             .insert(position.clone(), target);
     }
 
+    /// 测试故障注入：把一个已登记 owned 记录从原 Scope 移到 `to`（只改责任元数据）。
+    ///
+    /// 用于构造"目标实例的责任方不是本 Scope"这一真实前提：随后仍由**未修改**的正式入口
+    /// （如 `prepare_root_extraction`）自行判定并给出 `IllegalOwner`。本函数不复制、不内联、
+    /// 也不放宽任何判定；既不移动也不销毁业务值。**合成内部前提：自然业务不会产生该状态。**
+    #[cfg(test)]
+    pub(crate) fn relocate_owned_probe(&mut self, id: &DataId, to: &ScopeId) {
+        for record in self.registry.scopes.values_mut() {
+            record.owned.remove(id);
+        }
+        self.registry
+            .lookup_mut(to)
+            .expect("fixture target scope exists")
+            .owned
+            .insert(id.clone());
+    }
+
     /// 测试故障注入：把某位置 CollectionItem 的 lifetime cap 换成指定 Scope（只改元数据）。
     #[cfg(test)]
     pub(crate) fn replace_item_cap_probe(
@@ -1086,7 +1103,9 @@ impl ScopeCoordinator {
                         position: position.clone(),
                         index: outer_index,
                     })?;
-                // 上游元素的**实际**类型必须就是本层的直接集合类型。
+                // 上游元素的**实际**类型必须就是本层的直接集合类型。此处对回溯投影出的
+                // 擦除借用 `value: &dyn Any` 取类型名，`actual` 因此是 `"dyn core::any::Any"`；
+                // 它只作诊断，**不是**真实业务集合元素类型名（本层声明的集合类型另见 `expected`）。
                 if value.type_id() != access.collection_type() {
                     return Err(ScopeError::TypeMismatch {
                         position: position.clone(),
@@ -2818,6 +2837,8 @@ impl ScopeCoordinator {
         let access = ItemAccess::for_collection::<T>();
         let length = {
             let value = self.collection_value(source, &collection, item_scope, &access)?;
+            // 实际值是擦除借用 `&dyn Any`；`actual` 取 `type_name_of_val(value)`，即
+            // `"dyn core::any::Any"`，仅作诊断，不代表真实业务集合类型名。
             value
                 .downcast_ref::<Vec<T>>()
                 .ok_or_else(|| ScopeError::TypeMismatch {

@@ -57,4 +57,6 @@ mod tests_runtime;
 #[cfg(test)]
 mod tests_we_t06_arity;
 #[cfg(test)]
+mod tests_we_t06_root_preflight;
+#[cfg(test)]
 mod tests_we_t06_witnesses;

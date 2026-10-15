@@ -557,6 +557,47 @@ pub(crate) fn take_termination_saved() -> Vec<SavedTermination> {
     SAVED_TERMINATIONS.with(|slots| std::mem::take(&mut *slots.borrow_mut()))
 }
 
+// ---- WE-T06 R02：Root 输入登记失败的只读观察（独立通道，不进入共享事件序列） ----
+
+/// 一次 Root 输入登记阶段的失败：已成功接管的输入个数与触发冲突的声明位置。
+///
+/// 只读副本；用于正式 `Runtime::execute` 的「第二输入登记失败」样本断言已接管数量
+/// （承接旧 `k05` 的 `registered_inputs()==1`），不改变任何判定路径。
+#[derive(Debug, Clone)]
+pub(crate) struct RootInputRegistrationFailure {
+    /// 失败前已成功登记的输入个数。
+    pub(crate) registered: usize,
+    /// 触发冲突的声明位置。
+    pub(crate) position: super::ref_id::RefId,
+    /// 冲突诊断文本（正式 `ScopeError` 的 Display）。
+    pub(crate) diagnostic: String,
+}
+
+thread_local! {
+    static ROOT_INPUT_REGISTRATION_FAILURES: RefCell<Vec<RootInputRegistrationFailure>> =
+        const { RefCell::new(Vec::new()) };
+}
+
+/// 记录一次 Root 输入登记失败（只读；不进入共享事件序列，避免影响其它样本的次序断言）。
+pub(crate) fn record_root_input_registration_failure(
+    registered: usize,
+    position: super::ref_id::RefId,
+    diagnostic: String,
+) {
+    ROOT_INPUT_REGISTRATION_FAILURES.with(|records| {
+        records.borrow_mut().push(RootInputRegistrationFailure {
+            registered,
+            position,
+            diagnostic,
+        })
+    });
+}
+
+/// 取走已记录的 Root 输入登记失败。
+pub(crate) fn take_root_input_registration_failures() -> Vec<RootInputRegistrationFailure> {
+    ROOT_INPUT_REGISTRATION_FAILURES.with(|records| std::mem::take(&mut *records.borrow_mut()))
+}
+
 // ---- WE-T04：首清理诊断、失败责任与控制器错误前后快照（cfg(test) 只读观察） ----
 
 /// 一次清理失败登记：被保存的首个诊断与后续不覆盖的尝试都记录。
@@ -749,6 +790,7 @@ pub(crate) fn reset_observations() {
     take_later_cleanup_diagnostic();
     take_export_pre_cleanup();
     take_termination_saved();
+    take_root_input_registration_failures();
     take_cleanup_failures();
     take_guard_failures();
     take_guard_cleanups();
