@@ -55,6 +55,8 @@ mod tests_retry_iter_state;
 #[cfg(test)]
 mod tests_runtime;
 #[cfg(test)]
+mod tests_v22_t01;
+#[cfg(test)]
 mod tests_we_t06_arity;
 #[cfg(test)]
 mod tests_we_t06_root_preflight;

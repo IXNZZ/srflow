@@ -50,6 +50,86 @@ pub(crate) enum StepKind {
     Each,
 }
 
+/// Body 的构建用途：普通 Body 声明 Output，直接 Iter Round 声明 Next。
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum BodyRole {
+    /// 普通 Body（Root、Chain child、Choose 分支、Retry attempt、Each item 等）。
+    Ordinary,
+    /// 直接 Iter Round；只能声明 Next。
+    Round,
+}
+
+/// Body 声明种类。
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum DeclarationKind {
+    /// 普通 Output。
+    Output,
+    /// Iter Round 的 Next。
+    Next,
+}
+
+/// 声明状态；未声明与显式 unit 必须可区分。
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum DeclarationState {
+    /// 尚未尝试声明。
+    Undeclared,
+    /// 已成功声明零位置（显式 unit）。
+    Unit,
+    /// 已成功声明至少一个位置。
+    NonUnit,
+    /// 已尝试但失败，或声明种类与 Body 用途不符。
+    Failed,
+}
+
+/// 一次 Output/Next 声明的元数据。
+///
+/// `attempted` 在第一次调用声明入口时置位；`declared` 只在该次声明完整成功时为真。
+/// 失败尝试保留 `slots`/`order` 供诊断与防覆盖，但不会成为可执行契约。
+#[derive(Clone, Debug, Default)]
+pub(crate) struct Declaration {
+    /// 是否已经尝试过声明（包括失败尝试）。
+    pub(crate) attempted: bool,
+    /// 是否已成功完成一次完整声明。
+    pub(crate) declared: bool,
+    /// 首次尝试的种类；用于重复声明诊断。
+    pub(crate) kind: Option<DeclarationKind>,
+    /// 声明的逐槽位置与类型；失败尝试也保留已解析/已传入的槽位。
+    pub(crate) slots: Vec<PositionDesc>,
+    /// 声明时点；用于来源可用性与旧收尾检查。
+    pub(crate) order: u64,
+    /// 首次声明失败的目标原因；用于旧收尾前保留首因。
+    pub(crate) first_failure: Option<BuildErrorDetail>,
+    /// 该失败是否已经写入 errors（派生失败可能延后到 finish）。
+    pub(crate) failure_recorded: bool,
+}
+
+impl Declaration {
+    /// 当前声明状态。
+    pub(crate) fn state(&self) -> DeclarationState {
+        if !self.attempted {
+            DeclarationState::Undeclared
+        } else if self.declared && self.slots.is_empty() {
+            DeclarationState::Unit
+        } else if self.declared {
+            DeclarationState::NonUnit
+        } else {
+            DeclarationState::Failed
+        }
+    }
+}
+
+/// 已登记 Choose 分支契约的轻量视图；由 finish 统一比较各分支 Body 的声明状态。
+pub(crate) struct ChooseContract {
+    /// Choose Step 所在 Body。
+    pub(crate) body: BodyId,
+    /// Choose Step 在 parent 中的下标。
+    pub(crate) step: usize,
+    /// 各分支的 Body（按 case 顺序，最后是 otherwise）。
+    pub(crate) branches: Vec<BodyId>,
+    /// 预分配/登记的 parent 输出槽类型。
+    pub(crate) output_types: Vec<TypeDesc>,
+}
+
 /// Body 内单个 Step 的只读登记视图与受控执行入口。
 pub(crate) trait StepEntry {
     /// Step 类别。
@@ -77,6 +157,18 @@ pub(crate) trait StepEntry {
     /// Each Step 的静态视图。
     #[allow(dead_code)] // 由定向测试与结构检查使用
     fn each(&self) -> Option<&EachStep> {
+        None
+    }
+
+    /// Retry Step 的静态视图。
+    #[allow(dead_code)] // 由定向测试与结构检查使用
+    fn retry(&self) -> Option<&RetryStep> {
+        None
+    }
+
+    /// Iter Step 的静态视图。
+    #[allow(dead_code)] // 由定向测试与结构检查使用
+    fn iter(&self) -> Option<&IterStep> {
         None
     }
 
@@ -409,6 +501,10 @@ impl StepEntry for RetryStep {
         self.order
     }
 
+    fn retry(&self) -> Option<&RetryStep> {
+        Some(self)
+    }
+
     fn execute<'a>(
         &'a self,
         definition: &'a Definition<'_>,
@@ -511,6 +607,10 @@ impl StepEntry for IterStep {
 
     fn order(&self) -> u64 {
         self.order
+    }
+
+    fn iter(&self) -> Option<&IterStep> {
+        Some(self)
     }
 
     fn execute<'a>(
@@ -682,9 +782,11 @@ impl StepEntry for EachStep {
 pub(crate) struct Body<'n> {
     id: BodyId,
     parent: Option<BodyId>,
+    role: BodyRole,
     steps: Vec<Box<dyn StepEntry + 'n>>,
-    output: Vec<PositionDesc>,
-    output_order: u64,
+    output: Declaration,
+    next: Declaration,
+    round_initial: Option<Vec<TypeDesc>>,
     imports: Vec<PositionId>,
 }
 
@@ -706,10 +808,34 @@ impl<'n> Body<'n> {
         &self.steps
     }
 
-    /// 该 Body 声明的输出槽位；空表示显式 unit、已完成零输出。
+    /// 该 Body 的构建用途。
+    #[allow(dead_code)] // 由定向测试与结构检查使用
+    pub(crate) fn role(&self) -> BodyRole {
+        self.role
+    }
+
+    /// 该 Body 声明的输出槽位视图；保留既有槽序与语义（空表示零输出）。
     #[allow(dead_code)] // 由定向测试与结构检查使用
     pub(crate) fn output(&self) -> &[PositionDesc] {
+        &self.output.slots
+    }
+
+    /// Output 声明的完整元数据。
+    #[allow(dead_code)] // 由定向测试与结构检查使用
+    pub(crate) fn output_declaration(&self) -> &Declaration {
         &self.output
+    }
+
+    /// Next 声明的完整元数据。
+    #[allow(dead_code)] // 由定向测试与结构检查使用
+    pub(crate) fn next_declaration(&self) -> &Declaration {
+        &self.next
+    }
+
+    /// Round 的初始状态 Shape（仅直接 Round Body 有值）。
+    #[allow(dead_code)] // 由定向测试与结构检查使用
+    pub(crate) fn round_initial(&self) -> Option<&[TypeDesc]> {
+        self.round_initial.as_deref()
     }
 
     /// 执行本 Body 需要从祖先导入的逻辑位置（含深层捕获的完整中间路径）。
@@ -765,6 +891,10 @@ pub(crate) struct PositionRecord {
     source: PositionSource,
     type_desc: TypeDesc,
     created_order: u64,
+    /// 发布到父域的时点；`None` 表示已分配但尚未发布（例如 Choose 预分配输出）。
+    published_order: Option<u64>,
+    /// 生产登记是否因失败依赖而失效。
+    tainted: bool,
 }
 
 impl PositionRecord {
@@ -795,6 +925,18 @@ impl PositionRecord {
     #[allow(dead_code)] // 由定向测试与结构检查使用
     pub(crate) fn type_desc(&self) -> TypeDesc {
         self.type_desc
+    }
+
+    /// 发布时点；`None` 表示尚未发布。
+    #[allow(dead_code)] // 由定向测试与结构检查使用
+    pub(crate) fn published_order(&self) -> Option<u64> {
+        self.published_order
+    }
+
+    /// 生产登记是否已失效。
+    #[allow(dead_code)] // 由定向测试与结构检查使用
+    pub(crate) fn is_tainted(&self) -> bool {
+        self.tainted
     }
 }
 
@@ -848,6 +990,7 @@ impl<'n> Definition<'n> {
     pub(crate) fn root_output_ports(&self) -> Vec<DeclaredPort> {
         self.root()
             .output
+            .slots
             .iter()
             .map(|desc| {
                 DeclaredPort::with_type(
@@ -872,38 +1015,98 @@ impl<'n> Definition<'n> {
 /// Definition 构建器；只在构建期可变，不进入执行消费面。
 pub(crate) struct Builder<'n> {
     id: DefinitionId,
+    /// 失败查询返回的哨兵身份；与当前 Definition 不同，不能被后续位置注册“复活”。
+    #[allow(dead_code)] // 由内部查询/下游 T02/T03 使用
+    missing_definition: DefinitionId,
     core_source: Arc<RefIdSource>,
     next_position: u32,
     order_cursor: u64,
     bodies: Vec<Body<'n>>,
     positions: Vec<PositionRecord>,
     errors: Vec<BuildErrorDetail>,
+    /// 测试/后续 Root 接入使用的期望输出 Shape；`None` 表示本次构建不核对。
+    root_expectation: Option<Vec<TypeDesc>>,
+    /// Choose 分支契约的轻量视图；由 finish 统一比较。
+    choose_contracts: Vec<ChooseContract>,
 }
 
 impl<'n> Builder<'n> {
     pub(crate) fn new() -> Self {
         Self {
             id: DefinitionId::fresh(),
+            missing_definition: DefinitionId::fresh(),
             core_source: RefIdSource::new(),
             next_position: 0,
             order_cursor: 0,
             bodies: Vec::new(),
             positions: Vec::new(),
             errors: Vec::new(),
+            root_expectation: None,
+            choose_contracts: Vec::new(),
         }
     }
 
-    pub(crate) fn new_body(&mut self, parent: Option<BodyId>) -> BodyId {
+    pub(crate) fn new_body(&mut self, parent: Option<BodyId>, role: BodyRole) -> BodyId {
         let id = BodyId::new(self.bodies.len() as u32);
         self.bodies.push(Body {
             id,
             parent,
+            role,
             steps: Vec::new(),
-            output: Vec::new(),
-            output_order: 0,
+            output: Declaration::default(),
+            next: Declaration::default(),
+            round_initial: None,
             imports: Vec::new(),
         });
         id
+    }
+
+    /// 当前定义顺序游标；查询与声明读取它，但不消耗。
+    #[allow(dead_code)] // 由内部查询/下游 T02/T03 使用
+    pub(crate) fn current_order(&self) -> u64 {
+        self.order_cursor
+    }
+
+    /// 失败查询的哨兵句柄；没有当前 Definition 的合法位置身份。
+    #[allow(dead_code)] // 由内部查询/下游 T02/T03 使用
+    pub(crate) fn missing_handle(&self) -> PositionHandle {
+        PositionHandle {
+            definition: self.missing_definition,
+            position: PositionId::new(0),
+        }
+    }
+
+    /// 设置直接 Round 的初始状态 Shape；由 Flow::iter 在构建 round 前调用。
+    pub(crate) fn set_round_initial(&mut self, round: BodyId, types: Vec<TypeDesc>) {
+        self.bodies[round.index()].round_initial = Some(types);
+    }
+
+    /// 设置 Root 期望输出 Shape；由后续 Root 接入或定向测试使用。
+    #[allow(dead_code)] // T03 Root 接入前由内部测试使用
+    pub(crate) fn set_root_expectation(&mut self, expected: Vec<TypeDesc>) {
+        self.root_expectation = Some(expected);
+    }
+
+    /// 把位置标记为因失败依赖而失效。
+    pub(crate) fn mark_tainted(&mut self, handle: PositionHandle) {
+        if let Some(record) = self
+            .positions
+            .get_mut(handle.position.index())
+            .filter(|record| record.handle.definition == handle.definition)
+        {
+            record.tainted = true;
+        }
+    }
+
+    /// 把位置发布到父域；使用实际完成登记的时点。
+    pub(crate) fn mark_published(&mut self, handle: PositionHandle, order: u64) {
+        if let Some(record) = self
+            .positions
+            .get_mut(handle.position.index())
+            .filter(|record| record.handle.definition == handle.definition)
+        {
+            record.published_order = Some(order);
+        }
     }
 
     /// 取得下一个定义顺序值；登记与使用各消耗一个值。
@@ -925,11 +1128,34 @@ impl<'n> Builder<'n> {
         PositionId::new(self.next_position)
     }
 
-    fn allocate(
+    pub(crate) fn allocate(
         &mut self,
         owner: BodyId,
         source: PositionSource,
         type_desc: TypeDesc,
+    ) -> PositionHandle {
+        self.allocate_with_publication(owner, source, type_desc, true)
+    }
+
+    /// 按编号取得构建中的 Body；定向测试与 finish 共用。
+    #[allow(dead_code)] // 由内部测试/下游构建支撑使用
+    pub(crate) fn body(&self, id: BodyId) -> &Body<'n> {
+        &self.bodies[id.index()]
+    }
+
+    /// 已记录的构建错误（按插入顺序）；定向测试用于断言目标路径自身拒绝。
+    #[allow(dead_code)] // 由内部测试/下游诊断使用
+    pub(crate) fn errors(&self) -> &[BuildErrorDetail] {
+        &self.errors
+    }
+
+    /// 分配位置；`publish` 为假时保持“已分配但未发布”，供 Choose 父输出预分配使用。
+    fn allocate_with_publication(
+        &mut self,
+        owner: BodyId,
+        source: PositionSource,
+        type_desc: TypeDesc,
+        publish: bool,
     ) -> PositionHandle {
         let position = PositionId::new(self.next_position);
         self.next_position += 1;
@@ -946,6 +1172,8 @@ impl<'n> Builder<'n> {
                 source,
                 type_desc,
                 created_order,
+                published_order: publish.then_some(created_order),
+                tainted: false,
             }),
             // checked 分配失败：记录错误且不登记该位置；后续使用会以未登记位置拒绝，
             // 而构建出口仍返回这条明确诊断。
@@ -965,7 +1193,7 @@ impl<'n> Builder<'n> {
         }
     }
 
-    fn position(&self, handle: PositionHandle) -> Option<&PositionRecord> {
+    pub(crate) fn position(&self, handle: PositionHandle) -> Option<&PositionRecord> {
         if handle.definition != self.id {
             return None;
         }
@@ -989,6 +1217,364 @@ impl<'n> Builder<'n> {
         } else {
             Visibility::Sibling
         }
+    }
+
+    /// 来源类别是否允许作为业务 Ref。
+    fn is_business_source(source: PositionSource) -> bool {
+        matches!(
+            source,
+            PositionSource::RootInput { .. }
+                | PositionSource::NodeOutput { .. }
+                | PositionSource::ChainOutput { .. }
+                | PositionSource::ChooseOutput { .. }
+                | PositionSource::RetryOutput { .. }
+                | PositionSource::IterCurrent { .. }
+                | PositionSource::IterOutput { .. }
+                | PositionSource::EachItem { .. }
+                | PositionSource::EachOutput { .. }
+        )
+    }
+
+    /// 统一可用性判定：身份、存在、创建/发布时点、失效、类别、可见性与类型。
+    ///
+    /// resolver、validate_use 与全部 register_* 业务来源入口共用本函数；时间比较均为
+    /// 严格早于使用点，后续发布会改变“当前是否可用”，但不会追认较早使用合法。
+    pub(crate) fn availability_error(
+        &self,
+        body: BodyId,
+        step: Option<usize>,
+        desc: PositionDesc,
+        order: u64,
+    ) -> Option<BuildErrorDetail> {
+        let handle = desc.handle;
+        if handle.definition != self.id {
+            return Some(BuildErrorDetail::ForeignDefinition {
+                body,
+                step,
+                position: handle.position,
+                expected: self.id,
+                found: handle.definition,
+            });
+        }
+        let record = match self.position(handle) {
+            Some(record) => record,
+            None => {
+                // 当前 Definition 尚未分配的位置是“未来来源”；已越过分配游标却
+                // 没有记录才是真正的未知位置（例如 checked 分配失败）。
+                return Some(if handle.position.index() == self.next_position as usize {
+                    BuildErrorDetail::NotYetAvailable {
+                        body,
+                        step,
+                        position: handle.position,
+                    }
+                } else {
+                    BuildErrorDetail::UnknownPosition {
+                        body,
+                        step,
+                        position: handle.position,
+                    }
+                });
+            }
+        };
+        if record.created_order >= order {
+            return Some(BuildErrorDetail::NotYetAvailable {
+                body,
+                step,
+                position: handle.position,
+            });
+        }
+        if record.tainted {
+            return Some(BuildErrorDetail::TaintedSource {
+                body,
+                step,
+                position: handle.position,
+            });
+        }
+        if !matches!(record.published_order, Some(published) if published < order) {
+            return Some(BuildErrorDetail::NotPublished {
+                body,
+                step,
+                position: handle.position,
+            });
+        }
+        if !Self::is_business_source(record.source) {
+            return Some(BuildErrorDetail::NotBusinessSource {
+                body,
+                step,
+                position: handle.position,
+                source: record.source,
+            });
+        }
+        if !self.is_ancestor_or_self(record.owner, body) {
+            return Some(BuildErrorDetail::OutOfScope {
+                body,
+                step,
+                position: handle.position,
+                owner: record.owner,
+                relation: self.relation(record.owner, body),
+            });
+        }
+        if record.type_desc != desc.type_desc {
+            return Some(BuildErrorDetail::TypeMismatch {
+                body,
+                step,
+                position: handle.position,
+                declared: desc.type_desc,
+                registered: record.type_desc,
+            });
+        }
+        None
+    }
+
+    /// 未登记位置在前向使用时延后到 finish 分类；登记后仍不存在才判 Unknown。
+    fn defer_unregistered(error: BuildErrorDetail, unregistered: bool) -> bool {
+        unregistered
+            && matches!(
+                error,
+                BuildErrorDetail::UnknownPosition { .. } | BuildErrorDetail::NotYetAvailable { .. }
+            )
+    }
+
+    /// 记录一次真实使用：先通过统一判定，再形成逐层 Import。
+    ///
+    /// 失败时记录并返回目标错误；调用方据此隔离输出，不得继续把失败依赖当作正常来源。
+    /// 尚未登记的未来位置不在使用点立即定案，避免把“稍后分配的合法位置”误报成
+    /// Unknown；finish 会在全部登记完成后按实际时点给出 NotYetAvailable/Unknown。
+    pub(crate) fn record_use_at(
+        &mut self,
+        body: BodyId,
+        step: Option<usize>,
+        desc: PositionDesc,
+        order: u64,
+    ) -> Option<BuildErrorDetail> {
+        if let Some(error) = self.availability_error(body, step, desc, order) {
+            let unregistered = self.position(desc.handle).is_none();
+            if !Self::defer_unregistered(error, unregistered) {
+                self.errors.push(error);
+            }
+            return Some(error);
+        }
+        let owner = self.position(desc.handle).map(|record| record.owner);
+        if let Some(owner) = owner
+            && owner != body
+        {
+            self.record_import(body, desc.handle.position, owner);
+        }
+        None
+    }
+
+    /// 在当前位置解析同类型最近合法业务来源；失败记录 `MissingSource`。
+    #[allow(dead_code)] // 由内部 ref_of/自动声明/下游 T02/T03 使用
+    pub(crate) fn resolve(
+        &mut self,
+        body: BodyId,
+        type_desc: TypeDesc,
+        slot: Option<u16>,
+        order: u64,
+    ) -> Option<PositionDesc> {
+        let found = self
+            .positions
+            .iter()
+            .rev()
+            .find(|record| {
+                record.type_desc == type_desc
+                    && self
+                        .availability_error(
+                            body,
+                            None,
+                            PositionDesc {
+                                handle: record.handle,
+                                type_desc,
+                            },
+                            order,
+                        )
+                        .is_none()
+            })
+            .map(|record| record.handle);
+        match found {
+            Some(handle) => Some(PositionDesc { handle, type_desc }),
+            None => {
+                self.errors.push(BuildErrorDetail::MissingSource {
+                    body,
+                    slot,
+                    type_desc,
+                });
+                None
+            }
+        }
+    }
+
+    /// 登记一次 Output/Next 声明；返回是否完整成功。
+    ///
+    /// 第一次尝试即占用该 Body 的声明位；失败尝试保留槽位与时点，但后续声明/旧收尾
+    /// 不得覆盖或清除。`force_failed` 用于调用方已经记录缺失来源的自动声明。
+    pub(crate) fn declare(
+        &mut self,
+        body: BodyId,
+        kind: DeclarationKind,
+        slots: Vec<PositionDesc>,
+        order: u64,
+        force_failed: bool,
+    ) -> bool {
+        let (attempted, first_kind, role, first_failure, failure_recorded) = {
+            let existing = &self.bodies[body.index()];
+            let declaration = if existing.output.attempted {
+                &existing.output
+            } else {
+                &existing.next
+            };
+            (
+                existing.output.attempted || existing.next.attempted,
+                existing.output.kind.or(existing.next.kind).unwrap_or(kind),
+                existing.role,
+                declaration.first_failure,
+                declaration.failure_recorded,
+            )
+        };
+        if attempted {
+            // 首次声明可能因派生失败（taint/前向）未立即写入 errors；旧收尾拒绝时
+            // 仍要先保留首因，不能只留下 DuplicateDeclaration。
+            if let Some(failure) = first_failure
+                && !failure_recorded
+            {
+                self.errors.push(failure);
+                let existing = &mut self.bodies[body.index()];
+                let declaration = if existing.output.attempted {
+                    &mut existing.output
+                } else {
+                    &mut existing.next
+                };
+                declaration.failure_recorded = true;
+            }
+            self.errors.push(BuildErrorDetail::DuplicateDeclaration {
+                body,
+                first: first_kind,
+                second: kind,
+            });
+            return false;
+        }
+        if (role == BodyRole::Ordinary && kind == DeclarationKind::Next)
+            || (role == BodyRole::Round && kind == DeclarationKind::Output)
+        {
+            let error = BuildErrorDetail::DeclarationNotAllowed { body, kind, role };
+            self.errors.push(error);
+            let target = match kind {
+                DeclarationKind::Output => &mut self.bodies[body.index()].output,
+                DeclarationKind::Next => &mut self.bodies[body.index()].next,
+            };
+            target.attempted = true;
+            target.declared = false;
+            target.kind = Some(kind);
+            target.slots = slots;
+            target.order = order;
+            target.first_failure = Some(error);
+            target.failure_recorded = true;
+            return false;
+        }
+
+        let mut ok = !force_failed;
+        // 自动声明已经由 resolver 记录 MissingSource；视为失败已记录。
+        let mut failure_recorded = force_failed;
+        let mut first_failure = None;
+        if !force_failed {
+            for desc in &slots {
+                if let Some(error) = self.availability_error(body, None, *desc, order) {
+                    if first_failure.is_none() {
+                        first_failure = Some(error);
+                    }
+                    let unregistered = self.position(desc.handle).is_none();
+                    // tainted 是上游失败派生出的后果；等 finish 先检查更早的输入/来源。
+                    // NotPublished 是本次声明自身选择了未发布位置，属于首因，必须保留。
+                    let derived = matches!(error, BuildErrorDetail::TaintedSource { .. });
+                    if !derived && !Self::defer_unregistered(error, unregistered) {
+                        self.errors.push(error);
+                        failure_recorded = true;
+                    }
+                    ok = false;
+                }
+            }
+        }
+        if kind == DeclarationKind::Next && !force_failed {
+            if slots.is_empty() {
+                let error = BuildErrorDetail::NextUnitUnsupported { body };
+                self.errors.push(error);
+                first_failure.get_or_insert(error);
+                failure_recorded = true;
+                ok = false;
+            } else if let Some(expected) = self.bodies[body.index()].round_initial.clone() {
+                if expected.len() != slots.len() {
+                    let error = BuildErrorDetail::DeclarationArityMismatch {
+                        body,
+                        kind,
+                        slot: 0,
+                        expected: expected.len() as u16,
+                        found: slots.len() as u16,
+                    };
+                    self.errors.push(error);
+                    first_failure.get_or_insert(error);
+                    failure_recorded = true;
+                    ok = false;
+                } else {
+                    for (slot, (expected, desc)) in expected.iter().zip(slots.iter()).enumerate() {
+                        if *expected != desc.type_desc {
+                            let error = BuildErrorDetail::DeclarationShapeMismatch {
+                                body,
+                                kind,
+                                slot: slot as u16,
+                                expected: *expected,
+                                found: Some(desc.type_desc),
+                            };
+                            self.errors.push(error);
+                            first_failure.get_or_insert(error);
+                            failure_recorded = true;
+                            ok = false;
+                        }
+                    }
+                }
+            }
+        }
+        if ok {
+            for desc in &slots {
+                let owner = self.position(desc.handle).map(|record| record.owner);
+                if let Some(owner) = owner
+                    && owner != body
+                {
+                    self.record_import(body, desc.handle.position, owner);
+                }
+            }
+        }
+        let target = match kind {
+            DeclarationKind::Output => &mut self.bodies[body.index()].output,
+            DeclarationKind::Next => &mut self.bodies[body.index()].next,
+        };
+        target.attempted = true;
+        target.declared = ok;
+        target.kind = Some(kind);
+        target.slots = slots;
+        target.order = order;
+        target.first_failure = first_failure;
+        target.failure_recorded = failure_recorded;
+        ok
+    }
+
+    /// 声明普通 Output。
+    pub(crate) fn declare_output(
+        &mut self,
+        body: BodyId,
+        slots: Vec<PositionDesc>,
+        order: u64,
+    ) -> bool {
+        self.declare(body, DeclarationKind::Output, slots, order, false)
+    }
+
+    /// 声明 Iter Round 的 Next。
+    pub(crate) fn declare_next(
+        &mut self,
+        body: BodyId,
+        slots: Vec<PositionDesc>,
+        order: u64,
+    ) -> bool {
+        self.declare(body, DeclarationKind::Next, slots, order, false)
     }
 
     /// 记录一条跨边界依赖：从使用 Body 逐层向上，直到位置所属 Body（不含）为止。
@@ -1023,8 +1609,14 @@ impl<'n> Builder<'n> {
         let step_index = self.bodies[body.index()].steps.len();
         let order = self.next_order();
         let inputs = input.positions();
+        let mut inputs_ok = true;
         for desc in &inputs {
-            self.record_position_use(body, *desc);
+            if self
+                .record_use_at(body, Some(step_index), *desc, order)
+                .is_some()
+            {
+                inputs_ok = false;
+            }
         }
         let mut outputs = Vec::new();
         for (slot, type_desc) in <<N::Output as NodeOutput>::Refs as ShapeOps>::type_descs()
@@ -1040,6 +1632,9 @@ impl<'n> Builder<'n> {
                 type_desc,
             );
             outputs.push(handle.position);
+            if !inputs_ok {
+                self.mark_tainted(handle);
+            }
         }
         self.bodies[body.index()]
             .steps
@@ -1070,22 +1665,18 @@ impl<'n> Builder<'n> {
         slots: Vec<PositionDesc>,
     ) -> Vec<PositionHandle> {
         let order = self.next_order();
-        {
-            let body = &mut self.bodies[child.index()];
-            body.output = slots.clone();
-            body.output_order = order;
-        }
+        let declared = self.declare_output(child, slots.clone(), order);
         let step_index = self.bodies[parent.index()].steps.len();
         let mut exits: Vec<PositionId> = Vec::new();
         let mut bindings = Vec::with_capacity(slots.len());
         let mut chain_slots = Vec::with_capacity(slots.len());
         let mut outputs = Vec::with_capacity(slots.len());
         for (slot, desc) in slots.into_iter().enumerate() {
-            let mut source = self.position(desc.handle).map(|record| record.core.clone());
+            let source_ok = declared && self.availability_error(child, None, desc, order).is_none();
             let owner = self.position(desc.handle).map(|record| record.owner);
-            let binding = match (source.as_ref(), owner) {
-                (Some(_), Some(owner)) if self.is_ancestor_or_self(owner, child) => {
-                    if owner == child {
+            let binding = if source_ok {
+                match owner {
+                    Some(owner) if owner == child => {
                         if !exits.contains(&desc.handle.position) {
                             exits.push(desc.handle.position);
                         }
@@ -1096,15 +1687,22 @@ impl<'n> Builder<'n> {
                                 .expect("exit position just ensured")
                                 as u16,
                         )
-                    } else {
-                        self.record_import(child, desc.handle.position, owner);
+                    }
+                    Some(owner) if self.is_ancestor_or_self(owner, child) => {
                         ChainBinding::AncestorAlias(desc.handle.position)
                     }
+                    _ => ChainBinding::Unresolved,
                 }
-                _ => ChainBinding::Unresolved,
+            } else {
+                ChainBinding::Unresolved
+            };
+            let mut source = if source_ok {
+                self.position(desc.handle).map(|record| record.core.clone())
+            } else {
+                None
             };
             if source.is_none() {
-                // 必然失败的构建（伪造／外来位置）：槽位仍保持对齐，诊断由验证阶段给出。
+                // 必然失败的构建：保持槽位对齐；该输出保持失效，不作为正常来源发布。
                 source = self.fresh_core();
             }
             // child 本地唯一声明出口：alias 到该槽来源的实际 target。
@@ -1124,12 +1722,15 @@ impl<'n> Builder<'n> {
                 },
                 desc.type_desc,
             );
-            // 双重不变量破坏（伪造位置 + 身份序列耗尽）才可能不满足；构建已失败。
-            if let (Some(source), Some(exit), Some(output)) = (
-                source,
-                self.position(exit).map(|record| record.core.clone()),
-                self.position(output).map(|record| record.core.clone()),
-            ) {
+            let exit_core = self.position(exit).map(|record| record.core.clone());
+            let output_core = self.position(output).map(|record| record.core.clone());
+            let slot_ok = source_ok && source.is_some() && exit_core.is_some();
+            if !slot_ok {
+                self.mark_tainted(output);
+            }
+            if let (true, Some(source), Some(exit), Some(output)) =
+                (slot_ok, source, exit_core, output_core)
+            {
                 chain_slots.push(HandoverSlot {
                     exit,
                     source,
@@ -1151,17 +1752,6 @@ impl<'n> Builder<'n> {
         outputs
     }
 
-    /// 记录一个逻辑位置在某 Body 的跨边界依赖（Node 输入与 Choose selector 同一规则）。
-    pub(crate) fn record_position_use(&mut self, body: BodyId, desc: PositionDesc) {
-        let owner = self.position(desc.handle).map(|record| record.owner);
-        if let Some(owner) = owner
-            && owner != body
-            && self.is_ancestor_or_self(owner, body)
-        {
-            self.record_import(body, desc.handle.position, owner);
-        }
-    }
-
     /// 当前 Body 已登记的 Step 数；Choose 的槽位归属与顺序分配用它。
     pub(crate) fn step_count(&self, body: BodyId) -> usize {
         self.bodies[body.index()].steps.len()
@@ -1178,6 +1768,9 @@ impl<'n> Builder<'n> {
     }
 
     /// 为 Choose 分配共享的 parent 输出槽：每个逻辑槽位一个固定位置。
+    ///
+    /// 这些位置在分支构建期间保持“未发布”；只有 `push_choose_step` 实际完成登记后
+    /// 才按新的发布时点公开，避免分支读到自己尚未成立的父输出。
     pub(crate) fn allocate_choose_outputs(
         &mut self,
         parent: BodyId,
@@ -1188,13 +1781,14 @@ impl<'n> Builder<'n> {
             .iter()
             .enumerate()
             .map(|(slot, type_desc)| {
-                self.allocate(
+                self.allocate_with_publication(
                     parent,
                     PositionSource::ChooseOutput {
                         step,
                         slot: slot as u16,
                     },
                     *type_desc,
+                    false,
                 )
             })
             .collect()
@@ -1214,27 +1808,25 @@ impl<'n> Builder<'n> {
         outputs: &[PositionHandle],
     ) -> ChooseBranch {
         let order = self.next_order();
-        {
-            let body = &mut self.bodies[child.index()];
-            body.output = declared.clone();
-            body.output_order = order;
-        }
+        let declared_ok = self.declare_output(child, declared.clone(), order);
         let mut sources: Vec<PositionId> = Vec::new();
         let mut slots = Vec::with_capacity(declared.len());
         for (slot, desc) in declared.into_iter().enumerate() {
-            let mut source = self.position(desc.handle).map(|record| record.core.clone());
+            let source_ok =
+                declared_ok && self.availability_error(child, None, desc, order).is_none();
             let owner = self.position(desc.handle).map(|record| record.owner);
-            if let Some(owner) = owner
-                && self.is_ancestor_or_self(owner, child)
+            if source_ok
+                && let Some(owner) = owner
+                && owner == child
+                && !sources.contains(&desc.handle.position)
             {
-                if owner == child {
-                    if !sources.contains(&desc.handle.position) {
-                        sources.push(desc.handle.position);
-                    }
-                } else {
-                    self.record_import(child, desc.handle.position, owner);
-                }
+                sources.push(desc.handle.position);
             }
+            let mut source = if source_ok {
+                self.position(desc.handle).map(|record| record.core.clone())
+            } else {
+                None
+            };
             if source.is_none() {
                 source = self.fresh_core();
             }
@@ -1247,16 +1839,19 @@ impl<'n> Builder<'n> {
                 },
                 desc.type_desc,
             );
-            let output = outputs
+            let output_core = outputs
                 .get(slot)
                 .and_then(|handle| self.position(*handle))
                 .map(|record| record.core.clone());
+            let exit_core = self.position(exit).map(|record| record.core.clone());
+            let slot_ok = source_ok && source.is_some() && exit_core.is_some();
+            if !slot_ok && let Some(handle) = outputs.get(slot) {
+                self.mark_tainted(*handle);
+            }
             // 槽位数量由共同输出 Shape 保证对齐；身份序列耗尽时构建已失败。
-            if let (Some(source), Some(exit), Some(output)) = (
-                source,
-                self.position(exit).map(|record| record.core.clone()),
-                output,
-            ) {
+            if let (true, Some(source), Some(exit), Some(output)) =
+                (slot_ok, source, exit_core, output_core)
+            {
                 slots.push(HandoverSlot {
                     exit,
                     source,
@@ -1272,11 +1867,56 @@ impl<'n> Builder<'n> {
         }
     }
 
-    /// 把构建完成的 Choose Step 登记进 parent Body。
+    /// 把构建完成的 Choose Step 登记进 parent Body，并在实际 push 时发布父输出。
+    ///
+    /// 发布时点必须晚于所有分支构建；`ChooseStep.order` 只是 selector/步骤使用点，
+    /// 不能复用为输出发布时间。
     pub(crate) fn push_choose_step<K>(&mut self, parent: BodyId, step: ChooseStep<K>)
     where
         K: Data + PartialEq + 'static,
     {
+        let publish_order = self.next_order();
+        let mut branches =
+            Vec::with_capacity(step.cases.len() + usize::from(step.otherwise.is_some()));
+        let mut output_types = Vec::with_capacity(step.outputs.len());
+        let mut publish = true;
+        for position in &step.outputs {
+            let record = self.position(PositionHandle {
+                definition: self.id,
+                position: *position,
+            });
+            if let Some(record) = record {
+                output_types.push(record.type_desc);
+                if record.tainted {
+                    publish = false;
+                }
+            } else {
+                publish = false;
+            }
+        }
+        for case in &step.cases {
+            branches.push(case.branch.body);
+        }
+        if let Some(otherwise) = &step.otherwise {
+            branches.push(otherwise.body);
+        }
+        self.choose_contracts.push(ChooseContract {
+            body: parent,
+            step: self.bodies[parent.index()].steps.len(),
+            branches,
+            output_types,
+        });
+        if publish {
+            for position in &step.outputs {
+                self.mark_published(
+                    PositionHandle {
+                        definition: self.id,
+                        position: *position,
+                    },
+                    publish_order,
+                );
+            }
+        }
         self.bodies[parent.index()].steps.push(Box::new(step));
     }
 
@@ -1300,22 +1940,18 @@ impl<'n> Builder<'n> {
                     step: Some(step),
                 });
         }
-        {
-            let body = &mut self.bodies[child.index()];
-            body.output = declared.clone();
-            body.output_order = order;
-        }
+        let declared_ok = self.declare_output(child, declared.clone(), order);
         let mut slots = Vec::with_capacity(declared.len());
         let mut outputs = Vec::with_capacity(declared.len());
         let mut bridges = Vec::with_capacity(declared.len());
         for (slot, desc) in declared.into_iter().enumerate() {
-            let mut source = self.position(desc.handle).map(|record| record.core.clone());
-            if let Some(owner) = self.position(desc.handle).map(|record| record.owner)
-                && self.is_ancestor_or_self(owner, child)
-                && owner != child
-            {
-                self.record_import(child, desc.handle.position, owner);
-            }
+            let source_ok =
+                declared_ok && self.availability_error(child, None, desc, order).is_none();
+            let mut source = if source_ok {
+                self.position(desc.handle).map(|record| record.core.clone())
+            } else {
+                None
+            };
             if source.is_none() {
                 source = self.fresh_core();
             }
@@ -1346,11 +1982,15 @@ impl<'n> Builder<'n> {
             if let Some(core) = self.position(bridge).map(|record| record.core.clone()) {
                 bridges.push(core);
             }
-            if let (Some(source), Some(exit), Some(output)) = (
-                source,
-                self.position(exit).map(|record| record.core.clone()),
-                self.position(output).map(|record| record.core.clone()),
-            ) {
+            let exit_core = self.position(exit).map(|record| record.core.clone());
+            let output_core = self.position(output).map(|record| record.core.clone());
+            let slot_ok = source_ok && source.is_some() && exit_core.is_some();
+            if !slot_ok {
+                self.mark_tainted(output);
+            }
+            if let (true, Some(source), Some(exit), Some(output)) =
+                (slot_ok, source, exit_core, output_core)
+            {
                 slots.push(HandoverSlot {
                     exit,
                     source,
@@ -1425,25 +2065,54 @@ impl<'n> Builder<'n> {
                 step: Some(step),
             });
         }
+        let next_ok = self.declare_next(round, declared.clone(), order);
+        let mut initial_ok = true;
         for desc in &initial {
-            self.record_position_use(parent, *desc);
+            if self
+                .record_use_at(parent, Some(step), *desc, order)
+                .is_some()
+            {
+                initial_ok = false;
+            }
         }
-        {
-            let body = &mut self.bodies[round.index()];
-            body.output = declared.clone();
-            body.output_order = order;
+        let mut shape_ok = initial.len() == declared.len();
+        if shape_ok {
+            for (slot, (expected, declared)) in initial.iter().zip(declared.iter()).enumerate() {
+                if expected.type_desc != declared.type_desc {
+                    shape_ok = false;
+                    self.errors
+                        .push(BuildErrorDetail::DeclarationShapeMismatch {
+                            body: round,
+                            kind: DeclarationKind::Next,
+                            slot: slot as u16,
+                            expected: expected.type_desc,
+                            found: Some(declared.type_desc),
+                        });
+                }
+            }
+        } else {
+            self.errors
+                .push(BuildErrorDetail::DeclarationArityMismatch {
+                    body: round,
+                    kind: DeclarationKind::Next,
+                    slot: 0,
+                    expected: initial.len() as u16,
+                    found: declared.len() as u16,
+                });
         }
         let mut slots = Vec::with_capacity(declared.len());
         let mut outputs = Vec::with_capacity(declared.len());
         let mut bridges = Vec::with_capacity(declared.len());
         for (slot, desc) in declared.into_iter().enumerate() {
-            let mut source = self.position(desc.handle).map(|record| record.core.clone());
-            if let Some(owner) = self.position(desc.handle).map(|record| record.owner)
-                && self.is_ancestor_or_self(owner, round)
-                && owner != round
-            {
-                self.record_import(round, desc.handle.position, owner);
-            }
+            let source_ok = next_ok
+                && initial_ok
+                && shape_ok
+                && self.availability_error(round, None, desc, order).is_none();
+            let mut source = if source_ok {
+                self.position(desc.handle).map(|record| record.core.clone())
+            } else {
+                None
+            };
             if source.is_none() {
                 source = self.fresh_core();
             }
@@ -1474,11 +2143,15 @@ impl<'n> Builder<'n> {
             if let Some(core) = self.position(bridge).map(|record| record.core.clone()) {
                 bridges.push(core);
             }
-            if let (Some(source), Some(exit), Some(output)) = (
-                source,
-                self.position(exit).map(|record| record.core.clone()),
-                self.position(output).map(|record| record.core.clone()),
-            ) {
+            let exit_core = self.position(exit).map(|record| record.core.clone());
+            let output_core = self.position(output).map(|record| record.core.clone());
+            let slot_ok = source_ok && source.is_some() && exit_core.is_some();
+            if !slot_ok {
+                self.mark_tainted(output);
+            }
+            if let (true, Some(source), Some(exit), Some(output)) =
+                (slot_ok, source, exit_core, output_core)
+            {
                 slots.push(HandoverSlot {
                     exit,
                     source,
@@ -1539,25 +2212,24 @@ impl<'n> Builder<'n> {
         finish_collectors: FinishCollectorsFn,
     ) -> Vec<PositionHandle> {
         let order = self.next_order();
-        self.record_position_use(parent, collection);
-        {
-            let body = &mut self.bodies[item.index()];
-            body.output = declared.clone();
-            body.output_order = order;
-        }
+        let collection_ok = self
+            .record_use_at(parent, Some(step), collection, order)
+            .is_none();
+        let declared_ok = self.declare_output(item, declared.clone(), order);
         let mut slots = Vec::with_capacity(declared.len());
         let mut outputs = Vec::with_capacity(declared.len());
         for (slot, desc) in declared.iter().enumerate() {
             let collected_type = collected_descs.get(slot).copied().unwrap_or(desc.type_desc);
-            if let Some(owner) = self.position(desc.handle).map(|record| record.owner)
-                && self.is_ancestor_or_self(owner, item)
-                && owner != item
-            {
-                self.record_import(item, desc.handle.position, owner);
-            }
-            let mut source = self.position(desc.handle).map(|record| record.core.clone());
+            let source_ok = declared_ok
+                && collection_ok
+                && self.availability_error(item, None, *desc, order).is_none();
+            let mut source = if source_ok {
+                self.position(desc.handle).map(|record| record.core.clone())
+            } else {
+                None
+            };
             if source.is_none() {
-                // 必然失败的构建（伪造／外来位置）：槽位仍保持对齐，诊断由验证阶段给出。
+                // 必然失败的构建：保持槽位对齐；该输出保持失效，不作为正常来源发布。
                 source = self.fresh_core();
             }
             let local = self.allocate(
@@ -1576,11 +2248,15 @@ impl<'n> Builder<'n> {
                 },
                 collected_type,
             );
-            if let (Some(source), Some(local), Some(output)) = (
-                source,
-                self.position(local).map(|record| record.core.clone()),
-                self.position(output).map(|record| record.core.clone()),
-            ) {
+            let local_core = self.position(local).map(|record| record.core.clone());
+            let output_core = self.position(output).map(|record| record.core.clone());
+            let slot_ok = source_ok && source.is_some() && local_core.is_some();
+            if !slot_ok {
+                self.mark_tainted(output);
+            }
+            if let (true, Some(source), Some(local), Some(output)) =
+                (slot_ok, source, local_core, output_core)
+            {
                 slots.push(EachSlot {
                     source,
                     local,
@@ -1605,7 +2281,7 @@ impl<'n> Builder<'n> {
         outputs
     }
 
-    /// 校验一次位置使用：定义身份、登记存在性、可用顺序、词法可见性与类型。
+    /// 校验一次位置使用；与 resolver/register_* 共用同一 availability 判定。
     fn validate_use(
         &self,
         body: BodyId,
@@ -1613,60 +2289,185 @@ impl<'n> Builder<'n> {
         desc: PositionDesc,
         order: u64,
     ) -> Option<BuildErrorDetail> {
-        let handle = desc.handle;
-        if handle.definition != self.id {
-            return Some(BuildErrorDetail::ForeignDefinition {
-                body,
-                step,
-                position: handle.position,
-                expected: self.id,
-                found: handle.definition,
-            });
+        self.availability_error(body, step, desc, order)
+    }
+
+    /// 比较 Choose 各分支的声明状态与 Shape。
+    fn validate_choose_contract(&self, contract: &ChooseContract) -> Option<BuildErrorDetail> {
+        let first = *contract.branches.first()?;
+        let first_state = self.bodies[first.index()].output.state();
+        for (index, branch) in contract.branches.iter().enumerate().skip(1) {
+            if self.bodies[branch.index()].output.state() != first_state {
+                return Some(BuildErrorDetail::ChooseDeclarationStateMismatch {
+                    body: contract.body,
+                    step: Some(contract.step),
+                    first_branch: 0,
+                    second_branch: index as u16,
+                });
+            }
         }
-        match self.position(handle) {
-            None => Some(BuildErrorDetail::UnknownPosition {
-                body,
-                step,
-                position: handle.position,
+        match first_state {
+            DeclarationState::Failed => Some(BuildErrorDetail::MissingDeclaration {
+                body: first,
+                kind: DeclarationKind::Output,
             }),
-            Some(record) => {
-                if record.created_order >= order {
-                    return Some(BuildErrorDetail::NotYetAvailable {
-                        body,
-                        step,
-                        position: handle.position,
-                    });
+            DeclarationState::Undeclared | DeclarationState::Unit => {
+                if contract.output_types.is_empty() {
+                    None
+                } else {
+                    Some(BuildErrorDetail::ChooseArityMismatch {
+                        body: contract.body,
+                        step: Some(contract.step),
+                        branch: 0,
+                        expected: 0,
+                        found: contract.output_types.len() as u16,
+                    })
                 }
-                if !self.is_ancestor_or_self(record.owner, body) {
-                    return Some(BuildErrorDetail::OutOfScope {
-                        body,
-                        step,
-                        position: handle.position,
-                        owner: record.owner,
-                        relation: self.relation(record.owner, body),
-                    });
-                }
-                if record.type_desc != desc.type_desc {
-                    return Some(BuildErrorDetail::TypeMismatch {
-                        body,
-                        step,
-                        position: handle.position,
-                        declared: desc.type_desc,
-                        registered: record.type_desc,
-                    });
+            }
+            DeclarationState::NonUnit => {
+                for (branch, body) in contract.branches.iter().enumerate() {
+                    let slots = &self.bodies[body.index()].output.slots;
+                    if slots.len() != contract.output_types.len() {
+                        return Some(BuildErrorDetail::ChooseArityMismatch {
+                            body: contract.body,
+                            step: Some(contract.step),
+                            branch: branch as u16,
+                            expected: contract.output_types.len() as u16,
+                            found: slots.len() as u16,
+                        });
+                    }
+                    for (slot, (expected, desc)) in
+                        contract.output_types.iter().zip(slots.iter()).enumerate()
+                    {
+                        if *expected != desc.type_desc {
+                            return Some(BuildErrorDetail::ChooseSlotTypeMismatch {
+                                body: contract.body,
+                                step: Some(contract.step),
+                                branch: branch as u16,
+                                slot: slot as u16,
+                                expected: *expected,
+                                found: desc.type_desc,
+                            });
+                        }
+                    }
                 }
                 None
             }
         }
     }
 
-    /// 统一验证整棵树并收口；返回首个错误（按 Body 编号与 Step 顺序确定）。
-    fn finish(self, root: BodyId) -> Result<Definition<'n>, BuildErrorDetail> {
+    /// 核对 Root 输出与预期的 owned Shape。
+    fn validate_root_output(&self, root: BodyId) -> Option<BuildErrorDetail> {
+        let expected = self.root_expectation.as_ref()?;
+        let output = &self.bodies[root.index()].output;
+        if expected.is_empty() {
+            if output.attempted && output.declared && !output.slots.is_empty() {
+                return Some(BuildErrorDetail::DeclarationArityMismatch {
+                    body: root,
+                    kind: DeclarationKind::Output,
+                    slot: 0,
+                    expected: 0,
+                    found: output.slots.len() as u16,
+                });
+            }
+            return None;
+        }
+        if !output.attempted || !output.declared {
+            return Some(BuildErrorDetail::MissingDeclaration {
+                body: root,
+                kind: DeclarationKind::Output,
+            });
+        }
+        if output.slots.len() != expected.len() {
+            return Some(BuildErrorDetail::DeclarationArityMismatch {
+                body: root,
+                kind: DeclarationKind::Output,
+                slot: 0,
+                expected: expected.len() as u16,
+                found: output.slots.len() as u16,
+            });
+        }
+        for (slot, (expected, desc)) in expected.iter().zip(output.slots.iter()).enumerate() {
+            if *expected != desc.type_desc {
+                return Some(BuildErrorDetail::DeclarationShapeMismatch {
+                    body: root,
+                    kind: DeclarationKind::Output,
+                    slot: slot as u16,
+                    expected: *expected,
+                    found: Some(desc.type_desc),
+                });
+            }
+        }
+        None
+    }
+
+    /// 核对直接 Round 的 Next 声明与 initial/formal Current Shape。
+    fn validate_iter_next(&self, round: BodyId) -> Option<BuildErrorDetail> {
+        let body = &self.bodies[round.index()];
+        if body.role != BodyRole::Round {
+            return None;
+        }
+        if body.output.attempted {
+            return Some(BuildErrorDetail::DeclarationNotAllowed {
+                body: round,
+                kind: DeclarationKind::Output,
+                role: BodyRole::Round,
+            });
+        }
+        if !body.next.attempted || !body.next.declared {
+            return Some(BuildErrorDetail::MissingDeclaration {
+                body: round,
+                kind: DeclarationKind::Next,
+            });
+        }
+        if body.next.slots.is_empty() {
+            return Some(BuildErrorDetail::NextUnitUnsupported { body: round });
+        }
+        for parent in &self.bodies {
+            for step in &parent.steps {
+                let Some(iter) = step.iter() else { continue };
+                if iter.child() != round {
+                    continue;
+                }
+                let initial = iter.initial();
+                if body.next.slots.len() != initial.len() {
+                    return Some(BuildErrorDetail::DeclarationArityMismatch {
+                        body: round,
+                        kind: DeclarationKind::Next,
+                        slot: 0,
+                        expected: initial.len() as u16,
+                        found: body.next.slots.len() as u16,
+                    });
+                }
+                for (slot, (desc, expected)) in
+                    body.next.slots.iter().zip(initial.iter()).enumerate()
+                {
+                    if desc.type_desc != expected.type_desc {
+                        return Some(BuildErrorDetail::DeclarationShapeMismatch {
+                            body: round,
+                            kind: DeclarationKind::Next,
+                            slot: slot as u16,
+                            expected: expected.type_desc,
+                            found: Some(desc.type_desc),
+                        });
+                    }
+                }
+                return None;
+            }
+        }
+        None
+    }
+
+    /// 统一验证整棵树并收口。
+    ///
+    /// 预记录错误按插入顺序优先；否则按既有 Body/Step 顺序取首个结构错误。
+    pub(crate) fn finish(self, root: BodyId) -> Result<Definition<'n>, BuildErrorDetail> {
         if let Some(first) = self.errors.first() {
             return Err(*first);
         }
         let mut error: Option<BuildErrorDetail> = None;
-        let mut root_output: Vec<PositionId> = Vec::new();
+        // 先验证所有 Step 输入，再验证声明槽：声明失败常是输入失败的派生后果，
+        // 让更早的真实使用点先给出目标原因。
         for body in &self.bodies {
             for (index, step) in body.steps.iter().enumerate() {
                 for desc in step.inputs() {
@@ -1677,21 +2478,58 @@ impl<'n> Builder<'n> {
                     }
                 }
             }
-            for desc in &body.output {
-                if let Some(found) = self.validate_use(body.id, None, *desc, body.output_order) {
+        }
+        for body in &self.bodies {
+            for desc in &body.output.slots {
+                if let Some(found) = self.validate_use(body.id, None, *desc, body.output.order) {
                     error = error.or(Some(found));
                 }
             }
-            if body.id == root {
-                for desc in &body.output {
-                    if root_output.contains(&desc.handle.position) {
-                        error = error.or(Some(BuildErrorDetail::DuplicateRootOutput {
-                            position: desc.handle.position,
-                        }));
-                    } else {
-                        root_output.push(desc.handle.position);
-                    }
+            for desc in &body.next.slots {
+                if let Some(found) = self.validate_use(body.id, None, *desc, body.next.order) {
+                    error = error.or(Some(found));
                 }
+            }
+        }
+        for body in &self.bodies {
+            if body.role == BodyRole::Round && body.output.attempted {
+                error = error.or(Some(BuildErrorDetail::DeclarationNotAllowed {
+                    body: body.id,
+                    kind: DeclarationKind::Output,
+                    role: BodyRole::Round,
+                }));
+            }
+            if body.role == BodyRole::Ordinary && body.next.attempted {
+                error = error.or(Some(BuildErrorDetail::DeclarationNotAllowed {
+                    body: body.id,
+                    kind: DeclarationKind::Next,
+                    role: BodyRole::Ordinary,
+                }));
+            }
+        }
+        for body in &self.bodies {
+            if body.role == BodyRole::Round
+                && let Some(found) = self.validate_iter_next(body.id)
+            {
+                error = error.or(Some(found));
+            }
+        }
+        if let Some(found) = self.validate_root_output(root) {
+            error = error.or(Some(found));
+        }
+        for contract in &self.choose_contracts {
+            if let Some(found) = self.validate_choose_contract(contract) {
+                error = error.or(Some(found));
+            }
+        }
+        let mut root_output: Vec<PositionId> = Vec::new();
+        for desc in &self.bodies[root.index()].output.slots {
+            if root_output.contains(&desc.handle.position) {
+                error = error.or(Some(BuildErrorDetail::DuplicateRootOutput {
+                    position: desc.handle.position,
+                }));
+            } else {
+                root_output.push(desc.handle.position);
             }
         }
         match error {
@@ -1728,7 +2566,7 @@ where
     F: FnOnce(&mut Flow<'n>, In::Refs) -> Out,
 {
     let builder = Rc::new(RefCell::new(Builder::<'n>::new()));
-    let root = builder.borrow_mut().new_body(None);
+    let root = builder.borrow_mut().new_body(None, BodyRole::Ordinary);
     debug_assert_eq!(root, BodyId::ROOT);
     let mut handles = Vec::new();
     {
@@ -1749,9 +2587,7 @@ where
     {
         let mut state = builder.borrow_mut();
         let output_order = state.next_order();
-        let body = &mut state.bodies[root.index()];
-        body.output = ShapeOps::positions(out);
-        body.output_order = output_order;
+        let _ = state.declare_output(root, ShapeOps::positions(out), output_order);
     }
     let state = Rc::try_unwrap(builder)
         .ok()
@@ -1873,8 +2709,10 @@ mod each_static_tests {
         // Forge a parent use of the item position: the universal validate_use must reject it
         // with OutOfScope(ChildLocal) before any Node runs.
         let builder = Rc::new(RefCell::new(Builder::<'static>::new()));
-        let root = builder.borrow_mut().new_body(None);
-        let item_body = builder.borrow_mut().new_body(Some(root));
+        let root = builder.borrow_mut().new_body(None, BodyRole::Ordinary);
+        let item_body = builder
+            .borrow_mut()
+            .new_body(Some(root), BodyRole::Ordinary);
         let item_handle =
             builder
                 .borrow_mut()

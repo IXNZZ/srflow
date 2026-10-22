@@ -8,6 +8,7 @@
 //! 内部层（`pub(crate)`）：位置级失败明细与执行链内部失败 [`ExecFailure`]。公开诊断只提供
 //! `Display`／`Error::source`，不作为读取或操纵 DataId／Scope／Target 的入口。
 
+use crate::core::engine::definition::{BodyRole, DeclarationKind, PositionSource};
 use crate::core::engine::identity::{BodyId, DefinitionId, PositionId};
 use crate::core::engine::shape::TypeDesc;
 use crate::core::internal_error::ScopeError;
@@ -245,6 +246,88 @@ pub(crate) enum BuildErrorDetail {
     IterZeroRounds { body: BodyId, step: Option<usize> },
     /// Core 位置分配（checked 序列）失败。
     PositionAllocationFailed,
+    /// 当前使用点没有可见、已发布、未失效的同类型业务来源。
+    #[allow(dead_code)] // 由内部 resolver 在测试/下游接入时构造
+    MissingSource {
+        body: BodyId,
+        slot: Option<u16>,
+        type_desc: TypeDesc,
+    },
+    /// 位置已经分配，但尚未发布到父域。
+    NotPublished {
+        body: BodyId,
+        step: Option<usize>,
+        position: PositionId,
+    },
+    /// 位置的生产登记已失效（依赖失败）。
+    TaintedSource {
+        body: BodyId,
+        step: Option<usize>,
+        position: PositionId,
+    },
+    /// 位置类别属于内部 Exit／Bridge／Local，不能作为业务来源。
+    NotBusinessSource {
+        body: BodyId,
+        step: Option<usize>,
+        position: PositionId,
+        source: PositionSource,
+    },
+    /// Body 已经尝试声明；第二次声明不得覆盖或清除首次状态。
+    DuplicateDeclaration {
+        body: BodyId,
+        first: DeclarationKind,
+        second: DeclarationKind,
+    },
+    /// 该 Body 的用途不允许此声明种类。
+    DeclarationNotAllowed {
+        body: BodyId,
+        kind: DeclarationKind,
+        role: BodyRole,
+    },
+    /// 缺少完整声明（非 unit Root、Iter Round 的 Next）。
+    MissingDeclaration { body: BodyId, kind: DeclarationKind },
+    /// 声明 Shape 的槽数不符。
+    DeclarationArityMismatch {
+        body: BodyId,
+        kind: DeclarationKind,
+        slot: u16,
+        expected: u16,
+        found: u16,
+    },
+    /// 声明 Shape 的逐槽类型不符。
+    DeclarationShapeMismatch {
+        body: BodyId,
+        kind: DeclarationKind,
+        slot: u16,
+        expected: TypeDesc,
+        found: Option<TypeDesc>,
+    },
+    /// Iter Round 的 Next 状态不能是 unit。
+    NextUnitUnsupported { body: BodyId },
+    /// Choose 分支声明状态混合（未声明／显式 unit／非 unit）。
+    ChooseDeclarationStateMismatch {
+        body: BodyId,
+        step: Option<usize>,
+        first_branch: u16,
+        second_branch: u16,
+    },
+    /// Choose 分支槽数不一致。
+    ChooseArityMismatch {
+        body: BodyId,
+        step: Option<usize>,
+        branch: u16,
+        expected: u16,
+        found: u16,
+    },
+    /// Choose 分支逐槽类型不一致。
+    ChooseSlotTypeMismatch {
+        body: BodyId,
+        step: Option<usize>,
+        branch: u16,
+        slot: u16,
+        expected: TypeDesc,
+        found: TypeDesc,
+    },
 }
 
 impl fmt::Display for BuildErrorDetail {
@@ -334,6 +417,120 @@ impl fmt::Display for BuildErrorDetail {
             Self::PositionAllocationFailed => {
                 f.write_str("core RefId allocation failed (identity space exhausted)")
             }
+            Self::MissingSource {
+                body,
+                slot,
+                type_desc,
+            } => write!(
+                f,
+                "body {body:?} has no available business source of type {type_desc} at slot \
+                 {slot:?}"
+            ),
+            Self::NotPublished {
+                body,
+                step,
+                position,
+            } => write!(
+                f,
+                "position {position:?} at body {body:?} step {step:?} is allocated but not \
+                 published to this use point"
+            ),
+            Self::TaintedSource {
+                body,
+                step,
+                position,
+            } => write!(
+                f,
+                "position {position:?} at body {body:?} step {step:?} is tainted by a failed \
+                 dependency"
+            ),
+            Self::NotBusinessSource {
+                body,
+                step,
+                position,
+                source,
+            } => write!(
+                f,
+                "position {position:?} at body {body:?} step {step:?} is an internal \
+                 {source:?} endpoint, not a business source"
+            ),
+            Self::DuplicateDeclaration {
+                body,
+                first,
+                second,
+            } => write!(
+                f,
+                "body {body:?} already attempted a {first:?} declaration; a second \
+                 {second:?} declaration is rejected"
+            ),
+            Self::DeclarationNotAllowed { body, kind, role } => write!(
+                f,
+                "body {body:?} with role {role:?} cannot declare {kind:?}"
+            ),
+            Self::MissingDeclaration { body, kind } => {
+                write!(
+                    f,
+                    "body {body:?} is missing its required {kind:?} declaration"
+                )
+            }
+            Self::DeclarationArityMismatch {
+                body,
+                kind,
+                slot,
+                expected,
+                found,
+            } => write!(
+                f,
+                "body {body:?} {kind:?} declaration at slot {slot} has {found} slots, \
+                 expected {expected}"
+            ),
+            Self::DeclarationShapeMismatch {
+                body,
+                kind,
+                slot,
+                expected,
+                found,
+            } => write!(
+                f,
+                "body {body:?} {kind:?} declaration slot {slot} has type {found:?}, \
+                 expected {expected}"
+            ),
+            Self::NextUnitUnsupported { body } => {
+                write!(f, "iter round body {body:?} cannot use a unit Next state")
+            }
+            Self::ChooseDeclarationStateMismatch {
+                body,
+                step,
+                first_branch,
+                second_branch,
+            } => write!(
+                f,
+                "choose at body {body:?} step {step:?} mixes declaration states between \
+                 branches {first_branch} and {second_branch}"
+            ),
+            Self::ChooseArityMismatch {
+                body,
+                step,
+                branch,
+                expected,
+                found,
+            } => write!(
+                f,
+                "choose at body {body:?} step {step:?} branch {branch} has {found} output \
+                 slots, expected {expected}"
+            ),
+            Self::ChooseSlotTypeMismatch {
+                body,
+                step,
+                branch,
+                slot,
+                expected,
+                found,
+            } => write!(
+                f,
+                "choose at body {body:?} step {step:?} branch {branch} slot {slot} has type \
+                 {found}, expected {expected}"
+            ),
         }
     }
 }

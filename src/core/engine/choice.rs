@@ -6,7 +6,7 @@
 //! 索引或业务结果。
 
 use crate::core::engine::data::Data;
-use crate::core::engine::definition::{Builder, ChooseBranch, ChooseCase};
+use crate::core::engine::definition::{BodyRole, Builder, ChooseBranch, ChooseCase};
 use crate::core::engine::error::BuildErrorDetail;
 use crate::core::engine::flow::Flow;
 use crate::core::engine::identity::{BodyId, PositionHandle};
@@ -106,7 +106,9 @@ where
         F: FnOnce(&mut Flow<'n>) -> O,
     {
         let builder = Rc::clone(&self.builder);
-        let child = builder.borrow_mut().new_body(Some(self.body));
+        let child = builder
+            .borrow_mut()
+            .new_body(Some(self.body), BodyRole::Ordinary);
         let out = {
             let mut sub = Flow::open(Rc::clone(&builder), child);
             define(&mut sub)

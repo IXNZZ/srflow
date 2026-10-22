@@ -6,13 +6,13 @@
 
 use crate::core::engine::choice::Choice;
 use crate::core::engine::data::Data;
-use crate::core::engine::definition::{Builder, ChooseStep};
+use crate::core::engine::definition::{BodyRole, Builder, ChooseStep, DeclarationKind};
 use crate::core::engine::error::BuildErrorDetail;
 use crate::core::engine::identity::BodyId;
 use crate::core::engine::node::Callable;
 use crate::core::engine::shape::{
-    EachCollect, EachShape, InputOps, NodeOutput, OutputOps, PositionDesc, Ref, RefShape, ShapeOps,
-    StateShape, TypeDesc,
+    EachCollect, EachShape, InputOps, NodeOutput, OutputOps, PositionDesc, Ref, RefShape,
+    RootInput, ShapeOps, StateShape, TypeDesc,
 };
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -57,7 +57,10 @@ impl<'n> Flow<'n> {
         O: RefShape + ShapeOps,
         F: FnOnce(&mut Flow<'n>) -> O,
     {
-        let child = self.builder.borrow_mut().new_body(Some(self.body));
+        let child = self
+            .builder
+            .borrow_mut()
+            .new_body(Some(self.body), BodyRole::Ordinary);
         let out = {
             let mut sub = Flow {
                 builder: Rc::clone(&self.builder),
@@ -98,9 +101,16 @@ impl<'n> Flow<'n> {
             let mut builder = self.builder.borrow_mut();
             let step = builder.step_count(self.body);
             let order = builder.fresh_order();
-            builder.record_position_use(self.body, selector_desc);
+            let selector_ok = builder
+                .record_use_at(self.body, Some(step), selector_desc, order)
+                .is_none();
             let outputs =
                 builder.allocate_choose_outputs(self.body, step, &<O as ShapeOps>::type_descs());
+            if !selector_ok {
+                for handle in &outputs {
+                    builder.mark_tainted(*handle);
+                }
+            }
             (step, order, outputs)
         };
         let mut choice = Choice::new(Rc::clone(&self.builder), self.body, step, outputs.clone());
@@ -144,7 +154,10 @@ impl<'n> Flow<'n> {
         O: RefShape + ShapeOps,
         F: FnOnce(&mut Flow<'n>) -> O,
     {
-        let child = self.builder.borrow_mut().new_body(Some(self.body));
+        let child = self
+            .builder
+            .borrow_mut()
+            .new_body(Some(self.body), BodyRole::Ordinary);
         let out = {
             let mut sub = Flow {
                 builder: Rc::clone(&self.builder),
@@ -184,7 +197,8 @@ impl<'n> Flow<'n> {
         let (step, round, current) = {
             let mut builder = self.builder.borrow_mut();
             let step = builder.step_count(self.body);
-            let round = builder.new_body(Some(self.body));
+            let round = builder.new_body(Some(self.body), BodyRole::Round);
+            builder.set_round_initial(round, <S as ShapeOps>::type_descs());
             let current =
                 builder.allocate_iter_current(round, step, &<S as ShapeOps>::type_descs());
             (step, round, current)
@@ -249,7 +263,7 @@ impl<'n> Flow<'n> {
         let (step, item, item_position) = {
             let mut builder = self.builder.borrow_mut();
             let step = builder.step_count(self.body);
-            let item = builder.new_body(Some(self.body));
+            let item = builder.new_body(Some(self.body), BodyRole::Ordinary);
             let item_position = builder.allocate_each_item(item, step, TypeDesc::of::<T>());
             (step, item, item_position)
         };
@@ -274,6 +288,98 @@ impl<'n> Flow<'n> {
             <O as EachCollect>::finish_collectors,
         );
         <<O as EachShape>::Collected as ShapeOps>::from_positions(&mut outputs.into_iter())
+    }
+
+    /// 内部来源查询：当前位置最近的合法业务 Ref。
+    ///
+    /// 成功查询不登记 Step、位置或 Import；失败记录 `MissingSource` 并返回没有当前
+    /// Definition 身份的哨兵，后续显式使用仍会被统一 availability 拒绝。
+    #[allow(dead_code)] // T03 公开前由内部测试/后续任务使用
+    pub(crate) fn ref_of<T: Data>(&self) -> Ref<T> {
+        let mut builder = self.builder.borrow_mut();
+        let order = builder.current_order();
+        match builder.resolve(self.body, TypeDesc::of::<T>(), None, order) {
+            Some(desc) => Ref::from_handle(desc.handle),
+            None => Ref::from_handle(builder.missing_handle()),
+        }
+    }
+
+    /// 内部自动 Output 声明：按调用时点逐槽解析类型 Shape。
+    #[allow(private_bounds, dead_code)] // T03 公开前由内部测试/后续任务使用
+    pub(crate) fn output<T: RootInput>(&mut self) -> &mut Self
+    where
+        T::Refs: ShapeOps,
+    {
+        let types = <T::Refs as ShapeOps>::type_descs();
+        let mut builder = self.builder.borrow_mut();
+        let order = builder.fresh_order();
+        let mut slots = Vec::with_capacity(types.len());
+        let mut missing = false;
+        for (slot, type_desc) in types.into_iter().enumerate() {
+            match builder.resolve(self.body, type_desc, Some(slot as u16), order) {
+                Some(desc) => slots.push(desc),
+                None => {
+                    missing = true;
+                    slots.push(PositionDesc {
+                        handle: builder.missing_handle(),
+                        type_desc,
+                    });
+                }
+            }
+        }
+        let _ = builder.declare(self.body, DeclarationKind::Output, slots, order, missing);
+        drop(builder);
+        self
+    }
+
+    /// 内部显式 Output 声明；复用同一声明与验证路径。
+    #[allow(dead_code)] // T03 公开前由内部测试/后续任务使用
+    pub(crate) fn output_with<R: ShapeOps>(&mut self, refs: R) -> &mut Self {
+        let slots = refs.positions();
+        let mut builder = self.builder.borrow_mut();
+        let order = builder.fresh_order();
+        let _ = builder.declare(self.body, DeclarationKind::Output, slots, order, false);
+        drop(builder);
+        self
+    }
+
+    /// 内部自动 Next 声明：仅直接 Iter Round 合法。
+    #[allow(private_bounds, dead_code)] // T06 公开前由内部测试/后续任务使用
+    pub(crate) fn next<T: RootInput>(&mut self) -> &mut Self
+    where
+        T::Refs: StateShape,
+    {
+        let types = <T::Refs as ShapeOps>::type_descs();
+        let mut builder = self.builder.borrow_mut();
+        let order = builder.fresh_order();
+        let mut slots = Vec::with_capacity(types.len());
+        let mut missing = false;
+        for (slot, type_desc) in types.into_iter().enumerate() {
+            match builder.resolve(self.body, type_desc, Some(slot as u16), order) {
+                Some(desc) => slots.push(desc),
+                None => {
+                    missing = true;
+                    slots.push(PositionDesc {
+                        handle: builder.missing_handle(),
+                        type_desc,
+                    });
+                }
+            }
+        }
+        let _ = builder.declare(self.body, DeclarationKind::Next, slots, order, missing);
+        drop(builder);
+        self
+    }
+
+    /// 内部显式 Next 声明；仅直接 Iter Round 合法。
+    #[allow(dead_code)] // T06 公开前由内部测试/后续任务使用
+    pub(crate) fn next_with<R: StateShape>(&mut self, refs: R) -> &mut Self {
+        let slots = refs.positions();
+        let mut builder = self.builder.borrow_mut();
+        let order = builder.fresh_order();
+        let _ = builder.declare(self.body, DeclarationKind::Next, slots, order, false);
+        drop(builder);
+        self
     }
 
     /// 测试可控入口：当前 Definition 身份，用于构造“无来源位置”反例。
