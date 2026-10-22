@@ -1,0 +1,19 @@
+error[E0277]: expected a `Fn()` closure, found `u32`
+   --> /Users/vinter/Dev/Mir2Docs/Novel_md/SES_v1/engineering/srflow/examples/SRFlow_Auto_API_v21_Probe/tests/ui/factory_owned_value.rs:2:62
+    |
+  2 | fn main(){let _:Workflow<(),u32>=Flow::build(|f,_|{f.provide(3u32);f.output::<u32>();});}
+    |                                                      ------- ^^^^ expected an `Fn()` closure, found `u32`
+    |                                                      |
+    |                                                      required by a bound introduced by this call
+    |
+    = help: the trait `Fn()` is not implemented for `u32`
+    = note: wrap the `u32` in a closure with no arguments: `|| { /* code */ }`
+note: required by a bound in `srflow::probe::Flow::<'n>::provide`
+   --> src/core/engine/probe_api.rs:262:23
+    |
+262 |     pub fn provide<F: Fn() -> T + 'n, T: Data>(&mut self, factory: F) -> &mut Self {
+    |                       ^^^^^^^^^ required by this bound in `Flow::<'n>::provide`
+
+error: aborting due to 1 previous error
+
+For more information about this error, try `rustc --explain E0277`.

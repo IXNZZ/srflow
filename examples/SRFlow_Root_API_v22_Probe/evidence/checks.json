@@ -1,0 +1,22 @@
+{
+  "tests": {
+    "command": "cargo test --offline",
+    "exit_code": 0
+  },
+  "ui": {
+    "command": "cargo test --offline --test ui_probe -- --nocapture",
+    "exit_code": 0
+  },
+  "example": {
+    "command": "cargo run --offline --example root_minimal",
+    "exit_code": 0
+  },
+  "clippy": {
+    "command": "cargo clippy --offline --lib --test root_api --test ui_probe --example root_minimal -- -D warnings",
+    "exit_code": 0
+  },
+  "fmt": {
+    "command": "cargo fmt --all -- --check",
+    "exit_code": 0
+  }
+}

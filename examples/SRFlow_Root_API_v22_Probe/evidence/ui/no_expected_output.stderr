@@ -1,0 +1,33 @@
+error[E0283]: type annotations needed for `Result<_, RunError>`
+  --> /Users/vinter/Dev/Mir2Docs/Novel_md/SES_v1/engineering/srflow/examples/SRFlow_Root_API_v22_Probe/tests/ui/no_expected_output.rs:2:20
+   |
+ 2 | async fn run(){let _value=Runtime::new().execute(|f,_|{f.output::<u32>();},1u32).await;}
+   |                    ^^^^^^                ------- type must be known at this point
+   |
+   = note: the type must implement `RootInput`
+   = help: the following types implement trait `RootInput`:
+             ()
+             (A, B)
+             (A, B, C)
+             (A, B, C, D)
+             (A, B, C, D, E)
+             (A, B, C, D, E, F)
+             (A, B, C, D, E, F, G)
+             (A, B, C, D, E, F, G, H)
+           and 8 others
+note: required by a bound in `srflow::Runtime::execute`
+  --> src/core/engine/runtime.rs:89:14
+   |
+85 |     pub async fn execute<'n, In, Out, F>(&self, definition: F, input: In) -> Result<Out, RunError>
+   |                  ------- required by a bound in this associated function
+...
+89 |         Out: RootInput<Owned = Out>,
+   |              ^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `Runtime::execute`
+help: consider giving `_value` an explicit type, where the type for type parameter `Out` is specified
+   |
+ 2 | async fn run(){let _value: Result<Out, _>=Runtime::new().execute(|f,_|{f.output::<u32>();},1u32).await;}
+   |                          ++++++++++++++++
+
+error: aborting due to 1 previous error
+
+For more information about this error, try `rustc --explain E0283`.

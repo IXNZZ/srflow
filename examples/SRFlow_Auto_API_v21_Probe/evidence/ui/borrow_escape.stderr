@@ -1,0 +1,33 @@
+error[E0277]: the trait bound `fn(Query<&String>) -> ... {escape}: AutoCallable<_>` is not satisfied
+   --> /Users/vinter/Dev/Mir2Docs/Novel_md/SES_v1/engineering/srflow/examples/SRFlow_Auto_API_v21_Probe/tests/ui/borrow_escape.rs:4:62
+    |
+  4 | fn main(){let _:Workflow<String,()>=Flow::build(|f,_|{f.then(escape);});}
+    |                                                         ---- ^^^^^^ unsatisfied trait bound
+    |                                                         |
+    |                                                         required by a bound introduced by this call
+    |
+    = help: the trait `srflow::probe::AutoCallable<_>` is not implemented for fn item `for<'a> fn(Query<&'a String>) -> impl Future<Output = Result<&'a str, BodyError>> {escape}`
+note: required by a bound in `srflow::probe::Flow::<'n>::then`
+   --> src/core/engine/probe_api.rs:222:12
+    |
+220 |     pub fn then<N, K>(&mut self, node: N) -> &mut Self
+    |            ---- required by a bound in this associated function
+221 |     where
+222 |         N: AutoCallable<K> + 'n,
+    |            ^^^^^^^^^^^^^^^ required by this bound in `Flow::<'n>::then`
+    = note: the full name for the type has been written to '/Users/vinter/Dev/Mir2Docs/Novel_md/SES_v1/engineering/srflow/examples/SRFlow_Auto_API_v21_Probe/target/auto_ui/borrow_escape.long-type-16924850453837329210.txt'
+    = note: consider using `--verbose` to print the full type name to the console
+
+error[E0277]: the trait bound `fn(Query<&String>) -> ... {escape}: AutoCallable<_>` is not satisfied
+ --> /Users/vinter/Dev/Mir2Docs/Novel_md/SES_v1/engineering/srflow/examples/SRFlow_Auto_API_v21_Probe/tests/ui/borrow_escape.rs:4:55
+  |
+4 | fn main(){let _:Workflow<String,()>=Flow::build(|f,_|{f.then(escape);});}
+  |                                                       ^^^^^^^^^^^^^^ unsatisfied trait bound
+  |
+  = help: the trait `srflow::probe::AutoCallable<_>` is not implemented for fn item `for<'a> fn(Query<&'a String>) -> impl Future<Output = Result<&'a str, BodyError>> {escape}`
+  = note: the full name for the type has been written to '/Users/vinter/Dev/Mir2Docs/Novel_md/SES_v1/engineering/srflow/examples/SRFlow_Auto_API_v21_Probe/target/auto_ui/borrow_escape.long-type-16924850453837329210.txt'
+  = note: consider using `--verbose` to print the full type name to the console
+
+error: aborting due to 2 previous errors
+
+For more information about this error, try `rustc --explain E0277`.

@@ -1,0 +1,13 @@
+warning: field `0` is never read
+ --> /Users/vinter/Dev/Mir2Docs/Novel_md/SES_v1/engineering/srflow/examples/SRFlow_Auto_API_v21_Probe/tests/ui/positive.rs:4:25
+  |
+4 | #[derive(Data)]struct B(usize);
+  |                       - ^^^^^
+  |                       |
+  |                       field in this struct
+  |
+  = help: consider removing this field
+  = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: 1 warning emitted
+

@@ -1,0 +1,9 @@
+error[E0599]: no associated function or constant named `build` found for struct `Flow<'n>` in the current scope
+ --> /Users/vinter/Dev/Mir2Docs/Novel_md/SES_v1/engineering/srflow/examples/SRFlow_Root_API_v22_Probe/tests/ui/no_flow_build.rs:2:17
+  |
+2 | fn main(){Flow::build(|_|{});}
+  |                 ^^^^^ associated function or constant not found in `Flow<'_>`
+
+error: aborting due to 1 previous error
+
+For more information about this error, try `rustc --explain E0599`.

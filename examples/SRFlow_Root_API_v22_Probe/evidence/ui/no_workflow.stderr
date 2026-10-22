@@ -1,0 +1,9 @@
+error[E0432]: unresolved import `srflow::Workflow`
+ --> /Users/vinter/Dev/Mir2Docs/Novel_md/SES_v1/engineering/srflow/examples/SRFlow_Root_API_v22_Probe/tests/ui/no_workflow.rs:1:5
+  |
+1 | use srflow::Workflow;
+  |     ^^^^^^^^^^^^^^^^ no `Workflow` in the root
+
+error: aborting due to 1 previous error
+
+For more information about this error, try `rustc --explain E0432`.

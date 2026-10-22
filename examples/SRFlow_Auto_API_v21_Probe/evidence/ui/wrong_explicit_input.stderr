@@ -1,0 +1,33 @@
+error[E0271]: type mismatch resolving `<String as InputSpec>::Borrowed<'a> == &u32`
+   --> /Users/vinter/Dev/Mir2Docs/Novel_md/SES_v1/engineering/srflow/examples/SRFlow_Auto_API_v21_Probe/tests/ui/wrong_explicit_input.rs:4:67
+    |
+  4 | fn main(){let _:Workflow<String,()>=Flow::build(|f,s|{f.then_with(number,s);});}
+    |                                                         --------- ^^^^^^ expected `&u32`, found `&String`
+    |                                                         |
+    |                                                         required by a bound introduced by this call
+    |
+    = note: expected reference `&u32`
+               found reference `&'a String`
+    = note: required for `for<'a> fn(Query<&'a u32>) -> impl Future<Output = Result<u32, BodyError>> {number}` to implement `Callable<srflow::Ref<String>, srflow::FunctionCall<u32>>`
+note: required by a bound in `srflow::probe::Flow::<'n>::then_with`
+   --> src/core/engine/probe_api.rs:241:12
+    |
+239 |     pub fn then_with<N, A, K: 'static>(&mut self, node: N, refs: A) -> &mut Self
+    |            --------- required by a bound in this associated function
+240 |     where
+241 |         N: Callable<A, K> + 'n,
+    |            ^^^^^^^^^^^^^^ required by this bound in `Flow::<'n>::then_with`
+
+error[E0271]: type mismatch resolving `<String as InputSpec>::Borrowed<'a> == &u32`
+ --> /Users/vinter/Dev/Mir2Docs/Novel_md/SES_v1/engineering/srflow/examples/SRFlow_Auto_API_v21_Probe/tests/ui/wrong_explicit_input.rs:4:55
+  |
+4 | fn main(){let _:Workflow<String,()>=Flow::build(|f,s|{f.then_with(number,s);});}
+  |                                                       ^^^^^^^^^^^^^^^^^^^^^ expected `&u32`, found `&String`
+  |
+  = note: expected reference `&u32`
+             found reference `&'a String`
+  = note: required for `for<'a> fn(Query<&'a u32>) -> impl Future<Output = Result<u32, BodyError>> {number}` to implement `Callable<srflow::Ref<String>, srflow::FunctionCall<u32>>`
+
+error: aborting due to 2 previous errors
+
+For more information about this error, try `rustc --explain E0271`.

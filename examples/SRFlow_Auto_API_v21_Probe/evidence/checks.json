@@ -1,0 +1,26 @@
+{
+  "probe_tests": {
+    "command": "cargo test --offline",
+    "exit_code": 0
+  },
+  "ui_tests": {
+    "command": "cargo test --offline --test ui_probe -- --nocapture",
+    "exit_code": 0
+  },
+  "format": {
+    "command": "cargo fmt --all -- --check",
+    "exit_code": 0
+  },
+  "example": {
+    "command": "cargo run --offline --example auto_minimal",
+    "exit_code": 0
+  },
+  "clippy": {
+    "command": "cargo clippy --offline --workspace --all-targets -- -D warnings",
+    "exit_code": 0
+  },
+  "baseline_tests": {
+    "command": "cargo test --offline (original srflow)",
+    "exit_code": 0
+  }
+}

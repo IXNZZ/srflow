@@ -1,5 +1,7 @@
 # SRFlow v2.1 Public API SPEC v0.1
 
+> 版本导航（2026-10-22）：本文件保留 v2.1 冻结契约及其修订记录。自动连接、链式方法和 output/next 的新目标见 [v2.2 Public API SPEC设计基线](SRFlow_v2.2_Public_API_SPEC_v0.1.md)。本页的“尚未实现”等叙述是原冻结时期状态；当前实现基线见正式源码及 [WE 任务入口](workflow_engine_tasks/README.md)，不据此推定当前工程尚无 Runtime::execute。 v2.2已于2026-10-22登记设计基线，正式代码实现状态另行区分。
+
 > 状态：**USER CONFIRMED — FROZEN CONTRACT v0.1**。冻结日期：2026-10-08。
 >
 > 本文冻结独立 Rust Probe 已验证的 Public 契约和支持范围。原设计基线没有逐字通过：Struct Node 的 Query 表达已修订，业务 Data 的声明及 tuple 边界已明确。用户于 2026-10-08 增补 `#[derive(Data)]` 与零输入 Root，两项均已补充 Probe 验证；在理解 Data 的 'static 约束后，用户最终确认本版完整契约。原 SRFlow 工程尚未提供这些接口。

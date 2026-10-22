@@ -1,0 +1,3 @@
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.02s
+     Running `target/debug/examples/root_minimal`
+before -> after

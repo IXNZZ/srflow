@@ -1,0 +1,23 @@
+{
+  "baseline_commit": "bb8d19497c70c828f35140a43edd2ba692b2371b",
+  "baseline_file_count": 47,
+  "production_changed": [],
+  "snapshot_changed": [
+    "src/lib.rs",
+    "src/core/engine/runtime.rs",
+    "src/core/engine/mod.rs",
+    "src/core/engine/definition.rs"
+  ],
+  "snapshot_unchanged_count": 43,
+  "new_source": [
+    "src/core/engine/probe_api.rs"
+  ],
+  "execution_algorithms_unchanged": [
+    "src/core/engine/adapter.rs",
+    "src/core/engine/boundary.rs",
+    "src/core/context.rs",
+    "src/core/data_container.rs",
+    "src/core/scope.rs",
+    "src/core/runtime.rs"
+  ]
+}

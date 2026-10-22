@@ -1,0 +1,20 @@
+error[E0597]: `local` does not live long enough
+   --> /Users/vinter/Dev/Mir2Docs/Novel_md/SES_v1/engineering/srflow/examples/SRFlow_Root_API_v22_Probe/tests/ui/short_node.rs:4:94
+    |
+  4 | async fn run(){let _value:Result<(),_>=Runtime::new().execute(|f,_|{let local=Service;f.then(&local);},()).await;}
+    |                                                                -        -----         -------^^^^^^- - `local` dropped here while still borrowed
+    |                                                                |        |             |      |
+    |                                                                |        |             |      borrowed value does not live long enough
+    |                                                                |        |             argument requires that `local` is borrowed for `'1`
+    |                                                                |        binding `local` declared here
+    |                                                                has type `&mut Flow<'1>`
+    |
+note: requirement that the value outlives `'1` introduced here
+   --> src/core/engine/probe_api.rs:140:30
+    |
+140 |         N: AutoCallable<K> + 'n,
+    |                              ^^
+
+error: aborting due to 1 previous error
+
+For more information about this error, try `rustc --explain E0597`.

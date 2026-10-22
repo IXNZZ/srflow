@@ -1,0 +1,23 @@
+{
+  "production_changed": [],
+  "snapshot_changed": [
+    "src/lib.rs",
+    "src/core/engine/runtime.rs",
+    "src/core/engine/error.rs",
+    "src/core/engine/mod.rs",
+    "src/core/engine/definition.rs",
+    "Cargo.toml"
+  ],
+  "algorithms_unchanged": [
+    "src/core/engine/adapter.rs",
+    "src/core/engine/boundary.rs",
+    "src/core/context.rs",
+    "src/core/scope.rs",
+    "src/core/data_container.rs",
+    "src/core/runtime.rs"
+  ],
+  "new_root_source": "src/core/engine/probe_api.rs",
+  "tests_scope": "17 root consumers + 6 reject/1 run UI; historical lib/doctest not ported",
+  "baseline_file_count": 47,
+  "old_auto_probe_files_unchanged": 93
+}

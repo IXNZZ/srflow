@@ -1,0 +1,16 @@
+error[E0308]: mismatched types
+ --> /Users/vinter/Dev/Mir2Docs/Novel_md/SES_v1/engineering/srflow/examples/SRFlow_Root_API_v22_Probe/tests/ui/body_return_ref.rs:2:74
+  |
+2 | async fn run(){let _value:Result<u32,_>=Runtime::new().execute(|_f,input|input,1u32).await;}
+  |                                                                          ^^^^^ expected `()`, found `Ref<u32>`
+  |
+  = note: expected unit type `()`
+                found struct `srflow::Ref<u32>`
+help: consider ignoring the value
+  |
+2 | async fn run(){let _value:Result<u32,_>=Runtime::new().execute(|_f,input|_ = input,1u32).await;}
+  |                                                                          +++
+
+error: aborting due to 1 previous error
+
+For more information about this error, try `rustc --explain E0308`.

@@ -1,5 +1,7 @@
 # SRFlow Public API 使用示例草案 v0.1
 
+> 版本导航（2026-10-22）：本文是旧 Public API 的历史草案，不用于描述当前实现或 v2.2 目标。新版本示例见 [SRFlow v2.2 使用示例](SRFlow_v2.2_Public_API_Usage_Examples_v0.1.md)，契约见 [v2.2 SPEC设计基线](SRFlow_v2.2_Public_API_SPEC_v0.1.md)。 v2.2已于2026-10-22登记设计基线，正式代码实现状态另行区分。
+
 状态：DRAFT（调用方目标示例，尚未与当前实现逐项对齐）
 
 本文先从调用方视角描述希望写出的代码，再据此检查和调整 Builder、类型映射与内部实现。示例优先表达业务流程；除非类型推导确实需要，不在普通调用中显式写 `SyncFnSig`、`AsyncFnSig`、`OrchSig` 等 Marker。

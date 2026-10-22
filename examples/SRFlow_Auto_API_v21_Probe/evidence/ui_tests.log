@@ -1,0 +1,22 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.02s
+     Running tests/ui_probe.rs (target/debug/deps/ui_probe-c3299916573415de)
+
+running 1 test
+projection_inference: exit status: 1 E0283
+factory_once: exit status: 1 E0507
+factory_mut: exit status: 1 E0594
+factory_owned_value: exit status: 1 E0277
+factory_async: exit status: 1 E0277
+tuple_not_data: exit status: 1 E0277
+unit_not_ref: exit status: 1 E0277
+borrow_escape: exit status: 1 E0277
+wrong_explicit_input: exit status: 1 E0271
+wrong_runtime_input: exit status: 1 E0308
+short_node: exit status: 1 E0597
+body_return_ref: exit status: 1 E0308
+nested_mut_borrow: exit status: 1 E0499
+positive: exit status: 0 
+test p09_consumer_compile_contracts ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.65s
+

@@ -1,57 +1,61 @@
 # SRFlow
 
-System Runtime Workflow（SRFlow）是面向强类型业务流程的 Rust 执行与编排框架。本工程独立维护其设计、实现、测试和示例。
+System Runtime Workflow（SRFlow）是面向强类型业务流程的 Rust 执行与编排框架。本工程独立维护设计、实现、测试和示例，SES 等业务场景不构成构建依赖。
 
-> 当前总规范为 [SRFlow Design v2.1](docs/SRFlow_Design_v2.1.md)。实施路线是在同一 crate 中从空工程重写 Core；V21-00～V21-12 已验收为 **COMPLETED**，基线 `d79d33f`。[G21-A](docs/tasks/G21_A_Foundation_Review.md)／[G21-B](docs/tasks/G21_B_Typed_Flow_Review.md)／[G21-C](docs/tasks/G21_C_Control_And_Root_Review.md) 为 PASS。[V21-11](docs/tasks/V21_11_Integration_And_Fault_Validation.md) 独立复审通过：388 项测试、60 个 UI 负例、工程检查全通过；11 组定向注入 10 组被捕获、3b 如实记录为不可区分（[结果 §14](docs/tasks/V21_11_RESULTS.md#14-最终独立复审与验收2026-10-05)）。[V21-12](docs/tasks/V21_12_Public_API_Examples_And_Delivery_Closeout.md) 已独立复审通过：388 内部测试＋12 外部集成测试、78 UI、Rustdoc 与两个离线示例通过（[结果 §11.1](docs/tasks/V21_12_RESULTS.md#111-最终独立复审2026-10-06)）。G21-D 仍 OPEN，等待阶段 Gate 审查。后续以[任务入口](docs/tasks/README.md)为准。
+## 当前设计与实现
 
-## 当前工程状态
+**v2.2 主体设计已评审通过，并经用户确认登记设计基线；当前正式代码仍是已交付的 v2.1 实现。** 本次只更新 Public API、Definition 构建及相关文档，不实施框架重构。
 
-旧实现、测试和示例已清理。V21-01 在非公开的 `src/core/` 内交付了 Execution 身份（`DataId`／`ScopeId` 在单次 Execution 内单调分配且不复用）、异构 owned `DataContainer` 与短期只读借用。V21-02 在同一内部层已实现 Definition `RefId` 来源、Scope registry（`refs`／`owned`、Active／Finalizing／Closed tombstone）、显式 Import、整组 Export 预检与责任交接，以及正常／同步失败退出清理；责任链、数据保护、输出契约、祖先保留与失败清理诊断已验收通过。V21-03 已验收：`CollectorId` 身份与分配、控制状态登记与状态来源导入、无父 Ref 绑定的 Promote、受控 pending 回收、container 内 collector 建构区与内部移动、ItemScope 直接 Consume、collector 完成与最终输出一次性绑定，以及随控制器退出的状态／collector 清理。
+- [v2.2 总设计](docs/SRFlow_Design_v2.2.md)
+- [v2.2 Public API SPEC](docs/SRFlow_v2.2_Public_API_SPEC_v0.1.md)
+- [v2.2 Engine 设计增量](docs/SRFlow_v2.2_Workflow_Engine_Design_v0.1.md)
+- [v2.2 使用示例](docs/SRFlow_v2.2_Public_API_Usage_Examples_v0.1.md)
+- [文档升级清单、版本变化与未定项](docs/SRFlow_v2.2_Document_Upgrade_Report_v0.1.md)
 
-V21-04 已验收内部单 Context／Invocation 与三类退出设施：真实异步输入借用、建立失败终止、清理／控制权限、原始错误及取消定位、不可恢复终止、frame 关系检查，以及提交与分路径取消析构证据。V21-05 已验收内部强类型接线与双路径分派：`DataRef<T>` 逻辑位置句柄、`OutKind` 输出分类（数据／显式 unit／两个异构位置）、五种接线 Marker、业务 Node 协议（函数 item 的 HRTB 与结构体／`Arc<具体 Node>` 的单一短生命周期 boxed Future）、独立 Orchestrator 协议与 child-local 端口／输入 pack、异型 `CallSite`／`Step` 保存、Definition 声明表与 checked 整组分配，以及基础执行样本。普通 `Result<()>` 函数的构建期拒绝已有证据；任意编排体 Data 注入、Signature 关联、零输入 Arc、叶子失败终止和原子性／取消证据缺口均已关闭。V21-06 已验收内部完整 `FlowBuilder<I>`／`Flow<I, K>`：显式完成态、单／双非空输入、unit／单 Data／两个独立输出位置、完成输出整组类型校验、真实 SubFlow Import／Export 与顺序执行、定义复用及错误／取消清理。Root 测试驱动只观察并按空声明收口，尚不移交 owned 输出。
+v2.2 目标是定义期自动依赖、链式调用、运行期同步 Factory 和显式 output/next。Root 继续使用 Runtime::execute；不引入实验性公开 Workflow 或 Flow::build。自动连接最终形成固定 Ref 关系，运行期不按类型搜索 Data。
 
-V21-07 已验收内部完成态 Match：已有路由 Data 与显式业务输入、函数／结构体／Arc Node 或完整 Flow branch、三种共同输出、不可变分支登记与来源校验、单一路由及 default、真实 BranchScope 与两层 Export、imported alias、错误终止及 Future 取消清理。未选 branch 不创建 Scope 或执行业务；子调用失败不改选分支。
+当前正式 Public API 是 Runtime::execute 接收定义闭包和 owned Root Input；闭包当前通过返回 RefShape 声明输出，Node 调用当前需要显式 Ref。Node/Query、Chain/Choose/Each/Retry/Iter 与现有 Scope/Container 已建立。新文档中的 then 单参数、provide、ref_of、output、next 等目标接口尚未正式实现。
 
-V21-08 已验收内部 Each：显式集合与可选 shared 输入、CollectionItem／ItemScope cap、真实 Node 或完成态 Flow body、按项顺序执行与直接 Consume、collector 一次完成并 Export 最终 Vec、imported 输出拒绝、正常错误与 Future 取消清理。Each 会话核对当前实际 Definition，构建失败保留合法状态；状态收口和诊断观察的验收缺口均已关闭。当前范围为单 owned 输出、可选一个 shared、单线程顺序执行。
+[WE-T01～WE-T06](docs/workflow_engine_tasks/README.md) 已按各任务最新报告完成限定范围验收；原 V21/G21 历史记录保留其适用范围。旧 FlowBuilder/Match/Loop 门面和早期“从空工程重写”是历史过程，不是 v2.2 再次重写 Core 的路线。
 
-V21-09 已交付内部 Loop：Retry（每轮重新导入原始输入，Continue 丢弃本轮结果、Finish 保留到最终结果状态并导出）与 Iter（current-state 每轮经 `StateImportSlot` 导入，继续／完成都把选定 `S` 经窄许可 Promote 到 current-state，旧值在引用失效后受控回收）两种正式推进策略；RoundScope 是 LoopScope 的直接 child，body 一律是完成态包装 Flow 的唯一 Step（Node 为 Round leaf，Orchestrator 建 child 并先 Export 给 Round）。收口新增 `PromoteOutcome`／`DiscardOutcome` 共享报告（旧 `promote` 保持"清理失败优先"映射），Round frame 不能经通用 `promote` 越权提交 parent state（运行期 `OutsideInvocation`），`ScopeRole::Loop`／`Round` 只在真实创建点记录。当前范围为单／双业务输入、单份 `Data<O>`／`Data<S>` 输出、可选一个 shared、单线程顺序执行；无轮次上限与耗尽规则（仍为开放项）。
+## 设计与证据入口
 
-V21-10 已在非 test 构建中交付内部的唯一 Root 执行入口 `Runtime::execute`：按 Signature 登记 owned Root 输入、经 `orchestrator.rs` 的受控装配入口在真实 RootScope 上运行完成态 Flow／Match／Each／Loop，冻结一次后整组预检全部声明输出（完整 Data、身份、存活、类型、Root 唯一责任、物理 DataId 互不重复、关闭前提），再同步 take 全组并与 `RootScope.owned` 责任移除同边界提交，最后复用已验收的关闭尾段；支持 `Unit`／`Data<O>`／`Out2<O1,O2>` 与单／双非空 `'static` owned 输入。独立于 `OutKind` 的 sealed `RootInputs`／`RootOutputs` 表达 Root owned 形状；`run_root`／`RootExit`／旧裸 Definition 驱动已降为 `#[cfg(test)]`。重复物理实例拒绝诊断是 `ScopeError::DuplicateRootDataId`。
+| 材料 | 用途 |
+| --- | --- |
+| [v2.1 总设计](docs/SRFlow_Design_v2.1.md)、[v2.1 Public API SPEC](docs/SRFlow_v2.1_Public_API_SPEC_v0.1.md) | 已审定的历史/实现设计基线；不覆盖 v2.2 新目标 |
+| [v2.1 Engine 设计](docs/SRFlow_v2.1_Workflow_Engine_Design_v0.1.md) | 已建立的静态与执行机制及原阶段证据 |
+| [Core Design](docs/SRFlow_Core_Design_v0.1.md)、[Core Runtime 实现设计](docs/SRFlow_Core_Runtime_Implementation_Design_v0.1.md) | 数据身份、所有权和调用生命周期基础，保留原版本 |
+| [2026-10-21 Public API Probe](examples/SRFlow_Auto_API_v21_Probe/RESULTS.md) | 新编排方向的限定可行性；其中公开 Workflow 是已被后续讨论排除的实验选择 |
+| [WE 任务入口](docs/workflow_engine_tasks/README.md)、[历史任务入口](docs/tasks/README.md) | 各阶段实际验收状态与未覆盖边界，不因设计升级自动改变 |
 
-V21-12 已把完成态 Runtime 收口为受控公开 API。Flow Builder 与 Root Runtime 的输入统一使用 tuple：单输入写 `(A,)`，多输入写 `(A, B, …)`，最多 16 个位置；`FlowBuilder::<(A,)>::start()`、`FlowBuilder::<(A, B, C)>::start()` 与 `Runtime::execute(&flow, (value,))` 使用同一约定。调用 Node 或控制器时仍按其签名传 `DataRef<T>` 或对应 tuple。调用方可从 crate 根使用 `DataRef`／`Data`／`Unit`／`Out2`、五种接线 Marker、`NodeCall0/1/2`、`FlowBuilder<I>`／`Flow`、`MatchBuilder`／`Match`、`EachBuilder`／`Each`、`LoopBuilder`／`Loop`、`Runtime::execute` 与公开错误类型（`BuildError`／`RunError`／`BodyError`）。输入形状映射 trait 不从 crate 根导出；`core` 模块与全部内部身份（`Definition`／`CallSite`／`RefId`／`ScopeId`／`DataId`、存储与生命周期操作、注入钩子与测试支持）仍不对外可达；Rustdoc 以 `#![warn(missing_docs)]` 与 `RUSTDOCFLAGS="-D warnings"` 把关，`examples/minimal_flow.rs` 与 `examples/controller_chain.rs` 离线可运行。当前 Builder／Root 输入支持 1～16 个位置，Node 函数仍支持 0／1／2 个输入；`Unit`／`Data`／`Out2` 输出、函数／结构体／`Arc<具体 Node>`、Flow／Match／Each／Loop 组合；`()` Flow Input、Retry 次数／耗尽与 Iter 停止规则仍为开放项；`crates.io` 发布与版本策略不在本轮范围。
+SPEC 是目标契约，Probe 是证据，源码是当前实现。任何材料中的“通过”都须保留原验证范围；v2.2设计基线不等于新API的正式实施与完整回归验收。
 
-历史 T01～T08 和 G1～G3 的通过记录对应旧 v2.0，不表示新实现完成。[P01～P07 Probe](docs/SRFlow_Core_Compile_Probe_Results_v0.1.md) 是局部可行性证据，正式调用链仍需重新验收。
+[2026-10-22 Root 补充 Probe](examples/SRFlow_Root_API_v22_Probe/RESULTS.md) 已补双参数 Root 与期望 owned 类型推导证据。自动 Query 重复类型及 Choose 混合缺省/unit 输出的拒绝规则已由用户确认，用户已正式采用双参数Root与期望owned输出方案；链式结构语义和不引入require<T>()原则已补齐，设计审定不等于实施验收。
+
+## v2.2 实施准备
+
+[实施规划 v0.1](docs/SRFlow_v2.2_Implementation_Plan_v0.1.md) 已评审通过，保留 V22-T01～T07 顺序，并补入错误恢复、旧 unit 映射和 Choose 签名审定约束。当前 [V22-T01 详细任务书](docs/implementation_tasks_v2.2/V22_T01_Definition_Sources_And_Declarations_v0.1.md) 为待评审草案，仅涉及 Definition 内部基础；[任务入口](docs/implementation_tasks_v2.2/README.md)记录后续状态。尚未实施正式代码。
 
 ## 开发入口
 
-先阅读 [AGENTS](AGENTS.md)、[任务入口](docs/tasks/README.md)和当前经审定的详细任务书，再阅读任务涉及的设计章节。当前开发工具链基线为 Rust 1.97、edition 2024；离线检查命令为：
+先阅读 [AGENTS](AGENTS.md) 和当前已审定任务；v2.2 设计基线与实施规划已通过，当前进入 T01 详细任务书评审，尚无已授权实施的 V22 任务。
+
+现有工程工具链基线 Rust 1.97、edition 2024，常用离线检查：
 
 ```sh
 cargo check --offline --all-targets
-cargo test --offline --all-targets
-cargo test --offline --doc
+cargo test --offline
 cargo clippy --offline --all-targets -- -D warnings
 cargo fmt --all -- --check
 RUSTDOCFLAGS="-D warnings" cargo doc --offline --no-deps
-cargo run --offline --example minimal_flow
+cargo run --offline --example node_chain_runtime
 ```
 
-`tests/ui/` 下是编译负例夹具，不是 Cargo target；由 `docs/tasks/V21_12_PROBE/ui_check.py` 按 `ui_manifest.tsv`（装配模式＋主诊断码）逐项驱动核对。
-
-核心当前没有普通依赖。`futures` 仅作为开发依赖，用于离线测试、doc-test 与示例驱动异步代码（核心不绑定 executor）。
+核心不绑定外部 executor；Data derive 使用本地宏 crate 及编译期依赖，futures 仅用于测试/示例。上列命令供正式代码开发使用；此前独立 Root Probe 只检查其明确目标，本轮仅维护规划/任务文档，没有重跑正式工程套件。
 
 ## 仓库协作约定
 
 - `docs/` 目录下的内容不提交到 Git 仓库。
-- 每个任务完成后，对该任务的代码变更统一提交一次。
+- 每个任务完成后，对该任务的代码变更统一提交一次；提交、推送与发布仍须按用户明确授权和 AGENTS 执行。
 
-## 设计文档
-
-- [当前总规范 v2.1](docs/SRFlow_Design_v2.1.md)
-- [Core 语义基线](docs/SRFlow_Core_Design_v0.1.md)
-- [Runtime 内部实现基线](docs/SRFlow_Core_Runtime_Implementation_Design_v0.1.md)
-- [Probe 第一轮结论](docs/SRFlow_Core_Compile_Probe_Results_v0.1.md)
-- [任务入口](docs/tasks/README.md)
-- [v2.0 历史规范](docs/SRFlow_Design_v2.0.md)
-
-设计文档中的 SES 场景用于验证框架语义；本工程不依赖 SES 的构建或业务数据。
+当前只修订 v2.2 实施规划并编写 T01 任务书，不修改生产 Rust、Probe 证据、提交或发布。v2.1 历史文档和 Probe 原始证据继续保留。

@@ -1,0 +1,28 @@
+[package]
+name = "srflow"
+# 重写阶段的工程版本；正式发布范围与版本另行确定。
+version = "0.0.1"
+edition = "2024"
+# 当前工具链基线为 1.97；更低版本支持须另行验证。
+rust-version = "1.97"
+description = "SRFlow: a strongly-typed execution framework centered on sequential flows"
+license = "MIT"
+
+[workspace]
+# 唯一辅助成员：只提供 Data derive 的编译期宏；运行时 Core 不拆包。
+members = ["srflow-data-derive"]
+
+[dependencies]
+# 编译期宏依赖：只为 `#[derive(Data)]` 服务，不进入运行时数据／执行逻辑。
+# 运行时核心仍不依赖第三方运行时库或 executor。
+srflow-data-derive = { path = "srflow-data-derive", version = "0.0.1" }
+
+[dev-dependencies]
+# 仅用于测试与示例中驱动异步代码。选择 `futures` 是因为它不提供全局运行时，
+# 与“核心不强制绑定某个 executor”的约束一致，也比引入完整异步运行时更小。
+futures = { version = "0.3", default-features = false, features = ["executor"] }
+
+# Root supplement only; historical library/doctest suites are not claimed here.
+[lib]
+test = false
+doctest = false

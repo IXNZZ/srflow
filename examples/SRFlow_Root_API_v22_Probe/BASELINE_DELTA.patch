@@ -1,0 +1,242 @@
+--- baseline/src/lib.rs
++++ probe/src/lib.rs
+@@ -1,58 +1,10 @@
+-//! SRFlow：以顺序 Flow 为核心的强类型执行与编排框架。
+-//!
+-//! 本 crate 提供新契约的公开使用入口：声明业务 [`Data`]、接入函数／结构体 [`Node`]、
+-//! 用 [`Flow::then`]／[`Flow::chain`]／[`Flow::choose`]／[`Flow::retry`]／[`Flow::iter`]
+-//! 组合 Definition，并以
+-//! [`Runtime::execute`] 启动一次 Root Execution，取得 owned 输出或 [`RunError`]。
+-//!
+-//! 当前可执行范围：Node、Chain、Each、Choose、Retry 与 Iter 组成的主链——冻结的全部
+-//! Root／Node／Body Shape、嵌套 Chain／Each、值匹配 Choose（[`Choice`]）、受预算约束的
+-//! Retry 与 Iter 控制器（含成组状态推进与 IterBreak 交付）、深层祖先捕获与实际逐层
+-//! Import、调用边界输出交接，以及 Root owned 整组提取。旧公开模型（`legacy` 命名空间与
+-//! 旧的 Builder／Flow／Match／Each／Loop／NodeCall 协议）已在 WE-T06 B 阶段退出。
+-//!
+-//! # 最小示例
+-//!
+-//! ```
+-//! use futures::executor::block_on;
+-//! use srflow::{BodyError, Data, Node, Query, Runtime};
+-//!
+-//! #[derive(Data)]
+-//! struct Amount(u32);
+-//!
+-//! async fn double(query: Query<&Amount>) -> Result<Amount, BodyError> {
+-//!     Ok(Amount(query.get().0 * 2))
+-//! }
+-//!
+-//! struct AddOne;
+-//! impl Node for AddOne {
+-//!     type Input = Amount;
+-//!     type Output = Amount;
+-//!
+-//!     async fn run(&self, query: Query<&Self::Input>) -> Result<Amount, BodyError> {
+-//!         Ok(Amount(query.get().0 + 1))
+-//!     }
+-//! }
+-//!
+-//! let output = block_on(async {
+-//!     let runtime = Runtime::new();
+-//!     let add = AddOne;
+-//!     runtime
+-//!         .execute(
+-//!             |flow, amount| {
+-//!                 let doubled = flow.then(double, amount);
+-//!                 flow.chain(|sub| sub.then(&add, doubled))
+-//!             },
+-//!             Amount(21),
+-//!         )
+-//!         .await
+-//! })
+-//! .unwrap();
+-//! assert_eq!(output.0, 43);
+-//! ```
++//! Minimal v2.2 Root API supplement. Uses the existing concrete Runtime and Data Core.
++//! The public entry is Runtime::execute(closure, owned_input); no Workflow or Flow::build.
++//! Only the independent consumer tests and root_minimal example are evidence here.
+ 
+ #![forbid(unsafe_code)]
+ #![warn(missing_docs)]
++#![allow(dead_code)] // Untargeted copied legacy builders are retained, not exercised.
+ 
+ mod core;
+ 
+@@ -68,10 +20,10 @@
+     BodyError, BodyFailure, BuildError, ControlSignal, IterBreak, RetryError, RunError,
+     RuntimeError,
+ };
+-pub use crate::core::engine::flow::Flow;
+ pub use crate::core::engine::node::Node;
+ #[doc(hidden)]
+ pub use crate::core::engine::node::{Callable, FunctionCall, StructCall};
++pub use crate::core::engine::probe_api::Flow;
+ pub use crate::core::engine::runtime::Runtime;
+ pub use crate::core::engine::shape::{
+     EachShape, InputSpec, NodeOutput, Query, QueryType, Ref, RefShape, RootInput,
+--- baseline/src/core/engine/runtime.rs
++++ probe/src/core/engine/runtime.rs
+@@ -7,10 +7,10 @@
+ 
+ use crate::core::context::{CleanupDiagnostic, InvocationGuard, InvocationKind};
+ use crate::core::engine::boundary::run_body;
+-use crate::core::engine::definition::{Definition, build_definition};
+-use crate::core::engine::error::{BuildError, ExecFailure, RunError, RuntimeError};
+-use crate::core::engine::flow::Flow;
++use crate::core::engine::definition::Definition;
++use crate::core::engine::error::{ExecFailure, RunError, RuntimeError};
+ use crate::core::engine::identity::BodyId;
++use crate::core::engine::probe_api::{Flow, build_root};
+ use crate::core::engine::shape::{InputOps, RefShape, RootInput, RootInputOps, ShapeOps};
+ use crate::core::identity::ScopeId;
+ use crate::core::runtime::RootExecution;
+@@ -82,21 +82,31 @@
+     /// 整组预检 → 同步 take 并解除 Root 责任 → 关闭 Root”。任何一步失败都不返回部分
+     /// owned 输出；构建失败不建立 RootExecution，也不执行任何业务 Node。
+     #[allow(private_bounds)]
+-    pub async fn execute<'n, In, F, Out>(
++    pub async fn execute<'n, In, Out, F>(&self, definition: F, input: In) -> Result<Out, RunError>
++    where
++        In: RootInput + RootInputOps + InputOps,
++        In::Refs: ShapeOps,
++        Out: RootInput<Owned = Out>,
++        Out::Refs: ShapeOps + RefShape<Owned = Out>,
++        F: FnOnce(&mut Flow<'n>, In::Refs),
++    {
++        // The caller's expected owned Out selects the existing typed extraction bridge.
++        // Build and validate before any RootExecution or input registration.
++        let built = build_root::<In, Out, F>(definition).map_err(RunError::Definition)?;
++        self.execute_built::<In, Out::Refs>(&built, input).await
++    }
++
++    // Probe-only: reuse a validated Definition with a fresh Execution per invocation.
++    pub(crate) async fn execute_built<In, Out>(
+         &self,
+-        definition: F,
++        built: &Definition<'_>,
+         input: In,
+     ) -> Result<Out::Owned, RunError>
+     where
+         In: RootInput + RootInputOps + InputOps,
+         In::Refs: ShapeOps + RefShape,
+         Out: RefShape + ShapeOps,
+-        F: FnOnce(&mut Flow<'n>, In::Refs) -> Out,
+     {
+-        // 1) Definition：本次 Future 第一次被驱动时同步构建并验证。
+-        let built = build_definition::<In, F, Out>(definition)
+-            .map_err(|detail| RunError::Definition(BuildError::new(detail)))?;
+-
+         // 2) 新 Execution 与 owned Root 输入登记：只走正式 register_owned_erased；
+         //    失败不执行业务体，已登记的值随本次 Execution 清理。
+         let mut execution = RootExecution::start();
+@@ -174,9 +184,9 @@
+                 phase: "enter",
+                 scope: root.clone(),
+             });
+-            let body = run_body(&mut guard, &built, BodyId::ROOT, &root).await;
++            let body = run_body(&mut guard, built, BodyId::ROOT, &root).await;
+             match body {
+-                Ok(()) if !guard.is_terminated() => match extract_root(&mut guard, &root, &built) {
++                Ok(()) if !guard.is_terminated() => match extract_root(&mut guard, &root, built) {
+                     Ok(owned) => {
+                         values = owned;
+                         guard.complete();
+--- baseline/src/core/engine/error.rs
++++ probe/src/core/engine/error.rs
+@@ -190,6 +190,8 @@
+ /// Definition 构建失败明细（内部）：位置、Body／Step 上下文与原因。
+ #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+ pub(crate) enum BuildErrorDetail {
++    /// Root probe construction contract; diagnostic wording is not frozen.
++    ProbeContract { note: &'static str },
+     /// 位置来自其他 Definition，不能混用。
+     ForeignDefinition {
+         body: BodyId,
+@@ -250,6 +252,7 @@
+ impl fmt::Display for BuildErrorDetail {
+     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+         match self {
++            Self::ProbeContract { note } => f.write_str(note),
+             Self::ForeignDefinition {
+                 body,
+                 step,
+--- baseline/src/core/engine/mod.rs
++++ probe/src/core/engine/mod.rs
+@@ -60,3 +60,5 @@
+ mod tests_we_t06_root_preflight;
+ #[cfg(test)]
+ mod tests_we_t06_witnesses;
++
++pub mod probe_api;
+--- baseline/src/core/engine/definition.rs
++++ probe/src/core/engine/definition.rs
+@@ -881,6 +881,57 @@
+ }
+ 
+ impl<'n> Builder<'n> {
++    // Probe-only entry points over the existing Builder, not a second Definition.
++    pub(crate) fn probe_inputs<I: RootInput + InputOps>(
++        &mut self,
++        root: BodyId,
++    ) -> Vec<PositionHandle> {
++        <I as InputOps>::type_descs()
++            .into_iter()
++            .enumerate()
++            .map(|(slot, ty)| {
++                self.allocate(root, PositionSource::RootInput { slot: slot as u16 }, ty)
++            })
++            .collect()
++    }
++    pub(crate) fn probe_missing(&self) -> PositionHandle {
++        PositionHandle {
++            definition: self.id,
++            position: PositionId::new(u32::MAX),
++        }
++    }
++    pub(crate) fn probe_resolve(&self, body: BodyId, ty: TypeDesc) -> Option<PositionHandle> {
++        self.positions
++            .iter()
++            .rev()
++            .find(|p| {
++                p.type_desc == ty
++                    && self.is_ancestor_or_self(p.owner, body)
++                    && matches!(
++                        p.source,
++                        PositionSource::RootInput { .. }
++                            | PositionSource::NodeOutput { .. }
++                            | PositionSource::ChainOutput { .. }
++                            | PositionSource::ChooseOutput { .. }
++                            | PositionSource::RetryOutput { .. }
++                            | PositionSource::IterCurrent { .. }
++                            | PositionSource::IterOutput { .. }
++                            | PositionSource::EachItem { .. }
++                            | PositionSource::EachOutput { .. }
++                    )
++            })
++            .map(|p| p.handle)
++    }
++    pub(crate) fn probe_finish(
++        mut self,
++        output: Vec<PositionDesc>,
++    ) -> Result<Definition<'n>, BuildErrorDetail> {
++        let order = self.next_order();
++        self.bodies[0].output = output;
++        self.bodies[0].output_order = order;
++        self.finish(BodyId::ROOT)
++    }
++
+     pub(crate) fn new() -> Self {
+         Self {
+             id: DefinitionId::fresh(),
+--- baseline/Cargo.toml
++++ probe/Cargo.toml
+@@ -21,3 +21,8 @@
+ # 仅用于测试与示例中驱动异步代码。选择 `futures` 是因为它不提供全局运行时，
+ # 与“核心不强制绑定某个 executor”的约束一致，也比引入完整异步运行时更小。
+ futures = { version = "0.3", default-features = false, features = ["executor"] }
++
++# Root supplement only; historical library/doctest suites are not claimed here.
++[lib]
++test = false
++doctest = false

@@ -1,0 +1,32 @@
+   Compiling srflow v0.0.1 (/Users/vinter/Dev/Mir2Docs/Novel_md/SES_v1/engineering/srflow/examples/SRFlow_Root_API_v22_Probe)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 2.03s
+     Running tests/root_api.rs (target/debug/deps/root_api-7eb865a152e6ff8a)
+
+running 17 tests
+test r06_non_unit_missing_output_rejected_before_execution ... ok
+test r08_unit_and_non_unit_do_not_silently_coerce ... ok
+test r05_wrong_output_rejected_before_node_and_factory ... ok
+test r02_enclosing_result_type_infers_output ... ok
+test r01_expected_owned_type_and_question_mark ... ok
+test r04_explicit_repeated_read_only_ref_is_legal ... ok
+test r07_unit_absent_and_explicit_legal ... ok
+test r03_root_input_same_type_distinct_explicit_refs ... ok
+test r09_non_clone_multi_output_uses_original_typed_extraction ... ok
+test r10_auto_duplicate_query_rejected_even_with_two_sources ... ok
+test r11_duplicate_output_declaration_rejected ... ok
+test r13_unpolled_execute_does_not_build_or_call_factory ... ok
+test r12_rebuild_per_execute_instead_of_public_definition_cache ... ok
+test r15_non_send_borrowed_node_keeps_input_across_await ... ok
+test r14_regular_business_body_reused_under_root_chain ... ok
+test r17_expected_type_can_be_explicit_type_argument ... ok
+test r16_distinct_aliases_to_same_data_still_rejected_before_take ... ok
+
+test result: ok. 17 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/ui_probe.rs (target/debug/deps/ui_probe-c3299916573415de)
+
+running 1 test
+test r18_root_consumer_compile_contracts ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.40s
+

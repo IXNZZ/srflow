@@ -1,0 +1,290 @@
+//! 同步定义上下文 `Flow`（SPEC §4～§7 的定义期）。
+//!
+//! 公开类型只带一个 `'n`：Node 句柄与定义结构按 `'n` 借用，构建元数据由内部可变
+//! 状态承载，不向调用者暴露 builder lifetime。`Flow` 不持有本次执行的业务值，也不
+//! 提供公开 build／finish 入口。
+
+use crate::core::engine::choice::Choice;
+use crate::core::engine::data::Data;
+use crate::core::engine::definition::{Builder, ChooseStep};
+use crate::core::engine::error::BuildErrorDetail;
+use crate::core::engine::identity::BodyId;
+use crate::core::engine::node::Callable;
+use crate::core::engine::shape::{
+    EachCollect, EachShape, InputOps, NodeOutput, OutputOps, PositionDesc, Ref, RefShape, ShapeOps,
+    StateShape, TypeDesc,
+};
+use std::cell::RefCell;
+use std::rc::Rc;
+
+/// 同步 Definition 上下文；Node 登记可以借用 `'n` 寿命的句柄。
+pub struct Flow<'n> {
+    builder: Rc<RefCell<Builder<'n>>>,
+    body: BodyId,
+}
+
+impl<'n> Flow<'n> {
+    /// 在指定 Body 上打开定义上下文（框架内部构建路径）。
+    pub(crate) fn open(builder: Rc<RefCell<Builder<'n>>>, body: BodyId) -> Self {
+        Self { builder, body }
+    }
+
+    /// 按定义顺序登记 Node Step，返回其 Output 对应的单 Ref 或 `()`。
+    ///
+    /// 输入依赖由类型系统连接（形状与 Node 声明一致才实现 `Callable`），位置来源与
+    /// 词法可见性由 Definition 验证覆盖。
+    #[allow(private_bounds)]
+    pub fn then<N, A, K>(&mut self, node: N, input: A) -> <N::Output as NodeOutput>::Refs
+    where
+        N: Callable<A, K> + 'n,
+        A: RefShape + ShapeOps,
+        A::Spec: InputOps,
+        <N::Output as NodeOutput>::Refs: ShapeOps,
+        N::Output: OutputOps,
+    {
+        self.builder
+            .borrow_mut()
+            .register_node_step::<N, A, K>(self.body, node, input)
+    }
+
+    /// 同步构建 child Body，登记其声明输出并返回 parent 可见的新 Ref。
+    ///
+    /// child Body 完整保存；普通 Rust block 不提供该生命周期边界。闭包本身同步消费，
+    /// 被登记 Node 句柄的寿命由 `then` 的 `N: 'n` 约束保证。
+    #[allow(private_bounds)]
+    pub fn chain<F, O>(&mut self, definition: F) -> O
+    where
+        O: RefShape + ShapeOps,
+        F: FnOnce(&mut Flow<'n>) -> O,
+    {
+        let child = self.builder.borrow_mut().new_body(Some(self.body));
+        let out = {
+            let mut sub = Flow {
+                builder: Rc::clone(&self.builder),
+                body: child,
+            };
+            definition(&mut sub)
+        };
+        let outputs =
+            self.builder
+                .borrow_mut()
+                .register_chain_outputs(self.body, child, out.positions());
+        O::from_positions(&mut outputs.into_iter())
+    }
+
+    /// 按 selector 的值匹配一个分支执行（SPEC §9、Engine §6.7）。
+    ///
+    /// 全部 case／otherwise 的定义闭包在构建期同步执行一次并登记各自分支 Body；运行期
+    /// 只执行选中分支，未选分支没有运行 Scope，也不调用其 Node。`case` 的键是 Definition
+    /// 匹配配置，不登记为业务输入；无匹配且无 `otherwise` 时返回
+    /// [`RunError::NoMatchingCase`](crate::RunError::NoMatchingCase)——若该失败退出同时发生
+    /// 清理故障，则返回 [`RunError::Runtime`](crate::RunError::Runtime)，并以 `Error::source`
+    /// 保留原终止原因、以 `cleanup_source` 保留首个清理故障诊断。
+    ///
+    /// 所有分支返回同一个输出 Shape `O`：类型、arity 与 unit 由 Rust 类型检查保证，
+    /// 返回的是 parent 可见的新 RefShape。
+    #[allow(private_bounds)]
+    pub fn choose<K, O, F>(&mut self, selector: Ref<K>, definition: F) -> O
+    where
+        K: Data + PartialEq,
+        O: RefShape + ShapeOps,
+        F: FnOnce(&mut Choice<'n, K, O>),
+    {
+        let selector_desc = PositionDesc {
+            handle: selector.handle(),
+            type_desc: TypeDesc::of::<K>(),
+        };
+        let (step, order, outputs) = {
+            let mut builder = self.builder.borrow_mut();
+            let step = builder.step_count(self.body);
+            let order = builder.fresh_order();
+            builder.record_position_use(self.body, selector_desc);
+            let outputs =
+                builder.allocate_choose_outputs(self.body, step, &<O as ShapeOps>::type_descs());
+            (step, order, outputs)
+        };
+        let mut choice = Choice::new(Rc::clone(&self.builder), self.body, step, outputs.clone());
+        definition(&mut choice);
+        let (cases, otherwise) = choice.into_parts();
+        let mut builder = self.builder.borrow_mut();
+        if cases.is_empty() && otherwise.is_none() {
+            builder.record_config_error(BuildErrorDetail::EmptyChoose {
+                body: self.body,
+                step: Some(step),
+            });
+        }
+        builder.push_choose_step(
+            self.body,
+            ChooseStep::new(
+                selector_desc,
+                cases,
+                otherwise,
+                outputs.iter().map(|handle| handle.position).collect(),
+                order,
+            ),
+        );
+        drop(builder);
+        <O as ShapeOps>::from_positions(&mut outputs.into_iter())
+    }
+
+    /// 控制器：按预算重复执行完整 attempt Body（SPEC §10、Engine §6.8）。
+    ///
+    /// `max_retries = N` 指首次 attempt 之外最多再执行 N 次，总尝试次数最多 N+1；`N = 0`
+    /// 仍执行首次 attempt。没有默认次数，也不按 arity 分类。尝试闭包同步执行一次并登记完整
+    /// child Flow；运行期复用同一静态 Body，不重新构建。`usize::MAX` 无法表达 N+1，在构建期
+    /// 拒绝。
+    ///
+    /// 支持 `()`、单 Ref 与 2～16 个 flat Ref tuple 输出；unit 不登记假业务槽。预算耗尽返回
+    /// [`RunError::RetryExhausted`](crate::RunError::RetryExhausted)；该失败退出同时发生清理
+    /// 故障时按 SPEC §12 返回 [`RunError::Runtime`](crate::RunError::Runtime)，并以
+    /// `Error::source` 保留原预算错误。
+    #[allow(private_bounds)]
+    pub fn retry<O, F>(&mut self, max_retries: usize, definition: F) -> O
+    where
+        O: RefShape + ShapeOps,
+        F: FnOnce(&mut Flow<'n>) -> O,
+    {
+        let child = self.builder.borrow_mut().new_body(Some(self.body));
+        let out = {
+            let mut sub = Flow {
+                builder: Rc::clone(&self.builder),
+                body: child,
+            };
+            definition(&mut sub)
+        };
+        let outputs = self.builder.borrow_mut().register_retry(
+            self.body,
+            child,
+            out.positions(),
+            max_retries,
+        );
+        <O as ShapeOps>::from_positions(&mut outputs.into_iter())
+    }
+
+    /// 控制器：用 Normal next 推进受控状态，用 IterBreak 交付进入本轮时的 current
+    /// （SPEC §11、Engine §6.9）。
+    ///
+    /// `max_iterations = N` 要求 `N > 0`，第一轮计入 N。状态形状为单 Ref 或 2～16 个 flat
+    /// Ref tuple，initial／current／next／最终输出同 Shape；**不支持 unit 状态**。每轮从正式
+    /// ControlState 经 StateImport 导入 current，整组 Promote 接受 next，不重绑 parent
+    /// Definition Ref。第 N 轮仍返回 Continue 时以
+    /// [`RunError::IterationLimitReached`](crate::RunError::IterationLimitReached) 结束，不强制
+    /// 成功、不额外执行一次判断、不通过错误返回最后状态；IterBreak 交付进入本轮时的完整
+    /// current，且不在此报告次数耗尽。
+    #[allow(private_bounds)]
+    pub fn iter<S, F>(&mut self, initial: S, max_iterations: usize, definition: F) -> S
+    where
+        S: RefShape + StateShape,
+        F: FnOnce(S, &mut Flow<'n>) -> S,
+    {
+        // round Body 必须先于 formal current 建立：current 的 owner 是该 round Body，
+        // 使其词法可见性限定在本轮（round 内合法，parent／sibling／Root 使用按
+        // OutOfScope(ChildLocal) 在 Definition 阶段拒绝）。new_body 不消耗定义顺序，
+        // 因此先建 Body 不改变任何位置编号或顺序。
+        let (step, round, current) = {
+            let mut builder = self.builder.borrow_mut();
+            let step = builder.step_count(self.body);
+            let round = builder.new_body(Some(self.body));
+            let current =
+                builder.allocate_iter_current(round, step, &<S as ShapeOps>::type_descs());
+            (step, round, current)
+        };
+        let current_refs = {
+            let mut handles = current.iter().copied();
+            <S as ShapeOps>::from_positions(&mut handles)
+        };
+        let initial_slots = initial.positions();
+        let next = {
+            let mut sub = Flow {
+                builder: Rc::clone(&self.builder),
+                body: round,
+            };
+            definition(current_refs, &mut sub)
+        };
+        let outputs = self.builder.borrow_mut().register_iter(
+            self.body,
+            round,
+            step,
+            initial_slots,
+            next.positions(),
+            current,
+            max_iterations,
+            <S as StateShape>::register_states,
+            <S as StateShape>::state_import_slots,
+        );
+        <S as ShapeOps>::from_positions(&mut outputs.into_iter())
+    }
+
+    /// 控制器：按集合元素顺序对每项执行同一 item Body，并按槽聚合输出（SPEC §8、Engine §6.6）。
+    ///
+    /// `collection` 是 `Ref<Vec<T>>`；每次 Item 闭包接收 `Ref<T>`——原集合元素的受限借用，
+    /// 无独立 DataId、不被 Clone 或移走。闭包返回的 item Body 输出 `()`／单 `Ref<O>`／
+    /// 2～16 个 flat `Ref` tuple，分别映射为 `()`／`Ref<Vec<O>>`／逐槽 `Ref<Vec<..>>`；
+    /// 同类型不同逻辑位置各有独立聚合槽。Body 只构建一次、多次执行；空集合不执行 Body，
+    /// 但仍完成构建与统一验证。item Body 与所有 child Flow 一样支持 then／chain／each／
+    /// choose／retry／iter。
+    ///
+    /// 集合来源不受限：完整 `Vec<T>` Data 与外层 Each 的 item（`Ref<Vec<T>>`，其元素自身
+    /// 是集合）都合法。两种来源都只建立受限元素借用，不移动／复制集合，也不给来源任何
+    /// 独立消费权。
+    #[allow(private_bounds)]
+    pub fn each<T, O, F>(
+        &mut self,
+        collection: Ref<Vec<T>>,
+        definition: F,
+    ) -> <O as EachShape>::Collected
+    where
+        T: Data,
+        O: RefShape + ShapeOps + EachCollect,
+        <O as EachShape>::Collected: RefShape + ShapeOps,
+        F: FnOnce(Ref<T>, &mut Flow<'n>) -> O,
+    {
+        let collection_desc = PositionDesc {
+            handle: collection.handle(),
+            type_desc: TypeDesc::of::<Vec<T>>(),
+        };
+        // item Body 必须先于形式 item 位置建立：item 的 owner 是该 Body，使其词法可见性
+        // 限定在 item 内（parent／sibling／Root 使用按 OutOfScope(ChildLocal) 在 Definition
+        // 阶段拒绝）。new_body 不消耗定义顺序，因此先建 Body 不改变任何位置编号或顺序。
+        let (step, item, item_position) = {
+            let mut builder = self.builder.borrow_mut();
+            let step = builder.step_count(self.body);
+            let item = builder.new_body(Some(self.body));
+            let item_position = builder.allocate_each_item(item, step, TypeDesc::of::<T>());
+            (step, item, item_position)
+        };
+        let declared = {
+            let mut sub = Flow {
+                builder: Rc::clone(&self.builder),
+                body: item,
+            };
+            definition(Ref::<T>::from_handle(item_position), &mut sub)
+        };
+        let outputs = self.builder.borrow_mut().register_each(
+            self.body,
+            item,
+            step,
+            collection_desc,
+            item_position,
+            declared.positions(),
+            <<O as EachShape>::Collected as ShapeOps>::type_descs(),
+            <O as EachCollect>::begin_collectors,
+            crate::core::engine::shape::each_bind_item::<T>,
+            crate::core::engine::shape::each_collection_len::<T>,
+            <O as EachCollect>::finish_collectors,
+        );
+        <<O as EachShape>::Collected as ShapeOps>::from_positions(&mut outputs.into_iter())
+    }
+
+    /// 测试可控入口：当前 Definition 身份，用于构造“无来源位置”反例。
+    #[cfg(test)]
+    pub(crate) fn definition_id(&self) -> crate::core::engine::identity::DefinitionId {
+        self.builder.borrow().definition_id()
+    }
+
+    /// 测试可控入口：下一个将分配的 Definition 内位置编号，用于构造“前向来源”反例。
+    #[cfg(test)]
+    pub(crate) fn next_position_id(&self) -> crate::core::engine::identity::PositionId {
+        self.builder.borrow().next_position_id()
+    }
+}

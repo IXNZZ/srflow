@@ -1,0 +1,19 @@
+error[E0507]: cannot move out of `owned`, a captured variable in an `Fn` closure
+   --> /Users/vinter/Dev/Mir2Docs/Novel_md/SES_v1/engineering/srflow/examples/SRFlow_Auto_API_v21_Probe/tests/ui/factory_once.rs:2:106
+    |
+  2 | ...et owned=String::from("non Copy");let _:Workflow<(),String>=Flow::build(|f,_|{f.provide(move||owned);f.output::<String>();});}
+    |       ----- ------------------------                                                       ------^^^^^ `owned` is moved here
+    |       |     |                                                                              |
+    |       |     |                                                                              captured by this `Fn` closure
+    |       |     move occurs because `owned` has type `String`, which does not implement the `Copy` trait
+    |       captured outer variable
+    |
+help: `Fn` and `FnMut` closures require captured values to be able to be consumed multiple times, but `FnOnce` closures may consume them only once
+   --> src/core/engine/probe_api.rs:262:23
+    |
+262 |     pub fn provide<F: Fn() -> T + 'n, T: Data>(&mut self, factory: F) -> &mut Self {
+    |                       ^^^^^^^^^
+
+error: aborting due to 1 previous error
+
+For more information about this error, try `rustc --explain E0507`.

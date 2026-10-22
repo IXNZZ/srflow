@@ -1,6 +1,8 @@
 # System Runtime Workflow（SRFlow）Design v2.1
 
-> 状态：**已审定，当前总设计规范**。规范切换日期：2026-10-03。本文定义 SRFlow v2.1 的整体架构、核心概念、执行语义与组合规则，并替代 [SRFlow Design v2.0](SRFlow_Design_v2.0.md) 的现行规范地位。实施路线已由用户确认为在现有 crate 中从空工程重写 Core；旧实现、测试与示例已清理，历史设计和验收记录保留原范围，不构成 v2.1 合规结论。
+> 版本导航（2026-10-22）：本文件保留 v2.1 已审定设计与历史实施基线。后续 Public API/Definition 升级见 [Design v2.2设计基线](SRFlow_Design_v2.2.md) 和 [v2.2 Public API SPEC](SRFlow_v2.2_Public_API_SPEC_v0.1.md)，v2.2已审定为后续设计基线，不改变本文件历史验收范围。
+
+> 状态：**已审定，v2.1 总设计基线**。规范切换日期：2026-10-03。本文定义 SRFlow v2.1 的整体架构、核心概念、执行语义与组合规则，并替代 [SRFlow Design v2.0](SRFlow_Design_v2.0.md) 的现行规范地位。实施路线已由用户确认为在现有 crate 中从空工程重写 Core；旧实现、测试与示例已清理，历史设计和验收记录保留原范围，不构成 v2.1 合规结论。
 >
 > 本文规定 v2.1 要提供的保证；具体 Runtime 实现和公开 Rust API 的完成情况须分别验收。示例表达语义，方法名、trait 签名和宏语法不因此冻结。
 
