@@ -1,0 +1,3 @@
+path	mode	outcome	primary	allowed	anchor	symbols	acceptance	note
+v22_t02_witness_unrelated_e0277.rs	int	reject	E0277	E0277	flow.provide(|| ());	Data	R02	无关 E0277（不调用 SRFlow）必须被严格判定拒绝
+v22_t02_witness_wrong_symbol_e0624.rs	ext	reject	E0624	E0624	async fn add_one(query: Query<&u32>) -> Result<u32, BodyError> {	then_auto	R02	错误码相同但锚点行无该诊断，必须被严格判定拒绝

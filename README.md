@@ -4,7 +4,7 @@ System Runtime Workflow（SRFlow）是面向强类型业务流程的 Rust 执行
 
 ## 当前设计与实现
 
-**v2.2 设计基线已审定，T01 内部 Definition 基础已限定范围验收；当前公开门面仍保持 v2.1。** 后续按已审定规划迁移 Public API，不重新设计 Execution Core。
+**v2.2 设计基线已审定，T01 Definition 基础与 T02 Node/Factory 内部接入已限定范围验收；当前公开门面仍保持 v2.1。** 后续按已审定规划迁移 Public API，不重新设计 Execution Core。
 
 - [v2.2 总设计](docs/SRFlow_Design_v2.2.md)
 - [v2.2 Public API SPEC](docs/SRFlow_v2.2_Public_API_SPEC_v0.1.md)
@@ -34,11 +34,13 @@ SPEC 是目标契约，Probe 是证据，源码是当前实现。任何材料中
 
 ## v2.2 实施状态
 
-[实施规划 v0.1](docs/SRFlow_v2.2_Implementation_Plan_v0.1.md) 已评审通过，保留 V22-T01～T07 顺序。[V22-T01](docs/implementation_tasks_v2.2/V22_T01_Definition_Sources_And_Declarations_v0.1.md) R1.2 已独立复审验收通过，R01～R04 均关闭，登记 COMPLETED，限定 Definition 基础范围；[复审 R1](docs/implementation_tasks_v2.2/V22_T01_REVIEW_R1_v0.1.md)记录独立验证及边界，[HANDOVER](docs/implementation_tasks_v2.2/V22_T01_HANDOVER_v0.1.md)保留实施记录，[任务入口](docs/implementation_tasks_v2.2/README.md)维护状态。未开始 T02，未提交/推送/发布。
+[实施规划 v0.1](docs/SRFlow_v2.2_Implementation_Plan_v0.1.md) 已评审通过，保留 V22-T01～T07 顺序。[V22-T01](docs/implementation_tasks_v2.2/V22_T01_Definition_Sources_And_Declarations_v0.1.md) R1.2 已独立复审验收通过，R01～R04 均关闭，登记 COMPLETED，限定 Definition 基础范围；[复审 R1](docs/implementation_tasks_v2.2/V22_T01_REVIEW_R1_v0.1.md)记录独立验证及边界，[HANDOVER](docs/implementation_tasks_v2.2/V22_T01_HANDOVER_v0.1.md)保留实施记录，[任务入口](docs/implementation_tasks_v2.2/README.md)维护状态。T01 实现已入库 312cbe7；T02 R1.3 已限定范围验收通过；不开始 T03，不执行提交/推送/发布。
+
+[V22-T02 详细任务书](docs/implementation_tasks_v2.2/V22_T02_Node_And_Factory_Internal_Integration_v0.1.md) 已登记 COMPLETED · R1.3，[独立验收](docs/implementation_tasks_v2.2/V22_T02_REVIEW_R2_v0.1.md)确认 R01～R03 全部关闭；[HANDOVER](docs/implementation_tasks_v2.2/V22_T02_HANDOVER_v0.1.md)保留实施记录。Node/Factory 已内部接入，公开 then/Runtime 签名保持 v2.1；T03 尚未开始。
 
 ## 开发入口
 
-先阅读 [AGENTS](AGENTS.md) 和当前已审定任务；T01 已限定范围验收通过，T02 及后续任务尚未授权。
+先阅读 [AGENTS](AGENTS.md) 和当前已审定任务；T01/T02 已各自限定范围验收通过，后续任务未开始。
 
 现有工程工具链基线 Rust 1.97、edition 2024，常用离线检查：
 
@@ -58,4 +60,4 @@ cargo run --offline --example node_chain_runtime
 - `docs/` 目录下的内容不提交到 Git 仓库。
 - 每个任务完成后，对该任务的代码变更统一提交一次；提交、推送与发布仍须按用户明确授权和 AGENTS 执行。
 
-当前完成 T01 的 Definition 内部支撑与定向测试，修改了生产 Rust 的 Definition/Flow/Error/测试代码，但未提交/推送/发布，也未修改 Probe 证据。v2.1 历史文档和 Probe 原始证据继续保留。
+当前 T01 的 Definition 内部支撑已验收并入库 312cbe7；T02 R1.3 已限定范围验收通过。本轮审查未修改生产 Rust、测试或 Cargo；未提交/推送/发布。已有 Cargo 版本变更、v2.1 历史文档和 Probe 原始证据继续保留。

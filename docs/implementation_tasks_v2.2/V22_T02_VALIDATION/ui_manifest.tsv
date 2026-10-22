@@ -1,0 +1,21 @@
+path	mode	outcome	primary	allowed	anchor	symbols	acceptance	note
+v22_t02_ok_internal.rs	int	ok	-	-	-	-	B01/B13	同装配编译正例：六个内部入口类型正确
+v22_t02_neg_wrong_type.rs	int	reject	E0271	E0271	let _ = flow.then_with(&add_one, doubled);	Doubled,Amount	B08	显式连接错类型
+v22_t02_neg_wrong_arity.rs	int	reject	E0271	E0271	let _ = flow.then_with(&add_one, ());	Amount	B08	显式连接错 arity
+v22_t02_neg_e0499_nested.rs	int	reject	E0499	E0499	flow.output_with(flow.provide_output(|| Key(5)));	borrow	B14	嵌套两次可变借用被拒绝
+v22_t02_neg_provide_fnonce.rs	int	reject	E0507	E0507	flow.provide(move || owned);	cannot move out	B13	FnOnce 移走唯一捕获值
+v22_t02_neg_provide_fnonly.rs	int	reject	E0594	E0594	count += 1;	Fn	B13	仅 FnMut 的闭包
+v22_t02_neg_provide_async.rs	int	reject	E0277	E0277	flow.provide(|| async { Amount(1) });	Data	B13	异步 Factory
+v22_t02_neg_provide_value.rs	int	reject	E0277	E0277	flow.provide(Amount(1));	Amount	B13	直接 provide(value)
+v22_t02_neg_provide_unit.rs	int	reject	E0277	E0277	flow.provide(|| ());	Data	B13	返回 unit 的 Factory
+v22_t02_ok_extern.rs	ext	ok	-	-	-	-	B15	外部成功对照：只用现有公开 API
+v22_t02_neg_extern_then_auto.rs	ext	reject	E0624	E0624	flow.then_auto(&add_one);	then_auto	B15	then_auto 未公开
+v22_t02_neg_extern_then_auto_output.rs	ext	reject	E0624	E0624	let _ = flow.then_auto_output(&add_one);	then_auto_output	B15	then_auto_output 未公开
+v22_t02_neg_extern_then_with.rs	ext	reject	E0624	E0624	flow.then_with(&add_one, input);	then_with	B15	then_with 未公开
+v22_t02_neg_extern_then_with_output.rs	ext	reject	E0624	E0624	let _ = flow.then_with_output(&add_one, input);	then_with_output	B15	then_with_output 未公开
+v22_t02_neg_extern_provide.rs	ext	reject	E0624	E0624	flow.provide(|| 1u32);	provide	B15	provide 未公开
+v22_t02_neg_extern_provide_output.rs	ext	reject	E0624	E0624	let _ = flow.provide_output(|| 1u32);	provide_output	B15	provide_output 未公开
+v22_t02_neg_extern_auto_bridge.rs	ext	reject	E0603	E0432,E0603	use srflow::core::engine::node::AutoCallable;	core	B15	桥类型不可达（私有父模块路径）
+v22_t02_neg_extern_auto_callable_root.rs	ext	reject	E0432	E0432,E0603	use srflow::AutoCallable;	AutoCallable	B15	AutoCallable 根未导出（业务可达路径）
+v22_t02_neg_extern_auto_function_root.rs	ext	reject	E0432	E0432,E0603	use srflow::AutoFunction;	AutoFunction	B15	AutoFunction 根未导出（业务可达路径）
+v22_t02_neg_extern_provide_node.rs	ext	reject	E0432	E0432,E0603	use srflow::ProvideNode;	ProvideNode	B15	ProvideNode 根未导出（业务可达路径）

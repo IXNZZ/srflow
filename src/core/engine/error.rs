@@ -328,6 +328,15 @@ pub(crate) enum BuildErrorDetail {
         expected: TypeDesc,
         found: TypeDesc,
     },
+    /// 自动 Query 的输入 Shape 含重复类型槽位；需改用显式连接。
+    ///
+    /// 只适用于自动 Node 输入：显式连接与 output/next 声明不套用该规则。
+    DuplicateQuery {
+        body: BodyId,
+        type_desc: TypeDesc,
+        first_slot: u16,
+        second_slot: u16,
+    },
 }
 
 impl fmt::Display for BuildErrorDetail {
@@ -530,6 +539,17 @@ impl fmt::Display for BuildErrorDetail {
                 f,
                 "choose at body {body:?} step {step:?} branch {branch} slot {slot} has type \
                  {found}, expected {expected}"
+            ),
+            Self::DuplicateQuery {
+                body,
+                type_desc,
+                first_slot,
+                second_slot,
+            } => write!(
+                f,
+                "body {body:?} automatic Query declares type {type_desc} at more than one input \
+                 slot (slot {first_slot} and slot {second_slot}); connect the same-type inputs \
+                 explicitly with then_with/then_with_output"
             ),
         }
     }

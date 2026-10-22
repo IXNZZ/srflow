@@ -1,7 +1,7 @@
 [package]
 name = "srflow"
 # 重写阶段的工程版本；正式发布范围与版本另行确定。
-version = "0.0.1"
+version = "0.2.2"
 edition = "2024"
 # 当前工具链基线为 1.97；更低版本支持须另行验证。
 rust-version = "1.97"

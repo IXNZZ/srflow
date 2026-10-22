@@ -8,8 +8,8 @@ use crate::core::engine::choice::Choice;
 use crate::core::engine::data::Data;
 use crate::core::engine::definition::{BodyRole, Builder, ChooseStep, DeclarationKind};
 use crate::core::engine::error::BuildErrorDetail;
-use crate::core::engine::identity::BodyId;
-use crate::core::engine::node::Callable;
+use crate::core::engine::identity::{BodyId, PositionHandle};
+use crate::core::engine::node::{AutoCallable, Callable, ProvideNode, StructCall};
 use crate::core::engine::shape::{
     EachCollect, EachShape, InputOps, NodeOutput, OutputOps, PositionDesc, Ref, RefShape,
     RootInput, ShapeOps, StateShape, TypeDesc,
@@ -32,7 +32,8 @@ impl<'n> Flow<'n> {
     /// 按定义顺序登记 Node Step，返回其 Output 对应的单 Ref 或 `()`。
     ///
     /// 输入依赖由类型系统连接（形状与 Node 声明一致才实现 `Callable`），位置来源与
-    /// 词法可见性由 Definition 验证覆盖。
+    /// 词法可见性由 Definition 验证覆盖。本方法是 `then_with_output`（crate 内部唯一登记实现）
+    /// 的薄委托：旧公开签名保持不变，唯一登记实现由 T02 内部入口共用。
     #[allow(private_bounds)]
     pub fn then<N, A, K>(&mut self, node: N, input: A) -> <N::Output as NodeOutput>::Refs
     where
@@ -42,9 +43,162 @@ impl<'n> Flow<'n> {
         <N::Output as NodeOutput>::Refs: ShapeOps,
         N::Output: OutputOps,
     {
+        self.then_with_output::<N, A, K>(node, input)
+    }
+
+    /// 唯一 Node 登记实现：显式 RefShape 连接、真实 callable 与输出槽。
+    ///
+    /// 六种 T02 内部入口（自动/显式 × 普通/取输出、Provide × 普通/取输出）最终都经此方法，
+    /// 不复制第二份登记实现。
+    #[allow(private_bounds, dead_code)] // T03 公开前由内部测试/后续任务使用
+    pub(crate) fn then_with_output<N, A, K>(
+        &mut self,
+        node: N,
+        input: A,
+    ) -> <N::Output as NodeOutput>::Refs
+    where
+        N: Callable<A, K> + 'n,
+        K: 'static,
+        A: RefShape + ShapeOps,
+        A::Spec: InputOps,
+        <N::Output as NodeOutput>::Refs: ShapeOps,
+        N::Output: OutputOps,
+    {
         self.builder
             .borrow_mut()
             .register_node_step::<N, A, K>(self.body, node, input)
+    }
+
+    /// 显式连接的普通形式：登记同一步骤并返回原 Flow 以便继续链式登记。
+    #[allow(private_bounds, dead_code)] // T03 公开前由内部测试/后续任务使用
+    pub(crate) fn then_with<N, A, K>(&mut self, node: N, input: A) -> &mut Self
+    where
+        N: Callable<A, K> + 'n,
+        K: 'static,
+        A: RefShape + ShapeOps,
+        A::Spec: InputOps,
+        <N::Output as NodeOutput>::Refs: ShapeOps,
+        N::Output: OutputOps,
+    {
+        let _ = self.then_with_output::<N, A, K>(node, input);
+        self
+    }
+
+    /// 自动输入的普通形式：重复检查 → 逐槽最近来源 → 共同登记；返回原 Flow。
+    ///
+    /// 普通与取输出形式登记相同数量、顺序、输入、输出及 callable 的 NodeStep，只在是否把
+    /// 输出句柄交给编排代码上有区别。
+    #[allow(private_bounds, dead_code)] // T03 公开前由内部测试/后续任务使用
+    pub(crate) fn then_auto<N, K>(&mut self, node: N) -> &mut Self
+    where
+        N: AutoCallable<K> + 'n,
+        K: 'static,
+        <N as AutoCallable<K>>::Output: OutputOps,
+        <<N as AutoCallable<K>>::Output as NodeOutput>::Refs: ShapeOps,
+    {
+        let _ = self.register_auto_step::<N, K>(node);
+        self
+    }
+
+    /// 自动输入的取输出形式：同上，返回 Node Output 对应的 RefShape。
+    #[allow(private_bounds, dead_code)] // T03 公开前由内部测试/后续任务使用
+    pub(crate) fn then_auto_output<N, K>(
+        &mut self,
+        node: N,
+    ) -> <<N as AutoCallable<K>>::Output as NodeOutput>::Refs
+    where
+        N: AutoCallable<K> + 'n,
+        K: 'static,
+        <N as AutoCallable<K>>::Output: OutputOps,
+        <<N as AutoCallable<K>>::Output as NodeOutput>::Refs: ShapeOps,
+    {
+        self.register_auto_step::<N, K>(node)
+    }
+
+    /// 同步 Factory 的普通形式：包成零输入 Node 并登记一步。
+    #[allow(private_bounds, dead_code)] // T03 公开前由内部测试/后续任务使用
+    pub(crate) fn provide<F, T>(&mut self, factory: F) -> &mut Self
+    where
+        F: Fn() -> T + 'n,
+        T: Data,
+    {
+        let _ = self.provide_output(factory);
+        self
+    }
+
+    /// 同步 Factory 的取 Ref 形式：登记同一步骤并返回其 `Ref<T>`。
+    #[allow(private_bounds, dead_code)] // T03 公开前由内部测试/后续任务使用
+    pub(crate) fn provide_output<F, T>(&mut self, factory: F) -> Ref<T>
+    where
+        F: Fn() -> T + 'n,
+        T: Data,
+    {
+        self.then_with_output::<ProvideNode<F, T>, (), StructCall>(ProvideNode::new(factory), ())
+    }
+
+    /// 自动登记：解析输入后交给共同登记；失败时不登记 Step 并返回失效句柄形状。
+    fn register_auto_step<N, K>(
+        &mut self,
+        node: N,
+    ) -> <<N as AutoCallable<K>>::Output as NodeOutput>::Refs
+    where
+        N: AutoCallable<K> + 'n,
+        K: 'static,
+        <N as AutoCallable<K>>::Output: OutputOps,
+        <<N as AutoCallable<K>>::Output as NodeOutput>::Refs: ShapeOps,
+    {
+        let (input, resolved) = self.resolve_auto_input::<<N as AutoCallable<K>>::Input>();
+        if resolved {
+            node.register(self, input)
+        } else {
+            self.failed_output_shape::<<N as AutoCallable<K>>::Output>()
+        }
+    }
+
+    /// 自动输入解析：先做完整 Shape 重复类型检查，再按调用位置逐槽取最近合法来源。
+    ///
+    /// 返回解析出的具体 RefShape 与是否全部成功。重复或缺少来源的槽位一律使用无当前
+    /// Definition 身份的哨兵句柄：失败结果不会进入合法候选，也不能被后续显式路径补成
+    /// 正常来源。查询本身不登记 Step、位置或 Import。
+    fn resolve_auto_input<A>(&self) -> (A, bool)
+    where
+        A: RefShape + ShapeOps,
+    {
+        let types = <A as ShapeOps>::type_descs();
+        let mut builder = self.builder.borrow_mut();
+        let unique = builder.check_auto_query_shape(self.body, &types);
+        let order = builder.current_order();
+        let mut resolved = unique;
+        let mut handles: Vec<PositionHandle> = Vec::with_capacity(types.len());
+        for (slot, type_desc) in types.into_iter().enumerate() {
+            let found = if unique {
+                builder.resolve(self.body, type_desc, Some(slot as u16), order)
+            } else {
+                None
+            };
+            match found {
+                Some(desc) => handles.push(desc.handle),
+                None => {
+                    resolved = false;
+                    handles.push(builder.missing_handle());
+                }
+            }
+        }
+        drop(builder);
+        let shape = <A as ShapeOps>::from_positions(&mut handles.into_iter());
+        (shape, resolved)
+    }
+
+    /// 自动登记失败时的输出句柄形状：所有槽位都是哨兵，不发布为正常来源。
+    fn failed_output_shape<O>(&self) -> <O as NodeOutput>::Refs
+    where
+        O: NodeOutput,
+        <O as NodeOutput>::Refs: ShapeOps,
+    {
+        let missing = self.builder.borrow().missing_handle();
+        let count = <<O as NodeOutput>::Refs as ShapeOps>::type_descs().len();
+        let mut handles = std::iter::repeat_n(missing, count);
+        <<O as NodeOutput>::Refs as ShapeOps>::from_positions(&mut handles)
     }
 
     /// 同步构建 child Body，登记其声明输出并返回 parent 可见的新 Ref。

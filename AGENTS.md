@@ -4,11 +4,13 @@
 
 ## v2.2 设计基线（2026-10-22）
 
-[Design v2.2](docs/SRFlow_Design_v2.2.md)、[Public API SPEC v2.2](docs/SRFlow_v2.2_Public_API_SPEC_v0.1.md) 与 [Engine v2.2 设计增量](docs/SRFlow_v2.2_Workflow_Engine_Design_v0.1.md) 的主体设计已评审通过，用户已正式确认 Root 双参数闭包（Flow + Input RefShape）及调用方期望 owned 输出方案，并要求补齐两条原则后登记设计基线。v2.2 是后续 Public API/Definition 任务设计的现行依据；T01 内部 Definition 基础已验收，正式公开门面仍保持 v2.1，不据设计审定推定全部 API 已迁移。
+[Design v2.2](docs/SRFlow_Design_v2.2.md)、[Public API SPEC v2.2](docs/SRFlow_v2.2_Public_API_SPEC_v0.1.md) 与 [Engine v2.2 设计增量](docs/SRFlow_v2.2_Workflow_Engine_Design_v0.1.md) 的主体设计已评审通过，用户已正式确认 Root 双参数闭包（Flow + Input RefShape）及调用方期望 owned 输出方案，并要求补齐两条原则后登记设计基线。v2.2 是后续 Public API/Definition 任务设计的现行依据；T01 Definition 基础与 T02 Node/Factory 内部接入已验收，正式公开门面仍保持 v2.1，不据设计审定推定全部 API 已迁移。
 
 正式入口保持 Runtime::execute；不引入公开 Workflow、Flow::build、require<T>()或第二套依赖协议。链式语法只是在同一Flow上连续登记，后一步按自身Query解析输入。Data Core和控制执行算法不重做；旧规范与Probe各保留历史适用范围。两项已确认规则是自动Query重复类型拒绝、Choose混合未声明/unit输出拒绝。
 
-[Root补充Probe](examples/SRFlow_Root_API_v22_Probe/RESULTS.md) 已完成限定验证；不等于完整独立回归。文档变化与审定记录见[升级报告](docs/SRFlow_v2.2_Document_Upgrade_Report_v0.1.md)。[Implementation Plan v0.1](docs/SRFlow_v2.2_Implementation_Plan_v0.1.md) 已由用户评审通过，已补入构建错误恢复安全、旧 unit 契约映射、T05 Choose 签名审定三项约束。[V22-T01](docs/implementation_tasks_v2.2/V22_T01_Definition_Sources_And_Declarations_v0.1.md) R1.2 已于 2026-10-22 独立复审通过，R01～R04 均关闭，登记 COMPLETED，限定本任务 Definition 基础范围。验收见[复审 R1](docs/implementation_tasks_v2.2/V22_T01_REVIEW_R1_v0.1.md)，实施见 [HANDOVER](docs/implementation_tasks_v2.2/V22_T01_HANDOVER_v0.1.md)；[上轮审查](docs/implementation_tasks_v2.2/V22_T01_REVIEW_v0.1.md)及[R1.2 修订](docs/implementation_tasks_v2.2/V22_T01_TASK_REVISION_R1_2_v0.1.md)保留历史。未开始 T02，未提交/推送/发布。
+[Root补充Probe](examples/SRFlow_Root_API_v22_Probe/RESULTS.md) 已完成限定验证；不等于完整独立回归。文档变化与审定记录见[升级报告](docs/SRFlow_v2.2_Document_Upgrade_Report_v0.1.md)。[Implementation Plan v0.1](docs/SRFlow_v2.2_Implementation_Plan_v0.1.md) 已由用户评审通过，已补入构建错误恢复安全、旧 unit 契约映射、T05 Choose 签名审定三项约束。[V22-T01](docs/implementation_tasks_v2.2/V22_T01_Definition_Sources_And_Declarations_v0.1.md) R1.2 已于 2026-10-22 独立复审通过，R01～R04 均关闭，登记 COMPLETED，限定本任务 Definition 基础范围。验收见[复审 R1](docs/implementation_tasks_v2.2/V22_T01_REVIEW_R1_v0.1.md)，实施见 [HANDOVER](docs/implementation_tasks_v2.2/V22_T01_HANDOVER_v0.1.md)；[上轮审查](docs/implementation_tasks_v2.2/V22_T01_REVIEW_v0.1.md)及[R1.2 修订](docs/implementation_tasks_v2.2/V22_T01_TASK_REVISION_R1_2_v0.1.md)保留历史。T01 实现现已入库 312cbe7；T02 R1.3 已限定范围验收通过，不开始 T03，不执行提交/推送/发布。
+
+[V22-T02 详细任务书](docs/implementation_tasks_v2.2/V22_T02_Node_And_Factory_Internal_Integration_v0.1.md) 当前为 COMPLETED · R1.3，R01～R03 全部关闭，限定 Node/Factory 内部接入范围。验收见 [T02 R1.3 独立复审](docs/implementation_tasks_v2.2/V22_T02_REVIEW_R2_v0.1.md)，实施报告见 [HANDOVER](docs/implementation_tasks_v2.2/V22_T02_HANDOVER_v0.1.md)。[首轮审查](docs/implementation_tasks_v2.2/V22_T02_REVIEW_v0.1.md)、[R1.2 复审](docs/implementation_tasks_v2.2/V22_T02_REVIEW_R1_v0.1.md)与各轮修订说明保留历史；准备基线仍见 [T02 PREPARATION](docs/implementation_tasks_v2.2/V22_T02_PREPARATION.json)。公开签名仍为 v2.1，T03 未开始；已有 Cargo 版本变更保持原样。
 
 ## 权威顺序
 
@@ -19,7 +21,7 @@
 3. [Design v2.2](docs/SRFlow_Design_v2.2.md) 的总体语义、[Public API SPEC v2.2](docs/SRFlow_v2.2_Public_API_SPEC_v0.1.md) 的目标契约与 [Engine v2.2设计增量](docs/SRFlow_v2.2_Workflow_Engine_Design_v0.1.md) 的衔接规则；
 4. [`docs/SRFlow_Core_Design_v0.1.md`](docs/SRFlow_Core_Design_v0.1.md) 中的 Core 语义；
 5. [`docs/SRFlow_Core_Runtime_Implementation_Design_v0.1.md`](docs/SRFlow_Core_Runtime_Implementation_Design_v0.1.md) 中的内部实现基线；
-6. 经审定的[v2.2实施规划](docs/SRFlow_v2.2_Implementation_Plan_v0.1.md)及其[任务入口](docs/implementation_tasks_v2.2/README.md)（规划已通过，T01 已限定范围验收并登记 COMPLETED；后续任务未授权）；旧WE/V21入口仅保留原阶段边界；
+6. 经审定的[v2.2实施规划](docs/SRFlow_v2.2_Implementation_Plan_v0.1.md)及其[任务入口](docs/implementation_tasks_v2.2/README.md)（规划已通过，T01/T02 已各自限定范围验收并登记 COMPLETED；T03 及后续任务未授权）；旧WE/V21入口仅保留原阶段边界；
 7. 当前经用户审定的详细任务书；
 8. 现有代码、测试、示例和历史 Compile Probe 惯例。
 

@@ -1592,6 +1592,28 @@ impl<'n> Builder<'n> {
         }
     }
 
+    /// 自动 Query 的完整输入 Shape 重复类型检查；含重复即记录首对并返回 `false`。
+    ///
+    /// 只适用于自动 Node 输入：显式连接与 output/next 声明不套用该规则。检查完整 Shape
+    /// （非相邻槽同样命中），先于逐槽来源查询，使重复类型成为可辨识首因。
+    pub(crate) fn check_auto_query_shape(&mut self, body: BodyId, types: &[TypeDesc]) -> bool {
+        for (slot, type_desc) in types.iter().enumerate() {
+            if let Some(first) = types[..slot]
+                .iter()
+                .position(|earlier| earlier == type_desc)
+            {
+                self.errors.push(BuildErrorDetail::DuplicateQuery {
+                    body,
+                    type_desc: *type_desc,
+                    first_slot: first as u16,
+                    second_slot: slot as u16,
+                });
+                return false;
+            }
+        }
+        true
+    }
+
     /// 登记 Node Step：登记真实 callable 句柄、输入位置与输出位置。
     pub(crate) fn register_node_step<N, A, K>(
         &mut self,
