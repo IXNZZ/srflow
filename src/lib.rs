@@ -16,7 +16,7 @@
 //!
 //! ```
 //! use futures::executor::block_on;
-//! use srflow::{BodyError, Data, Node, Query, Runtime};
+//! use srflow::{BodyError, Data, Node, Query, Ref, Runtime};
 //!
 //! #[derive(Data)]
 //! struct Amount(u32);
@@ -43,7 +43,11 @@
 //!         .execute(
 //!             |flow, amount| {
 //!                 let doubled = flow.then_with_output(double, amount);
-//!                 let refs = flow.chain(|sub| sub.then_with_output(&add, doubled));
+//!                 // 取输出形式：Body 内先声明，再返回父域 Ref。
+//!                 let refs: Ref<Amount> = flow.chain_output(|sub| {
+//!                     let produced = sub.then_with_output(&add, doubled);
+//!                     sub.output_with(produced);
+//!                 });
 //!                 flow.output_with(refs);
 //!             },
 //!             Amount(21),

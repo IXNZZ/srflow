@@ -258,9 +258,10 @@ fn s08_six_operations_compose_in_one_execution() {
                 // 1) then：selector 键。
                 let key = flow.then_with_output(&key_of, seed);
                 // 2) retry：完整 attempt 重启一次后成功。
-                let verdict = flow.retry(3, |attempt| {
+                let verdict: Ref<Verdict> = flow.retry_output(3, |attempt| {
                     let candidate = attempt.then_with_output(&generate, seed);
-                    attempt.then_with_output(&judge, candidate)
+                    let out_refs = attempt.then_with_output(&judge, candidate);
+                    attempt.output_with(out_refs);
                 });
                 // 3) choose：Key(2) 命中 triple，其余分支一个都不执行。
                 let amount = flow.choose(key, |choice| {
@@ -269,17 +270,19 @@ fn s08_six_operations_compose_in_one_execution() {
                     choice.otherwise(|branch| branch.then_with_output(&fallback, verdict));
                 });
                 // 4) chain：child 边界 + 两槽输出。
-                let (merged, label) = flow.chain(|sub| {
+                let (merged, label): (Ref<Merged>, Ref<Label>) = flow.chain_output(|sub| {
                     let label = sub.then_with_output(&label_at_root, seed);
                     let merged = sub.then_with_output(&merge, (amount, verdict, label));
-                    (merged, label)
+                    let out_refs = (merged, label);
+                    sub.output_with(out_refs);
                 });
                 // 5) each：每项两个输出槽，item body 内再一层 chain（深层捕获 Root `Seed`）。
                 let (scores, summaries) = flow.each(items, |item, each| {
                     let score = each.then_with_output(&score, item);
-                    let summary = each.chain(|sub| {
+                    let summary: Ref<Summary> = each.chain_output(|sub| {
                         let label = sub.then_with_output(&label_in_item, seed);
-                        sub.then_with_output(&summary, (item, score, label))
+                        let out_refs = sub.then_with_output(&summary, (item, score, label));
+                        sub.output_with(out_refs);
                     });
                     (score, summary)
                 });
@@ -480,9 +483,10 @@ fn s09_path_b_inner_retry_restarts_complete_attempt_in_round() {
                 (draft, context),
                 3,
                 |(current_draft, current_context), round| {
-                    let verdict = round.retry(1, |attempt| {
+                    let verdict: Ref<Verdict> = round.retry_output(1, |attempt| {
                         let candidate = attempt.then_with_output(&gen_in_round, current_context);
-                        attempt.then_with_output(&judge_in_round, candidate)
+                        let out_refs = attempt.then_with_output(&judge_in_round, candidate);
+                        attempt.output_with(out_refs);
                     });
                     round.then_with_output(&consume, verdict);
                     let next_draft = round.then_with_output(&revise, current_draft);
@@ -610,9 +614,10 @@ fn s09_path_d_retry_exhaustion_keeps_fields_and_last_reason() {
     let runtime = Runtime::new();
     let error = match block_on(runtime.execute::<_, Summary, _>(
         |flow, seed| {
-            let verdict = flow.retry(1, |attempt| {
+            let verdict: Ref<Verdict> = flow.retry_output(1, |attempt| {
                 let candidate = attempt.then_with_output(&always_generate, seed);
-                attempt.then_with_output(&always_retry, candidate)
+                let out_refs = attempt.then_with_output(&always_retry, candidate);
+                attempt.output_with(out_refs);
             });
             let out_refs = flow.then_with_output(&after_retry, verdict);
             flow.output_with(out_refs);
@@ -695,9 +700,10 @@ fn s09_propagation_chain_control_and_failure_reach_root_unchanged() {
     let error = match block_on(runtime.execute::<_, Summary, _>(
         |flow, seed| {
             let _before = flow.then_with_output(&chain_probe, seed);
-            let inside = flow.chain(|sub| {
+            let inside: Ref<Verdict> = flow.chain_output(|sub| {
                 let probe = sub.then_with_output(&chain_probe, seed);
-                sub.then_with_output(&chain_break, probe)
+                let out_refs = sub.then_with_output(&chain_break, probe);
+                sub.output_with(out_refs);
             });
             let out_refs = flow.then_with_output(&after_chain, inside);
             flow.output_with(out_refs);
@@ -725,9 +731,10 @@ fn s09_propagation_chain_control_and_failure_reach_root_unchanged() {
     reset();
     let error = match block_on(runtime.execute::<_, Summary, _>(
         |flow, seed| {
-            let inside = flow.chain(|sub| {
+            let inside: Ref<Verdict> = flow.chain_output(|sub| {
                 let probe = sub.then_with_output(&chain_probe, seed);
-                sub.then_with_output(&chain_fail, probe)
+                let out_refs = sub.then_with_output(&chain_fail, probe);
+                sub.output_with(out_refs);
             });
             let out_refs = flow.then_with_output(&after_chain, inside);
             flow.output_with(out_refs);
@@ -991,12 +998,14 @@ fn s09_same_class_nearest_capture_retry_in_retry() {
     let runtime = Runtime::new();
     let delivered = block_on(runtime.execute::<_, Summary, _>(
         |flow, seed| {
-            let outer = flow.retry(3, |attempt| {
+            let outer: Ref<Verdict> = flow.retry_output(3, |attempt| {
                 let probe = attempt.then_with_output(&outer_probe, seed);
-                attempt.retry(1, |inner| {
+                let t04_out_refs: Ref<Verdict> = attempt.retry_output(1, |inner| {
                     let candidate = inner.then_with_output(&nested_generate, probe);
-                    inner.then_with_output(&nested_judge, candidate)
-                })
+                    let out_refs = inner.then_with_output(&nested_judge, candidate);
+                    inner.output_with(out_refs);
+                });
+                attempt.output_with(t04_out_refs);
             });
             let out_refs = flow.then_with_output(&after_outer, outer);
             flow.output_with(out_refs);
@@ -1154,8 +1163,8 @@ fn s09_retry_inside_iter_restarts_attempt_and_iter_state() {
     let runtime = Runtime::new();
     let (draft, context) = block_on(runtime.execute::<_, (Draft, Context), _>(
         |flow, (draft, context)| {
-            let out_refs = flow.retry(1, |attempt| {
-                attempt.iter(
+            let out_refs: (Ref<Draft>, Ref<Context>) = flow.retry_output(1, |attempt| {
+                let out_refs = attempt.iter(
                     (draft, context),
                     3,
                     |(current_draft, current_context), round| {
@@ -1165,7 +1174,8 @@ fn s09_retry_inside_iter_restarts_attempt_and_iter_state() {
                         round.then_with_output(&round_break_at_one, current_context);
                         (next_draft, next_context)
                     },
-                )
+                );
+                attempt.output_with(out_refs);
             });
             flow.output_with(out_refs);
         },
@@ -1225,9 +1235,10 @@ fn s09_retry_does_not_capture_iter_break_and_iter_delivers_current() {
     let delivered = block_on(runtime.execute::<_, Context, _>(
         |flow, context| {
             let out_refs = flow.iter(context, 3, |current, round| {
-                let verdict = round.retry(2, |attempt| {
+                let verdict: Ref<Verdict> = round.retry_output(2, |attempt| {
                     let candidate = attempt.then_with_output(&gen_in_retry, current);
-                    attempt.then_with_output(&break_in_retry, candidate)
+                    let out_refs = attempt.then_with_output(&break_in_retry, candidate);
+                    attempt.output_with(out_refs);
                 });
                 round.then_with_output(&after_retry_in_iter, verdict);
                 round.then_with_output(&bump_context, current)
@@ -1448,8 +1459,9 @@ fn s09_definition_error_retry_max_budget_runs_zero_business() {
     let runtime = Runtime::new();
     let error = match block_on(runtime.execute::<_, Verdict, _>(
         |flow, seed| {
-            let out_refs = flow.retry(usize::MAX, |attempt| {
-                attempt.then_with_output(&never_runs_seed, seed)
+            let out_refs: Ref<Verdict> = flow.retry_output(usize::MAX, |attempt| {
+                let out_refs = attempt.then_with_output(&never_runs_seed, seed);
+                attempt.output_with(out_refs);
             });
             flow.output_with(out_refs);
         },

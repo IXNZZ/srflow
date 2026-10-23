@@ -150,9 +150,10 @@ fn e10_retry_exhausted_keeps_fields_and_last_dynamic_reason() {
     let runtime = Runtime::new();
     let outcome = block_on(runtime.execute::<_, Report, _>(
         |flow: &mut crate::core::engine::flow::Flow<'_>, prompt: Ref<Prompt>| {
-            let out_refs = flow.retry(1, |attempt| {
+            let out_refs: Ref<Report> = flow.retry_output(1, |attempt| {
                 let candidate = attempt.then_with_output(&generate, prompt);
-                attempt.then_with_output(&judge_always_retrying, candidate)
+                let out_refs = attempt.then_with_output(&judge_always_retrying, candidate);
+                attempt.output_with(out_refs);
             });
             flow.output_with(out_refs);
         },
@@ -186,11 +187,12 @@ fn e07_e09_attempts_reuse_original_dependency_and_clean_the_previous_one() {
     let report = block_on(runtime.execute::<_, (Report, Tracked), _>(
         |flow: &mut crate::core::engine::flow::Flow<'_>,
          (seed, prompt, attempts): (Ref<Seed>, Ref<Prompt>, Ref<Attempts>)| {
-            let out_refs = flow.retry(3, |attempt| {
+            let out_refs: (Ref<Report>, Ref<Tracked>) = flow.retry_output(3, |attempt| {
                 let tracked = attempt.then_with_output(&track, seed);
                 let candidate = attempt.then_with_output(&generate_counted, (prompt, attempts));
                 let report = attempt.then_with_output(&judge_retrying, candidate);
-                (report, tracked)
+                let out_refs = (report, tracked);
+                attempt.output_with(out_refs);
             });
             flow.output_with(out_refs);
         },
@@ -321,10 +323,11 @@ fn e12_retry_does_not_capture_iter_break() {
     let runtime = Runtime::new();
     let outcome = block_on(runtime.execute::<_, Candidate, _>(
         |flow: &mut crate::core::engine::flow::Flow<'_>, prompt: Ref<Prompt>| {
-            let out_refs = flow.retry(3, |attempt| {
+            let out_refs: Ref<Candidate> = flow.retry_output(3, |attempt| {
                 let candidate = attempt.then_with_output(&generate, prompt);
                 let _ = attempt.then_with_output(&judge_break, candidate);
-                candidate
+                let out_refs = candidate;
+                attempt.output_with(out_refs);
             });
             flow.output_with(out_refs);
         },
@@ -344,8 +347,9 @@ fn e02_retry_budget_max_is_rejected_at_build_time() {
     let runtime = Runtime::new();
     let outcome = block_on(runtime.execute::<_, Candidate, _>(
         |flow: &mut crate::core::engine::flow::Flow<'_>, prompt: Ref<Prompt>| {
-            let out_refs = flow.retry(usize::MAX, |attempt| {
-                attempt.then_with_output(&generate, prompt)
+            let out_refs: Ref<Candidate> = flow.retry_output(usize::MAX, |attempt| {
+                let out_refs = attempt.then_with_output(&generate, prompt);
+                attempt.output_with(out_refs);
             });
             flow.output_with(out_refs);
         },
@@ -476,14 +480,16 @@ fn r01_iter_formal_current_parent_step_use_is_rejected() {
     let runtime = Runtime::new();
     let outcome = block_on(runtime.execute::<_, u32, _>(
         |flow: &mut Flow<'_>, initial: Ref<u32>| {
-            let out_refs = flow.chain(|sub| {
+            let out_refs: Ref<u32> = flow.chain_output(|sub| {
                 let mut escaped: Option<Ref<u32>> = None;
                 let _output = sub.iter(initial, 1, |current, round| {
                     escaped = Some(current);
                     round.then_with_output(&count_and_break, current);
                     current
                 });
-                sub.then_with_output(&consume_u32, escaped.expect("captured formal current"))
+                let out_refs =
+                    sub.then_with_output(&consume_u32, escaped.expect("captured formal current"));
+                sub.output_with(out_refs);
             });
             flow.output_with(out_refs);
         },
@@ -520,15 +526,19 @@ fn r01_iter_formal_current_sibling_use_is_rejected() {
     let outcome = block_on(runtime.execute::<_, u32, _>(
         |flow: &mut Flow<'_>, initial: Ref<u32>| {
             let mut escaped: Option<Ref<u32>> = None;
-            let _first = flow.chain(|sub| {
-                sub.iter(initial, 1, |current, round| {
+            let _first: Ref<u32> = flow.chain_output(|sub| {
+                let out_refs = sub.iter(initial, 1, |current, round| {
                     escaped = Some(current);
                     round.then_with_output(&count_and_break, current);
                     current
-                })
+                });
+                sub.output_with(out_refs);
             });
             let sibling_local = escaped.expect("captured formal current");
-            let out_refs = flow.chain(move |sub| sub.then_with_output(&consume_u32, sibling_local));
+            let out_refs: Ref<u32> = flow.chain_output(move |sub| {
+                let out_refs = sub.then_with_output(&consume_u32, sibling_local);
+                sub.output_with(out_refs);
+            });
             flow.output_with(out_refs);
         },
         11u32,
@@ -721,9 +731,10 @@ fn e27a_retry_round_cleanup_fault_is_runtime_and_stops_attempts() {
     let runtime = Runtime::new();
     let outcome = block_on(runtime.execute::<_, Report, _>(
         |flow: &mut Flow<'_>, prompt: Ref<Prompt>| {
-            let out_refs = flow.retry(3, |attempt| {
+            let out_refs: Ref<Report> = flow.retry_output(3, |attempt| {
                 let candidate = attempt.then_with_output(&counted_generate, prompt);
-                attempt.then_with_output(&judge_always_retrying, candidate)
+                let out_refs = attempt.then_with_output(&judge_always_retrying, candidate);
+                attempt.output_with(out_refs);
             });
             flow.output_with(out_refs);
         },

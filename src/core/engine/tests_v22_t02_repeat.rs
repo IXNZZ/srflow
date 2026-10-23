@@ -331,7 +331,7 @@ fn b11_retry_rebuilds_factory_per_attempt_and_cleans_before_next() {
     let runtime = Runtime;
     let delivered: Item = block_on(runtime.execute(
         |flow, _input| {
-            let out_refs = flow.retry(3, |attempt| {
+            let out_refs: Ref<Item> = flow.retry_output(3, |attempt| {
                 let closed_capture = Rc::clone(&closed_capture);
                 let produced = attempt.provide_output(move || {
                     let call = attempt_factory_calls.fetch_add(1, Ordering::SeqCst) + 1;
@@ -343,7 +343,8 @@ fn b11_retry_rebuilds_factory_per_attempt_and_cleans_before_next() {
                     Item(call as u32)
                 });
                 attempt.then_with_output(&retry_until, produced);
-                produced
+                let out_refs = produced;
+                attempt.output_with(out_refs);
             });
             flow.output_with(out_refs);
         },
@@ -579,13 +580,14 @@ fn b11_plain_failure_is_never_retried() {
     let runtime = Runtime;
     let error = block_on(runtime.execute::<_, (), _>(
         |flow, _input| {
-            let () = flow.retry(3, |attempt| {
+            let () = flow.retry_output(3, |attempt| {
                 let produced = attempt.provide_output(|| {
                     factory_calls.fetch_add(1, Ordering::SeqCst);
                     push_event("factory");
                     Item(1)
                 });
                 attempt.then_with_output(&always_fail, produced);
+                attempt.output::<()>();
             });
             flow.output_with(());
         },
@@ -614,7 +616,10 @@ fn b12_child_factory_registers_in_current_scope_and_exports_owned() {
     let delivered: Item = block_on(runtime.execute(
         |flow, _input| {
             // chain child 内的 Factory：输出经 Export 交给 parent，再作为 Root owned 交付。
-            let exported: Ref<Item> = flow.chain(|sub| sub.provide_output(|| Item(9)));
+            let exported: Ref<Item> = flow.chain_output(|sub| {
+                let out_refs = sub.provide_output(|| Item(9));
+                sub.output_with(out_refs);
+            });
             let out_refs = exported;
             flow.output_with(out_refs);
         },

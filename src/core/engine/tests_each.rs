@@ -234,11 +234,11 @@ impl Node for Doubler {
 static DOUBLER: Doubler = Doubler;
 
 /// SPEC §7 首选 Fragment：普通函数返回 closure，保留非 static 的 Node 句柄借用寿命。
-fn frag_double<'n>(
-    node: &'n Doubler,
-    input: Ref<Score>,
-) -> impl FnOnce(&mut Flow<'n>) -> Ref<Score> + 'n {
-    move |sub| sub.then_with_output(node, input)
+fn frag_double<'n>(node: &'n Doubler, input: Ref<Score>) -> impl FnOnce(&mut Flow<'n>) + 'n {
+    move |sub| {
+        let out_refs = sub.then_with_output(node, input);
+        sub.output_with(out_refs);
+    }
 }
 
 /// Choose 命中分支（`Key(0)`）：`Score + 10`。
@@ -320,7 +320,7 @@ fn full_item_flow<'n>(
         // 1) then：item 与祖先 `Rules` 共同产生 Score。
         let scored = each.then_with_output(&score_of, (item, rules));
         // 2) chain + Fragment：关闭 child 边界后只保留翻倍后的声明输出。
-        let doubled = each.chain(frag_double(&DOUBLER, scored));
+        let doubled: Ref<Score> = each.chain_output(frag_double(&DOUBLER, scored));
         // 3) choose：按 item 奇偶真实选取一条分支（另一分支只登记、不建立运行 Scope）。
         let selector = each.then_with_output(&key_of, item);
         let chosen = each.choose(selector, |choice| {
@@ -328,7 +328,10 @@ fn full_item_flow<'n>(
             choice.otherwise(|branch| branch.then_with_output(&add_hundred, doubled));
         });
         // 4) retry：最后一次 attempt 才成功的真实重试。
-        let retried = each.retry(2, |attempt| attempt.then_with_output(&flaky, chosen));
+        let retried: Ref<Score> = each.retry_output(2, |attempt| {
+            let out_refs = attempt.then_with_output(&flaky, chosen);
+            attempt.output_with(out_refs);
+        });
         // 5) iter：固定初始状态逐轮推进，第 5 轮以 IterBreak 交付 current。
         let iter_done = each.iter(seed, 5, |current, round| {
             round.then_with_output(&step_toward_four, current)
@@ -362,7 +365,10 @@ fn p01_frozen_usage_feeds_later_then_chain_and_root() {
             // 后续 then 直接消费 Each 的自然返回形状 `Ref<Vec<Score>>`。
             let total = flow.then_with_output(&sum_scores, scores);
             // 后续 Chain 的 child 深层捕获另一个聚合槽 `Ref<Vec<Report>>`。
-            let head = flow.chain(|sub| sub.then_with_output(&first_report, reports));
+            let head: Ref<Report> = flow.chain_output(|sub| {
+                let out_refs = sub.then_with_output(&first_report, reports);
+                sub.output_with(out_refs);
+            });
             let out_refs = (total, head);
             flow.output_with(out_refs);
         },
@@ -634,7 +640,10 @@ fn p03_each_is_a_unified_step_with_a_full_body_and_a_single_plan() {
     let definition = build_definition::<Vec<Mark>, (), _>(|flow, items| {
         let _collected: () = flow.each(items, |item, each| {
             let _: () = each.then_with_output(&count_unit, item);
-            let chained = each.chain(|sub| sub.then_with_output(&count_marks, item));
+            let chained: Ref<Mark> = each.chain_output(|sub| {
+                let out_refs = sub.then_with_output(&count_marks, item);
+                sub.output_with(out_refs);
+            });
             let selector = each.then_with_output(&key_of, item);
             each.choose(selector, |choice| {
                 choice.case(Key(0), |branch| {
@@ -646,6 +655,7 @@ fn p03_each_is_a_unified_step_with_a_full_body_and_a_single_plan() {
             });
             each.retry(1, |attempt| {
                 let _: () = attempt.then_with_output(&count_unit, item);
+                attempt.output::<()>();
             });
             each.iter(item, 2, |current, round| {
                 round.then_with_output(&count_unit, current);
@@ -1006,15 +1016,17 @@ fn p04_sibling_use_of_formal_item_is_rejected() {
     let outcome = block_on(Runtime::new().execute::<_, (), _>(
         |flow, items: Ref<Vec<Mark>>| {
             let mut escaped: Option<Ref<Mark>> = None;
-            let _first: () = flow.chain(|sub| {
+            let _first: () = flow.chain_output(|sub| {
                 let _collected: () = sub.each(items, |item, each| {
                     escaped = Some(item);
                     let _: () = each.then_with_output(&count_unit, item);
                 });
+                sub.output::<()>();
             });
             let sibling_local = escaped.expect("captured the formal item");
-            let () = flow.chain(move |sub| {
+            let () = flow.chain_output(move |sub| {
                 let _: () = sub.then_with_output(&count_unit, sibling_local);
+                sub.output::<()>();
             });
             flow.output_with(());
         },
@@ -1207,7 +1219,8 @@ fn p04_legal_deep_capture_inside_item_body_runs() {
             let _: () = flow.each(items, |item, each| {
                 each.chain(|sub| {
                     let scored = sub.then_with_output(&score_of, (item, rules));
-                    sub.then_with_output(&report_of, (item, scored))
+                    let out_refs = sub.then_with_output(&report_of, (item, scored));
+                    sub.output_with(out_refs);
                 });
             });
 
@@ -1881,10 +1894,12 @@ fn p08_collection_and_ancestors_are_imported_once_per_layer() {
             each.chain(|sub| {
                 let _: () = sub.then_with_output(&read_pair, (item, rules));
                 let _: () = sub.then_with_output(&read_marks, marks);
+                sub.output::<()>();
             });
             each.retry(0, |attempt| {
                 let _: () = attempt.then_with_output(&read_pair, (item, rules));
                 let _: () = attempt.then_with_output(&read_marks, marks);
+                attempt.output::<()>();
             });
             each.each(marks, |nested_item, nested| {
                 let _: () = nested.then_with_output(&read_pair, (nested_item, rules));

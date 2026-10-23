@@ -202,7 +202,7 @@ fn r01_witness_shape_executes_non_empty_and_stays_empty_for_empty_inputs() {
     let runtime = Runtime::new();
     let non_empty = block_on(runtime.execute::<_, Vec<Vec<Total>>, _>(
         |flow, groups: Ref<Vec<Vec<Item>>>| {
-            let out_refs = flow.each(groups, |group, outer| {
+            let out_refs: Ref<Vec<Vec<Total>>> = flow.each(groups, |group, outer| {
                 outer.each(group, |item, inner| inner.then_with_output(increment, item))
             });
             flow.output_with(out_refs);
@@ -295,10 +295,13 @@ fn r01_a_chain_child_body_can_use_the_item_backed_collection() {
     reset_observations();
     let collected = block_on(Runtime::new().execute::<_, Vec<Vec<Total>>, _>(
         |flow, groups: Ref<Vec<Vec<Item>>>| {
-            let out_refs = flow.each(groups, |group, outer| {
-                outer.chain(move |sub| {
-                    sub.each(group, |item, inner| inner.then_with_output(increment, item))
-                })
+            let out_refs: Ref<Vec<Vec<Total>>> = flow.each(groups, |group, outer| {
+                let group_refs: Ref<Vec<Total>> = outer.chain_output(move |sub| {
+                    let out_refs =
+                        sub.each(group, |item, inner| inner.then_with_output(increment, item));
+                    sub.output_with(out_refs);
+                });
+                group_refs
             });
             flow.output_with(out_refs);
         },

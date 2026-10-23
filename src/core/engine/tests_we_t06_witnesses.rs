@@ -23,6 +23,7 @@ use crate::core::engine::error::{BodyError, FrameworkDiagnostic, RunError};
 use crate::core::engine::observe;
 use crate::core::engine::runtime::{Runtime, install_root_cleanup_faults};
 use crate::core::engine::shape::Query;
+use crate::core::engine::shape::Ref;
 use crate::core::identity::{DataId, ExecutionIdentity, ScopeId};
 use crate::core::internal_error::ScopeError;
 use crate::core::ref_id::{RefId, RefIdAllocator, RefIdSource};
@@ -753,11 +754,12 @@ fn runtime_export_rejection(iter: bool, hop: u8) {
     } else {
         block_on(Runtime::new().execute::<_, (u32, u32), _>(
             |flow, input| {
-                let output = flow.retry(0, |attempt| {
-                    (
+                let output: (Ref<u32>, Ref<u32>) = flow.retry_output(0, |attempt| {
+                    let out_refs = (
                         attempt.then_with_output(plus, input),
                         attempt.then_with_output(plus, input),
-                    )
+                    );
+                    attempt.output_with(out_refs);
                 });
                 flow.then_with_output(later, output);
                 let out_refs = output;
@@ -1010,9 +1012,10 @@ fn distinct_budget_diagnostics(iter: bool) {
     } else {
         block_on(Runtime::new().execute::<_, u32, _>(
             |flow, (_unused, seed)| {
-                let out_refs = flow.retry(1, |attempt| {
+                let out_refs: Ref<u32> = flow.retry_output(1, |attempt| {
                     attempt.then_with_output(retry_now, seed);
-                    attempt.then_with_output(plus, seed)
+                    let out_refs = attempt.then_with_output(plus, seed);
+                    attempt.output_with(out_refs);
                 });
                 flow.output_with(out_refs);
             },

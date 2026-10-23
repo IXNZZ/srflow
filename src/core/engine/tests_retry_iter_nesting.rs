@@ -251,11 +251,12 @@ fn e24_retry_wrapping_iter_handles_break_at_the_inner_boundary() {
     let runtime = Runtime::new();
     let outcome = block_on(runtime.execute::<_, Context, _>(
         |flow: &mut crate::core::engine::flow::Flow<'_>, context: Ref<Context>| {
-            let out_refs = flow.retry(2, |attempt| {
-                attempt.iter(context, 5, |current, round| {
+            let out_refs: Ref<Context> = flow.retry_output(2, |attempt| {
+                let out_refs = attempt.iter(context, 5, |current, round| {
                     round.then_with_output(&judge_break_on_context, current);
                     round.then_with_output(&bump, current)
-                })
+                });
+                attempt.output_with(out_refs);
             });
             flow.output_with(out_refs);
         },
@@ -305,7 +306,8 @@ fn e24_iter_wrapping_retry_propagates_inner_exhaustion_as_terminal() {
             let out_refs = flow.iter(context, 5, |current, round| {
                 round.retry(1, |attempt| {
                     let candidate = attempt.then_with_output(&generate_from_context, current);
-                    attempt.then_with_output(&judge_always_retrying, candidate)
+                    let out_refs = attempt.then_with_output(&judge_always_retrying, candidate);
+                    attempt.output_with(out_refs);
                 });
                 round.then_with_output(&bump, current)
             });
@@ -377,13 +379,16 @@ fn e24_retry_chain_retry_inner_exhaustion_is_not_retried_by_outer() {
     let runtime = Runtime::new();
     let outcome = block_on(runtime.execute::<_, Report, _>(
         |flow: &mut crate::core::engine::flow::Flow<'_>, prompt: Ref<Prompt>| {
-            let out_refs = flow.retry(2, |attempt| {
-                attempt.chain(|sub| {
-                    sub.retry(1, |inner| {
+            let out_refs: Ref<Report> = flow.retry_output(2, |attempt| {
+                let t04_out_refs: Ref<Report> = attempt.chain_output(|sub| {
+                    let t04_out_refs: Ref<Report> = sub.retry_output(1, |inner| {
                         let candidate = inner.then_with_output(&generate, prompt);
-                        inner.then_with_output(&judge_always_retrying, candidate)
-                    })
-                })
+                        let out_refs = inner.then_with_output(&judge_always_retrying, candidate);
+                        inner.output_with(out_refs);
+                    });
+                    sub.output_with(t04_out_refs);
+                });
+                attempt.output_with(t04_out_refs);
             });
             flow.output_with(out_refs);
         },
@@ -452,11 +457,13 @@ fn e12_retry_does_not_capture_iter_break_across_chain() {
     let runtime = Runtime::new();
     let outcome = block_on(runtime.execute::<_, Report, _>(
         |flow: &mut crate::core::engine::flow::Flow<'_>, prompt: Ref<Prompt>| {
-            let out_refs = flow.retry(3, |attempt| {
-                attempt.chain(|sub| {
+            let out_refs: Ref<Report> = flow.retry_output(3, |attempt| {
+                let t04_out_refs: Ref<Report> = attempt.chain_output(|sub| {
                     let candidate = sub.then_with_output(&generate, prompt);
-                    sub.then_with_output(&breaking, candidate)
-                })
+                    let out_refs = sub.then_with_output(&breaking, candidate);
+                    sub.output_with(out_refs);
+                });
+                attempt.output_with(t04_out_refs);
             });
             flow.output_with(out_refs);
         },
@@ -491,11 +498,12 @@ fn e12_iter_break_crosses_choose_to_root() {
     let outcome = block_on(runtime.execute::<_, Report, _>(
         |flow: &mut crate::core::engine::flow::Flow<'_>, prompt: Ref<Prompt>| {
             let selector = flow.then_with_output(&to_selector, prompt);
-            let out_refs = flow.choose(selector, |choice| {
+            let out_refs: Ref<Report> = flow.choose(selector, |choice| {
                 choice.case(1u32, |branch| {
-                    branch.retry(2, |attempt| {
+                    branch.retry_output(2, |attempt| {
                         let candidate = attempt.then_with_output(&generate, prompt);
-                        attempt.then_with_output(&breaking, candidate)
+                        let out_refs = attempt.then_with_output(&breaking, candidate);
+                        attempt.output_with(out_refs);
                     })
                 });
             });
@@ -529,11 +537,12 @@ fn e25_budget_error_propagates_through_choose_as_terminal() {
     let outcome = block_on(runtime.execute::<_, Report, _>(
         |flow: &mut crate::core::engine::flow::Flow<'_>, prompt: Ref<Prompt>| {
             let selector = flow.then_with_output(&to_selector, prompt);
-            let out_refs = flow.choose(selector, |choice| {
+            let out_refs: Ref<Report> = flow.choose(selector, |choice| {
                 choice.case(1u32, |branch| {
-                    branch.retry(1, |inner| {
+                    branch.retry_output(1, |inner| {
                         let candidate = inner.then_with_output(&generate, prompt);
-                        inner.then_with_output(&judge_always_retrying, candidate)
+                        let out_refs = inner.then_with_output(&judge_always_retrying, candidate);
+                        inner.output_with(out_refs);
                     })
                 });
             });
@@ -587,9 +596,10 @@ fn e11_business_failure_does_not_drive_retry() {
     let runtime = Runtime::new();
     let outcome = block_on(runtime.execute::<_, Report, _>(
         |flow: &mut crate::core::engine::flow::Flow<'_>, prompt: Ref<Prompt>| {
-            let out_refs = flow.retry(3, |attempt| {
+            let out_refs: Ref<Report> = flow.retry_output(3, |attempt| {
                 let candidate = attempt.then_with_output(&generate, prompt);
-                attempt.then_with_output(&judge_failing, candidate)
+                let out_refs = attempt.then_with_output(&judge_failing, candidate);
+                attempt.output_with(out_refs);
             });
             flow.output_with(out_refs);
         },
@@ -625,11 +635,12 @@ fn e11_no_matching_case_does_not_drive_retry() {
     let runtime = Runtime::new();
     let outcome = block_on(runtime.execute::<_, Candidate, _>(
         |flow: &mut crate::core::engine::flow::Flow<'_>, prompt: Ref<Prompt>| {
-            let out_refs = flow.retry(2, |attempt| {
+            let out_refs: Ref<Candidate> = flow.retry_output(2, |attempt| {
                 let selector = attempt.then_with_output(&to_selector, prompt);
-                attempt.choose(selector, |choice| {
+                let out_refs = attempt.choose(selector, |choice| {
                     choice.case(9u32, |branch| branch.then_with_output(&generate, prompt));
-                })
+                });
+                attempt.output_with(out_refs);
             });
             flow.output_with(out_refs);
         },
@@ -661,10 +672,11 @@ fn e29_retry_nested_pending_cancel_releases_every_layer_once() {
     let runtime = Runtime::new();
     let mut future = Box::pin(runtime.execute::<_, Report, _>(
         |flow: &mut crate::core::engine::flow::Flow<'_>, seed: Ref<Seed>| {
-            let out_refs = flow.retry(3, |attempt| {
+            let out_refs: Ref<Report> = flow.retry_output(3, |attempt| {
                 let _temp = attempt.then_with_output(&track_temp, seed);
                 let pending = attempt.then_with_output(&pending_guard_node, seed);
-                attempt.then_with_output(&after_pending, pending)
+                let out_refs = attempt.then_with_output(&after_pending, pending);
+                attempt.output_with(out_refs);
             });
             flow.output_with(out_refs);
         },
@@ -783,9 +795,10 @@ fn e26_retry_exhaustion_with_cleanup_fault_becomes_runtime() {
     let outcome = block_on(runtime.execute::<_, Report, _>(
         |flow: &mut crate::core::engine::flow::Flow<'_>,
          (_filler, prompt): (Ref<Filler>, Ref<Prompt>)| {
-            let out_refs = flow.retry(1, |attempt| {
+            let out_refs: Ref<Report> = flow.retry_output(1, |attempt| {
                 let candidate = attempt.then_with_output(&generate, prompt);
-                attempt.then_with_output(&judge_always_retrying, candidate)
+                let out_refs = attempt.then_with_output(&judge_always_retrying, candidate);
+                attempt.output_with(out_refs);
             });
             flow.output_with(out_refs);
         },
@@ -939,12 +952,14 @@ fn e26_retry_exhaustion_keeps_first_cleanup_over_later_scopes() {
     let outcome = block_on(runtime.execute::<_, Report, _>(
         |flow: &mut crate::core::engine::flow::Flow<'_>,
          (_filler, prompt): (Ref<Filler>, Ref<Prompt>)| {
-            let out_refs = flow.chain(|sub| {
+            let out_refs: Ref<Report> = flow.chain_output(|sub| {
                 let _produced = sub.then_with_output(&generate, prompt);
-                sub.retry(1, |inner| {
+                let t04_out_refs: Ref<Report> = sub.retry_output(1, |inner| {
                     let candidate = inner.then_with_output(&generate, prompt);
-                    inner.then_with_output(&judge_always_retrying, candidate)
-                })
+                    let out_refs = inner.then_with_output(&judge_always_retrying, candidate);
+                    inner.output_with(out_refs);
+                });
+                sub.output_with(t04_out_refs);
             });
             flow.output_with(out_refs);
         },
@@ -1004,12 +1019,13 @@ fn e26_iter_limit_keeps_first_cleanup_over_later_scopes() {
     let outcome = block_on(runtime.execute::<_, Context, _>(
         |flow: &mut crate::core::engine::flow::Flow<'_>,
          (_filler, context): (Ref<Filler>, Ref<Context>)| {
-            let out_refs = flow.chain(|sub| {
+            let out_refs: Ref<Context> = flow.chain_output(|sub| {
                 let _produced = sub.then_with_output(&bump, context);
-                sub.iter(context, 2, |current, round| {
+                let out_refs = sub.iter(context, 2, |current, round| {
                     round.then_with_output(&judge_continue, current);
                     round.then_with_output(&bump, current)
-                })
+                });
+                sub.output_with(out_refs);
             });
             flow.output_with(out_refs);
         },
@@ -1067,11 +1083,13 @@ fn e27c_chain_control_cleanup_fault_keeps_first_diagnostic() {
     let runtime = Runtime::new();
     let outcome = block_on(runtime.execute::<_, Report, _>(
         |flow: &mut crate::core::engine::flow::Flow<'_>, prompt: Ref<Prompt>| {
-            let out_refs = flow.retry(3, |attempt| {
-                attempt.chain(|sub| {
+            let out_refs: Ref<Report> = flow.retry_output(3, |attempt| {
+                let t04_out_refs: Ref<Report> = attempt.chain_output(|sub| {
                     let candidate = sub.then_with_output(&generate, prompt);
-                    sub.then_with_output(&breaking, candidate)
-                })
+                    let out_refs = sub.then_with_output(&breaking, candidate);
+                    sub.output_with(out_refs);
+                });
+                attempt.output_with(t04_out_refs);
             });
             flow.output_with(out_refs);
         },

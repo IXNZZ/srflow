@@ -63,6 +63,8 @@ mod tests_v22_t02_repeat;
 #[cfg(test)]
 mod tests_v22_t03;
 #[cfg(test)]
+mod tests_v22_t04;
+#[cfg(test)]
 mod tests_we_t06_arity;
 #[cfg(test)]
 mod tests_we_t06_root_preflight;

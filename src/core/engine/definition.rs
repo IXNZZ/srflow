@@ -101,6 +101,11 @@ pub(crate) struct Declaration {
     pub(crate) first_failure: Option<BuildErrorDetail>,
     /// 该失败是否已经写入 errors（派生失败可能延后到 finish）。
     pub(crate) failure_recorded: bool,
+    /// 成功声明之后是否又记录了该 Body 的声明失败（重复/非法后续声明）。
+    ///
+    /// 收口时据此隔离该 Body 派生的全部父输出（槽位对齐但保持失效），
+    /// 同时保留第一份声明快照与错误首因。
+    pub(crate) failed: bool,
 }
 
 impl Declaration {
@@ -1450,6 +1455,14 @@ impl<'n> Builder<'n> {
                 first: first_kind,
                 second: kind,
             });
+            // 保留第一份声明快照，但把该 Body 标记为声明已失败：收口不得据此发布合法来源。
+            let existing = &mut self.bodies[body.index()];
+            let declaration = if existing.output.attempted {
+                &mut existing.output
+            } else {
+                &mut existing.next
+            };
+            declaration.failed = true;
             return false;
         }
         if (role == BodyRole::Ordinary && kind == DeclarationKind::Next)
@@ -1675,25 +1688,52 @@ impl<'n> Builder<'n> {
         ))
     }
 
-    /// 同步构建 child Body，登记其声明输出并返回 parent 可见的新 Ref。
+    /// 读取 child 已有的 Output 声明：返回（冻结槽位、是否可作为合法来源、声明时点）。
+    ///
+    /// 不补声明、不改声明 order、不重新 resolve；`expected` 为 `Some` 时在此核对期望 Shape，
+    /// 不符记录 Definition 诊断并使收口失败。child 自身声明已失败（首因已记录）时不叠加
+    /// 二次 MissingDeclaration／Shape 诊断。
+    fn consume_child_output(
+        &mut self,
+        child: BodyId,
+        expected: Option<&[TypeDesc]>,
+    ) -> (Vec<PositionDesc>, bool, u64) {
+        let declaration = self.bodies[child.index()].output.clone();
+        let mut ok = declaration.declared && !declaration.failed;
+        if let Some(expected) = expected {
+            if declaration.state() == DeclarationState::Failed {
+                ok = false;
+            } else if let Some(error) = self.validate_output_expectation(child, expected) {
+                self.errors.push(error);
+                ok = false;
+            }
+        }
+        (declaration.slots, ok, declaration.order)
+    }
+
+    /// 消费 child 已有的 Output 声明并登记 Chain Step（不补声明、不改声明 order）。
     ///
     /// 每个 parent 输出槽分配一个 child 本地唯一声明出口与一个 parent 位置；出口在
     /// 运行时 alias 到该槽来源的实际 target，再由整组 Export 交给 parent。
+    /// 返回（parent 输出槽，收口形状是否成立）。
     pub(crate) fn register_chain_outputs(
         &mut self,
         parent: BodyId,
         child: BodyId,
-        slots: Vec<PositionDesc>,
-    ) -> Vec<PositionHandle> {
+        expected: Option<&[TypeDesc]>,
+    ) -> (Vec<PositionHandle>, bool) {
+        let (slots, declared, declare_order) = self.consume_child_output(child, expected);
         let order = self.next_order();
-        let declared = self.declare_output(child, slots.clone(), order);
         let step_index = self.bodies[parent.index()].steps.len();
         let mut exits: Vec<PositionId> = Vec::new();
         let mut bindings = Vec::with_capacity(slots.len());
         let mut chain_slots = Vec::with_capacity(slots.len());
         let mut outputs = Vec::with_capacity(slots.len());
         for (slot, desc) in slots.into_iter().enumerate() {
-            let source_ok = declared && self.availability_error(child, None, desc, order).is_none();
+            let source_ok = declared
+                && self
+                    .availability_error(child, None, desc, declare_order)
+                    .is_none();
             let owner = self.position(desc.handle).map(|record| record.owner);
             let binding = if source_ok {
                 match owner {
@@ -1770,7 +1810,7 @@ impl<'n> Builder<'n> {
             outputs: outputs.iter().map(|handle| handle.position).collect(),
             order,
         }));
-        outputs
+        (outputs, declared)
     }
 
     /// 当前 Body 已登记的 Step 数；Choose 的槽位归属与顺序分配用它。
@@ -1941,17 +1981,18 @@ impl<'n> Builder<'n> {
         self.bodies[parent.index()].steps.push(Box::new(step));
     }
 
-    /// 登记 Retry Step：attempt Body 的声明输出、预算校验与 parent 输出槽。
+    /// 消费 attempt Body 已有的 Output 声明并登记 Retry Step（不补声明、不改声明 order）。
     ///
     /// 输出来源规则与 Chain 一致：attempt 自身产生的位置成为该槽来源；祖先位置按只读
     /// alias 处理并记录逐层 Import；无法解析的声明保持槽位对齐，由统一验证给出诊断。
+    /// 返回（parent 输出槽，收口形状是否成立）。
     pub(crate) fn register_retry(
         &mut self,
         parent: BodyId,
         child: BodyId,
-        declared: Vec<PositionDesc>,
         max_retries: usize,
-    ) -> Vec<PositionHandle> {
+        expected: Option<&[TypeDesc]>,
+    ) -> (Vec<PositionHandle>, bool) {
         let order = self.next_order();
         let step = self.bodies[parent.index()].steps.len();
         if max_retries == usize::MAX {
@@ -1961,13 +2002,15 @@ impl<'n> Builder<'n> {
                     step: Some(step),
                 });
         }
-        let declared_ok = self.declare_output(child, declared.clone(), order);
+        let (declared, declared_ok, declare_order) = self.consume_child_output(child, expected);
         let mut slots = Vec::with_capacity(declared.len());
         let mut outputs = Vec::with_capacity(declared.len());
         let mut bridges = Vec::with_capacity(declared.len());
         for (slot, desc) in declared.into_iter().enumerate() {
-            let source_ok =
-                declared_ok && self.availability_error(child, None, desc, order).is_none();
+            let source_ok = declared_ok
+                && self
+                    .availability_error(child, None, desc, declare_order)
+                    .is_none();
             let mut source = if source_ok {
                 self.position(desc.handle).map(|record| record.core.clone())
             } else {
@@ -2029,7 +2072,7 @@ impl<'n> Builder<'n> {
             outputs: outputs.iter().map(|handle| handle.position).collect(),
             order,
         }));
-        outputs
+        (outputs, declared_ok)
     }
 
     /// 为 Iter Step 分配 formal current 位置：每槽一个固定逻辑身份，owner 是 round Body。
@@ -2380,11 +2423,23 @@ impl<'n> Builder<'n> {
     /// 核对 Root 输出与预期的 owned Shape。
     fn validate_root_output(&self, root: BodyId) -> Option<BuildErrorDetail> {
         let expected = self.root_expectation.as_ref()?;
-        let output = &self.bodies[root.index()].output;
+        self.validate_output_expectation(root, expected)
+    }
+
+    /// 按期望 Shape 核对某 Body 的 Output 声明；Root 与 child `_output` 共用同一判据。
+    ///
+    /// 期望为空（`O = ()`）时只拒绝"已成功声明非空槽"；期望非空时要求已成功声明、arity
+    /// 与逐槽类型全部相符。未声明／失败状态是否叠加诊断由调用方决定（child 收口保留首因）。
+    fn validate_output_expectation(
+        &self,
+        body: BodyId,
+        expected: &[TypeDesc],
+    ) -> Option<BuildErrorDetail> {
+        let output = &self.bodies[body.index()].output;
         if expected.is_empty() {
             if output.attempted && output.declared && !output.slots.is_empty() {
                 return Some(BuildErrorDetail::DeclarationArityMismatch {
-                    body: root,
+                    body,
                     kind: DeclarationKind::Output,
                     slot: 0,
                     expected: 0,
@@ -2395,13 +2450,13 @@ impl<'n> Builder<'n> {
         }
         if !output.attempted || !output.declared {
             return Some(BuildErrorDetail::MissingDeclaration {
-                body: root,
+                body,
                 kind: DeclarationKind::Output,
             });
         }
         if output.slots.len() != expected.len() {
             return Some(BuildErrorDetail::DeclarationArityMismatch {
-                body: root,
+                body,
                 kind: DeclarationKind::Output,
                 slot: 0,
                 expected: expected.len() as u16,
@@ -2411,7 +2466,7 @@ impl<'n> Builder<'n> {
         for (slot, (expected, desc)) in expected.iter().zip(output.slots.iter()).enumerate() {
             if *expected != desc.type_desc {
                 return Some(BuildErrorDetail::DeclarationShapeMismatch {
-                    body: root,
+                    body,
                     kind: DeclarationKind::Output,
                     slot: slot as u16,
                     expected: *expected,

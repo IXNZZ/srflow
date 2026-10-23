@@ -385,19 +385,23 @@ impl Node for Combo {
 fn step_fragment<'n>(
     node: &'n CountingStep,
     input: Ref<Amount>,
-) -> impl FnOnce(&mut Flow<'n>) -> Ref<Amount> + 'n {
-    move |sub| sub.then_with_output(node, input)
+) -> impl FnOnce(&mut Flow<'n>) + 'n {
+    move |sub| {
+        let out_refs = sub.then_with_output(node, input);
+        sub.output_with(out_refs);
+    }
 }
 
 /// Fragment：child 内同时产生一个非声明输出的 owned 值（由 child 边界清理）。
 fn temp_step_fragment<'n>(
     node: &'n CountingStep,
     seed: Ref<Seed>,
-) -> impl FnOnce(&mut Flow<'n>) -> Ref<Amount> + 'n {
+) -> impl FnOnce(&mut Flow<'n>) + 'n {
     move |sub| {
         let _temp = sub.then_with_output(track_temp, seed);
         let produced = sub.then_with_output(seed_reader, seed);
-        sub.then_with_output(node, produced)
+        let out_refs = sub.then_with_output(node, produced);
+        sub.output_with(out_refs);
     }
 }
 
@@ -826,8 +830,11 @@ fn s03_fragment_factory_and_flow_receiving_function() {
     let (first, second) = block_on(runtime.execute::<_, (Amount, Amount), _>(
         |flow, amount| {
             let doubled = flow.then_with_output(double, amount);
-            let first = flow.chain(step_fragment(&node, doubled));
-            let second = flow.chain(|sub| call_in_body(sub, &node, first));
+            let first: Ref<Amount> = flow.chain_output(step_fragment(&node, doubled));
+            let second: Ref<Amount> = flow.chain_output(|sub| {
+                let out_refs = call_in_body(sub, &node, first);
+                sub.output_with(out_refs);
+            });
             let out_refs = (first, second);
             flow.output_with(out_refs);
         },
@@ -849,12 +856,14 @@ fn s03_deep_capture_imports_ancestor_and_cleans_non_output_owned() {
     let runtime = Runtime::new();
     let output = block_on(runtime.execute::<_, Amount, _>(
         |flow, seed| {
-            let exported = flow.chain(|outer| {
-                outer.chain(|inner| {
+            let exported: Ref<Amount> = flow.chain_output(|outer| {
+                let inner_refs: Ref<Amount> = outer.chain_output(|inner| {
                     // 深层 capture：inner 直接引用 Root 的 seed（跨两层边界真实 Import）。
                     let _temp = inner.then_with_output(track_temp, seed);
-                    inner.then_with_output(seed_reader, seed) // 声明输出：真实 Export 给 parent
-                })
+                    let declared = inner.then_with_output(seed_reader, seed);
+                    inner.output_with(declared);
+                });
+                outer.output_with(inner_refs);
             });
             let _: () = flow.then_with_output(journal_note, seed);
             let out_refs = exported;
@@ -887,10 +896,11 @@ fn s03_child_local_ref_is_not_visible_in_the_parent() {
     let mut exported: Option<Ref<Amount>> = None;
     let output = block_on(runtime.execute::<_, Amount, _>(
         |flow, amount| {
-            let out = flow.chain(|sub| {
+            let out = flow.chain_output(|sub| {
                 let produced = sub.then_with_output(plus_one, amount);
                 child_local = Some(produced);
-                produced
+                let out_refs = produced;
+                sub.output_with(out_refs);
             });
             exported = Some(out);
             let out_refs = flow.then_with_output(plus_one, out);
@@ -921,10 +931,11 @@ fn s03_child_local_ref_is_not_visible_in_the_parent() {
     let mut leaked: Option<Ref<Amount>> = None;
     let error = block_on(runtime.execute::<_, (), _>(
         |flow, amount| {
-            let _kept = flow.chain(|sub| {
+            let _kept: Ref<Amount> = flow.chain_output(|sub| {
                 let produced = sub.then_with_output(counted_parent, amount);
                 leaked = Some(produced);
-                produced
+                let out_refs = produced;
+                sub.output_with(out_refs);
             });
             let child_local = leaked.expect("leaked child ref");
             let _leak_use = flow.then_with_output(counted_parent, child_local);
@@ -958,8 +969,8 @@ fn s03_fragment_reuse_builds_a_fresh_child_boundary_per_use() {
     let runtime = Runtime::new();
     let (left, right) = block_on(runtime.execute::<_, (Amount, Amount), _>(
         |flow, seed| {
-            let left = flow.chain(temp_step_fragment(&node, seed));
-            let right = flow.chain(temp_step_fragment(&node, seed));
+            let left: Ref<Amount> = flow.chain_output(temp_step_fragment(&node, seed));
+            let right: Ref<Amount> = flow.chain_output(temp_step_fragment(&node, seed));
             let out_refs = (left, right);
             flow.output_with(out_refs);
         },
@@ -982,6 +993,15 @@ fn s03_fragment_reuse_builds_a_fresh_child_boundary_per_use() {
     );
 }
 
+/// 六操作映射 Body 的输出形状（避免匿名长 tuple 触发 `clippy::type_complexity`）。
+type SixOperationOutputs = (
+    Ref<Vec<Score>>,
+    Ref<Amount>,
+    Ref<Amount>,
+    Ref<Report>,
+    Ref<Amount>,
+);
+
 /// S03 正例：同一个 child Body 内映射全六类操作（then／chain／each／choose／retry／iter）。
 #[test]
 fn s03_chain_body_maps_all_six_operations() {
@@ -991,13 +1011,15 @@ fn s03_chain_body_maps_all_six_operations() {
         block_on(
             runtime.execute::<_, (Vec<Score>, Amount, Amount, Report, Amount), _>(
                 |flow, seed| {
-                    let out_refs = flow.chain(|sub| {
+                    let out_refs: SixOperationOutputs = flow.chain_output(|sub| {
                         let items = sub.then_with_output(items_of, seed);
                         let scores =
                             sub.each(items, |item, each| each.then_with_output(score_of, item));
                         let amount = sub.then_with_output(amount_of, seed);
-                        let nested =
-                            sub.chain(|inner| inner.then_with_output(double_amount, amount));
+                        let nested: Ref<Amount> = sub.chain_output(|inner| {
+                            let out_refs = inner.then_with_output(double_amount, amount);
+                            inner.output_with(out_refs);
+                        });
                         let route = sub.then_with_output(route_of, seed);
                         let picked = sub.choose(route, |choice| {
                             choice.case(Route { code: 1 }, |branch| {
@@ -1005,16 +1027,18 @@ fn s03_chain_body_maps_all_six_operations() {
                             });
                             choice.otherwise(|branch| branch.then_with_output(identity, amount));
                         });
-                        let report = sub.retry(1, |attempt| {
+                        let report: Ref<Report> = sub.retry_output(1, |attempt| {
                             let candidate = attempt.then_with_output(amount_of, seed);
-                            attempt.then_with_output(judge_retry_once, candidate)
+                            let out_refs = attempt.then_with_output(judge_retry_once, candidate);
+                            attempt.output_with(out_refs);
                         });
                         let zero = sub.then_with_output(zero_amount, seed);
                         let state = sub.iter(zero, 4, |current, round| {
                             let _judged = round.then_with_output(judge_break, current);
                             round.then_with_output(bump_amount, current)
                         });
-                        (scores, picked, nested, report, state)
+                        let t04_out_refs = (scores, picked, nested, report, state);
+                        sub.output_with(t04_out_refs);
                     });
                     flow.output_with(out_refs);
                 },

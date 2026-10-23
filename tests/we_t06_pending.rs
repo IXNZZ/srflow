@@ -313,9 +313,10 @@ async fn judge(query: Query<&Candidate>) -> Result<Verdict, BodyError> {
 
 /// Retry Definition：预算 4 次机会，第三个 attempt 成功交付 `(Verdict, Candidate)`。
 fn retry_definition<'n>(flow: &mut Flow<'n>, prompt: Ref<Prompt>) {
-    let out_refs = flow.retry(4, |attempt| {
+    let out_refs: (Ref<Verdict>, Ref<Candidate>) = flow.retry_output(4, |attempt| {
         let candidate = attempt.then_with_output(&generate, prompt);
-        (attempt.then_with_output(&judge, candidate), candidate)
+        let out_refs = (attempt.then_with_output(&judge, candidate), candidate);
+        attempt.output_with(out_refs);
     });
     flow.output_with(out_refs);
 }

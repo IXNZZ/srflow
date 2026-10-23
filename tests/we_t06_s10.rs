@@ -355,9 +355,11 @@ async fn scheme_a(runtime: &Runtime, nodes: &Nodes, input: SesInput) -> Result<P
             |flow: &mut Flow<'_>, (characters, facts, task, boundary)| {
                 let basis =
                     flow.then_with_output(&nodes.basis, (characters, facts, task, boundary));
-                let draft = flow.chain(|writing| {
+                let draft = flow.chain_output(|writing| {
                     let plan = writing.then_with_output(make_plan, (characters, facts, task));
-                    writing.then_with_output(&nodes.write, (plan, characters, facts, boundary))
+                    let out_refs =
+                        writing.then_with_output(&nodes.write, (plan, characters, facts, boundary));
+                    writing.output_with(out_refs);
                 });
                 let diagnosis = flow.then_with_output(&nodes.diagnose, (draft, basis));
                 let out_refs = flow.then_with_output(&nodes.revise, (draft, diagnosis, boundary));
@@ -382,9 +384,11 @@ async fn scheme_b(
             |flow: &mut Flow<'_>, (characters, facts, task, boundary)| {
                 let basis =
                     flow.then_with_output(&nodes.basis, (characters, facts, task, boundary));
-                let draft = flow.chain(|writing| {
+                let draft = flow.chain_output(|writing| {
                     let plan = writing.then_with_output(make_plan, (characters, facts, task));
-                    writing.then_with_output(&nodes.write, (plan, characters, facts, boundary))
+                    let out_refs =
+                        writing.then_with_output(&nodes.write, (plan, characters, facts, boundary));
+                    writing.output_with(out_refs);
                 });
                 let out_refs = flow.iter(draft, limit, |current, round| {
                     let diagnosis = round.then_with_output(&nodes.diagnose, (current, basis));

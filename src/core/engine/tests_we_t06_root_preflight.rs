@@ -48,6 +48,7 @@ use crate::core::engine::runtime::{
     Runtime, install_root_cleanup_faults, install_root_input_prebind_fault,
 };
 use crate::core::engine::shape::Query;
+use crate::core::engine::shape::Ref;
 use crate::core::identity::{DataId, DataIdAllocator, ExecutionIdentity, ScopeId};
 use crate::core::internal_error::{InternalError, ScopeError};
 use crate::core::ref_id::{RefIdAllocator, RefIdSource};
@@ -206,9 +207,10 @@ async fn increment(q: Query<&u32>) -> Result<u32, BodyError> {
 fn run_root_late_duplicate() -> RunError {
     block_on(Runtime::new().execute::<_, (u32, u32), _>(
         |flow, (_unused, live)| {
-            let out_refs = flow.chain(|sub| {
+            let out_refs: (Ref<u32>, Ref<u32>) = flow.chain_output(|sub| {
                 let produced = sub.then_with_output(increment, live);
-                (produced, produced)
+                let out_refs = (produced, produced);
+                sub.output_with(out_refs);
             });
             flow.output_with(out_refs);
         },
@@ -643,9 +645,10 @@ fn r01_chain_export_group_rejects_alias_plus_new_owned_without_partial_binding()
 
     let error = block_on(Runtime::new().execute::<_, (u32, u32), _>(
         |flow, seed| {
-            let out_refs = flow.chain(|sub| {
+            let out_refs: (Ref<u32>, Ref<u32>) = flow.chain_output(|sub| {
                 let produced = sub.then_with_output(bump, seed);
-                (seed, produced)
+                let out_refs = (seed, produced);
+                sub.output_with(out_refs);
             });
             flow.output_with(out_refs);
         },

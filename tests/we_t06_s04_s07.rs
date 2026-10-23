@@ -931,11 +931,12 @@ fn s06_retry_restarts_full_attempt_and_cleans_before_the_next() {
     let runtime = Runtime::new();
     let (verdict, tracked) = block_on(runtime.execute::<_, (Verdict, Tracked), _>(
         |flow: &mut Flow<'_>, prompt: Ref<Prompt>| {
-            let out_refs = flow.retry(3, |attempt| {
+            let out_refs: (Ref<Verdict>, Ref<Tracked>) = flow.retry_output(3, |attempt| {
                 let tracked = attempt.then_with_output(&track, prompt);
                 let candidate = attempt.then_with_output(&generate, prompt);
                 let verdict = attempt.then_with_output(&judge_retrying, candidate);
-                (verdict, tracked)
+                let out_refs = (verdict, tracked);
+                attempt.output_with(out_refs);
             });
             flow.output_with(out_refs);
         },
@@ -992,9 +993,10 @@ fn s06_budget_boundaries_zero_n_and_max() {
     ATTEMPT.with(|counter| counter.set(0));
     let error = block_on(runtime.execute::<_, Verdict, _>(
         |flow: &mut Flow<'_>, prompt: Ref<Prompt>| {
-            let out_refs = flow.retry(0, |attempt| {
+            let out_refs: Ref<Verdict> = flow.retry_output(0, |attempt| {
                 let candidate = attempt.then_with_output(&generate, prompt);
-                attempt.then_with_output(&judge_always_retrying, candidate)
+                let out_refs = attempt.then_with_output(&judge_always_retrying, candidate);
+                attempt.output_with(out_refs);
             });
             flow.output_with(out_refs);
         },
@@ -1029,9 +1031,10 @@ fn s06_budget_boundaries_zero_n_and_max() {
     ATTEMPT.with(|counter| counter.set(0));
     let error = block_on(runtime.execute::<_, Verdict, _>(
         |flow: &mut Flow<'_>, prompt: Ref<Prompt>| {
-            let out_refs = flow.retry(1, |attempt| {
+            let out_refs: Ref<Verdict> = flow.retry_output(1, |attempt| {
                 let candidate = attempt.then_with_output(&generate, prompt);
-                attempt.then_with_output(&judge_always_retrying, candidate)
+                let out_refs = attempt.then_with_output(&judge_always_retrying, candidate);
+                attempt.output_with(out_refs);
             });
             flow.output_with(out_refs);
         },
@@ -1054,8 +1057,9 @@ fn s06_budget_boundaries_zero_n_and_max() {
     ATTEMPT.with(|counter| counter.set(0));
     let error = block_on(runtime.execute::<_, Candidate, _>(
         |flow: &mut Flow<'_>, prompt: Ref<Prompt>| {
-            let out_refs = flow.retry(usize::MAX, |attempt| {
-                attempt.then_with_output(&generate, prompt)
+            let out_refs: Ref<Candidate> = flow.retry_output(usize::MAX, |attempt| {
+                let out_refs = attempt.then_with_output(&generate, prompt);
+                attempt.output_with(out_refs);
             });
             flow.output_with(out_refs);
         },
@@ -1073,8 +1077,9 @@ fn s06_budget_boundaries_zero_n_and_max() {
     ATTEMPT.with(|counter| counter.set(0));
     let verdict = block_on(runtime.execute::<_, Candidate, _>(
         |flow: &mut Flow<'_>, prompt: Ref<Prompt>| {
-            let out_refs = flow.retry(usize::MAX - 1, |attempt| {
-                attempt.then_with_output(&generate, prompt)
+            let out_refs: Ref<Candidate> = flow.retry_output(usize::MAX - 1, |attempt| {
+                let out_refs = attempt.then_with_output(&generate, prompt);
+                attempt.output_with(out_refs);
             });
             flow.output_with(out_refs);
         },
@@ -1094,9 +1099,10 @@ fn s06_only_retry_is_captured_failure_and_exhaustion_are_terminal() {
     ATTEMPT.with(|counter| counter.set(0));
     let error = block_on(runtime.execute::<_, Verdict, _>(
         |flow: &mut Flow<'_>, prompt: Ref<Prompt>| {
-            let out_refs = flow.retry(3, |attempt| {
+            let out_refs: Ref<Verdict> = flow.retry_output(3, |attempt| {
                 let candidate = attempt.then_with_output(&generate, prompt);
-                attempt.then_with_output(&judge_failing, candidate)
+                let out_refs = attempt.then_with_output(&judge_failing, candidate);
+                attempt.output_with(out_refs);
             });
             flow.output_with(out_refs);
         },
@@ -1121,10 +1127,11 @@ fn s06_only_retry_is_captured_failure_and_exhaustion_are_terminal() {
     ATTEMPT.with(|counter| counter.set(0));
     let error = block_on(runtime.execute::<_, Candidate, _>(
         |flow: &mut Flow<'_>, prompt: Ref<Prompt>| {
-            let out_refs = flow.retry(3, |attempt| {
+            let out_refs: Ref<Candidate> = flow.retry_output(3, |attempt| {
                 let candidate = attempt.then_with_output(&generate, prompt);
                 let _ = attempt.then_with_output(&judge_break, candidate);
-                candidate
+                let out_refs = candidate;
+                attempt.output_with(out_refs);
             });
             flow.output_with(out_refs);
         },
@@ -1147,9 +1154,10 @@ fn s06_only_retry_is_captured_failure_and_exhaustion_are_terminal() {
     ATTEMPT.with(|counter| counter.set(0));
     let error = block_on(runtime.execute::<_, Verdict, _>(
         |flow: &mut Flow<'_>, prompt: Ref<Prompt>| {
-            let out_refs = flow.retry(2, |attempt| {
+            let out_refs: Ref<Verdict> = flow.retry_output(2, |attempt| {
                 let candidate = attempt.then_with_output(&generate, prompt);
-                attempt.then_with_output(&judge_always_retrying, candidate)
+                let out_refs = attempt.then_with_output(&judge_always_retrying, candidate);
+                attempt.output_with(out_refs);
             });
             flow.output_with(out_refs);
         },

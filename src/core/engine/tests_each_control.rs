@@ -303,7 +303,7 @@ fn p29_control_partial_success_exits_item_then_each() {
     let runtime = Runtime::new();
     let outcome = block_on(runtime.execute::<_, Vec<Score>, _>(
         |flow, items: Ref<Vec<Item>>| {
-            let out_refs = flow.each(items, |item, each| {
+            let out_refs: Ref<Vec<Score>> = flow.each(items, |item, each| {
                 let score = each.then_with_output(&score_of_item, item);
                 each.then_with_output(&break_on_thirty, score)
             });
@@ -723,17 +723,20 @@ fn p31_retry_restarts_the_whole_each_attempt() {
     let runtime = Runtime::new();
     let outcome = block_on(runtime.execute::<_, Context, _>(
         |flow, (items, context): (Ref<Vec<Item>>, Ref<Context>)| {
-            let out_refs = flow.retry(1, |attempt| {
+            let out_refs: Ref<Context> = flow.retry_output(1, |attempt| {
                 let current = attempt.iter(context, 2, |current, round| {
                     round.then_with_output(&break_at_one, current)
                 });
-                let _scores = attempt.each(items, |item, each| {
-                    each.chain(|sub| {
+                let _scores: Ref<Vec<Score>> = attempt.each(items, |item, each| {
+                    let item_refs: Ref<Score> = each.chain_output(|sub| {
                         let score = sub.then_with_output(&score_of_item, item);
-                        sub.then_with_output(&retry_on_thirty, score)
-                    })
+                        let out_refs = sub.then_with_output(&retry_on_thirty, score);
+                        sub.output_with(out_refs);
+                    });
+                    item_refs
                 });
-                current
+                let t04_out_refs = current;
+                attempt.output_with(t04_out_refs);
             });
             flow.output_with(out_refs);
         },
@@ -993,11 +996,13 @@ fn p32c_budget_exhaustion_is_terminal_inside_the_each() {
     let runtime = Runtime::new();
     let outcome = block_on(runtime.execute::<_, Vec<Score>, _>(
         |flow, items: Ref<Vec<Item>>| {
-            let out_refs = flow.each(items, |item, each| {
-                each.retry(1, |attempt| {
+            let out_refs: Ref<Vec<Score>> = flow.each(items, |item, each| {
+                let item_refs: Ref<Score> = each.retry_output(1, |attempt| {
                     let candidate = attempt.then_with_output(&candidate_of_item, item);
-                    attempt.then_with_output(&always_retry, candidate)
-                })
+                    let out_refs = attempt.then_with_output(&always_retry, candidate);
+                    attempt.output_with(out_refs);
+                });
+                item_refs
             });
             flow.output_with(out_refs);
         },
@@ -1750,7 +1755,10 @@ fn p36a_foreign_domain_accesses_are_typed_rejections() {
     let runtime = Runtime::new();
     let second = block_on(runtime.execute::<_, Amount, _>(
         |flow, amount: Ref<Amount>| {
-            let out_refs = flow.chain(|sub| sub.then_with_output(&double_amount, amount));
+            let out_refs: Ref<Amount> = flow.chain_output(|sub| {
+                let out_refs = sub.then_with_output(&double_amount, amount);
+                sub.output_with(out_refs);
+            });
             flow.output_with(out_refs);
         },
         Amount(5),

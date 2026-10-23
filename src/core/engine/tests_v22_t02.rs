@@ -654,6 +654,7 @@ fn b02_chain_and_sequence_stay_in_the_same_body() {
     // chain 的 child 独立；chain 之后继续登记 parent。
     flow.chain(|sub| {
         sub.then(record_unit);
+        sub.output::<()>();
     });
     flow.then(double);
     let root_steps = builder.borrow().body(root).steps().len();
@@ -744,7 +745,7 @@ fn b04_multi_level_auto_imports_are_recorded_and_deduplicated() {
             // 同一祖先来源在 leaf 中使用两次：每层只保留去重后的 Import。
             leaf.then(add_one);
             leaf.then(add_one);
-            ()
+            leaf.output::<()>();
         });
         ()
     });
@@ -780,7 +781,7 @@ fn b04_multi_level_auto_imports_are_recorded_and_deduplicated() {
         sub.chain(|leaf| {
             leaf.then_with(add_one, explicit);
             leaf.then_with(add_one, explicit);
-            ()
+            leaf.output::<()>();
         });
         ()
     });
@@ -813,7 +814,7 @@ fn b04_unexported_child_and_tainted_sources_are_not_candidates() {
     let mut flow = open_flow(&builder, root);
     flow.chain(|sub| {
         sub.then(amount_from_plain);
-        ()
+        sub.output::<()>();
     });
     flow.then(add_one);
     drop(flow);

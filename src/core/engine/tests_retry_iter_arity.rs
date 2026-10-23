@@ -88,7 +88,10 @@ macro_rules! retry_arity_case {
             let outcome = block_on(runtime.execute::<_, ($($t,)+), _>(
                 |flow: &mut Flow<'_>, refs| {
                     let ($($slot,)+) = refs;
-                    let out_refs = flow.retry(1, |attempt| ($(attempt.then_with_output(bump::<$t>, $slot),)+));
+                    let out_refs: ($(Ref<$t>,)+) = flow.retry_output(1, |attempt|{
+                        let out_refs = ($(attempt.then_with_output(bump::<$t>, $slot),)+);
+                        attempt.output_with(out_refs);
+                    });
                     flow.output_with(out_refs);
                 },
                 ($(<$t as AritySlot>::BOOT,)+),
@@ -109,8 +112,9 @@ fn retry_unit_output_delivers_success_without_slots() {
     let runtime = Runtime::new();
     let outcome = block_on(runtime.execute::<_, (), _>(
         |flow: &mut Flow<'_>, value: Ref<u32>| {
-            let () = flow.retry(1, |attempt| {
+            let () = flow.retry_output(1, |attempt| {
                 let _: () = attempt.then_with_output(&consume_u32, value);
+                attempt.output::<()>();
             });
             flow.output_with(());
         },
@@ -125,7 +129,10 @@ fn retry_single_ref_output_delivers_the_bumped_value() {
     let runtime = Runtime::new();
     let outcome = block_on(runtime.execute::<_, u32, _>(
         |flow: &mut Flow<'_>, value: Ref<u32>| {
-            let out_refs = flow.retry(1, |attempt| attempt.then_with_output(bump::<u32>, value));
+            let out_refs: Ref<u32> = flow.retry_output(1, |attempt| {
+                let out_refs = attempt.then_with_output(bump::<u32>, value);
+                attempt.output_with(out_refs);
+            });
             flow.output_with(out_refs);
         },
         41u32,
@@ -535,9 +542,10 @@ fn retry_boxed_tuple_is_a_single_data_leaf() {
     let runtime = Runtime::new();
     let outcome = block_on(runtime.execute::<_, u32, _>(
         |flow: &mut Flow<'_>, _unit: ()| {
-            let out_refs = flow.retry(1, |attempt| {
+            let out_refs: Ref<u32> = flow.retry_output(1, |attempt| {
                 let pair = attempt.then_with_output(&boxed_pair, ());
-                attempt.then_with_output(&sum_boxed, pair)
+                let out_refs = attempt.then_with_output(&sum_boxed, pair);
+                attempt.output_with(out_refs);
             });
             flow.output_with(out_refs);
         },

@@ -832,12 +832,18 @@ fn p14_child_chain_choose_and_retry_results_are_collectible() {
     let outcome = block_on(runtime.execute::<_, (Vec<Out>, Vec<Out>, Vec<Out>), _>(
         |flow: &mut Flow<'_>, items: Ref<Vec<Item>>| {
             let out_refs = flow.each(items, |item, sub| {
-                let chained = sub.chain(|inner| inner.then_with_output(score, item));
+                let chained: Ref<Out> = sub.chain_output(|inner| {
+                    let out_refs = inner.then_with_output(score, item);
+                    inner.output_with(out_refs);
+                });
                 let chosen = sub.choose(item, |choice| {
                     choice.case(Item(1), |branch| branch.then_with_output(score, item));
                     choice.otherwise(|branch| branch.then_with_output(tens, item));
                 });
-                let retried = sub.retry(1, |attempt| attempt.then_with_output(score, item));
+                let retried: Ref<Out> = sub.retry_output(1, |attempt| {
+                    let out_refs = attempt.then_with_output(score, item);
+                    attempt.output_with(out_refs);
+                });
                 (chained, chosen, retried)
             });
             flow.output_with(out_refs);
@@ -2739,10 +2745,11 @@ fn p28_legal_alias_duplicate_root_target_takes_nothing() {
     let runtime = Runtime::new();
     let outcome = block_on(runtime.execute::<_, (Vec<Out>, Vec<Out>), _>(
         |flow: &mut Flow<'_>, items: Ref<Vec<Item>>| {
-            let out_refs = flow.retry(0, |attempt| {
+            let out_refs: (Ref<Vec<Out>>, Ref<Vec<Out>>) = flow.retry_output(0, |attempt| {
                 let collected = attempt.each(items, |item, sub| sub.then_with_output(score, item));
                 // 经合法 alias 把同一个聚合 Vec 交付到两个 Root 端口。
-                (collected, collected)
+                let declared = (collected, collected);
+                attempt.output_with(declared);
             });
             flow.output_with(out_refs);
         },

@@ -10,6 +10,7 @@
 //! - `Flow::iter`：第 N 轮仍 Continue 时返回 `RunError::IterationLimitReached`。
 
 use futures::executor::block_on;
+use srflow::Ref;
 use srflow::{BodyError, Data, Flow, Query, RunError, Runtime};
 use std::error::Error;
 use std::fmt;
@@ -104,12 +105,13 @@ fn main() -> Result<(), Box<dyn Error>> {
     // 1) Retry：Retry／Retry／Normal —— 成功只交付一次。
     let report = block_on(runtime.execute::<_, (Report, Candidate), _>(
         |flow: &mut Flow<'_>, prompt: srflow::Ref<Prompt>| {
-            let out_refs = flow.retry(3, |attempt| {
+            let out_refs: (Ref<Report>, Ref<Candidate>) = flow.retry_output(3, |attempt| {
                 let candidate = attempt.then_with_output(&generate, prompt);
-                (
+                let out_refs = (
                     attempt.then_with_output(&judge_retrying, candidate),
                     candidate,
-                )
+                );
+                attempt.output_with(out_refs);
             });
             flow.output_with(out_refs);
         },
@@ -125,9 +127,10 @@ fn main() -> Result<(), Box<dyn Error>> {
     // 2) Retry 预算耗尽：最后原因与字段完整保留。
     let error = match block_on(runtime.execute::<_, Report, _>(
         |flow: &mut Flow<'_>, prompt: srflow::Ref<Prompt>| {
-            let out_refs = flow.retry(1, |attempt| {
+            let out_refs: Ref<Report> = flow.retry_output(1, |attempt| {
                 let candidate = attempt.then_with_output(&generate, prompt);
-                attempt.then_with_output(&judge_always_retrying, candidate)
+                let out_refs = attempt.then_with_output(&judge_always_retrying, candidate);
+                attempt.output_with(out_refs);
             });
             flow.output_with(out_refs);
         },

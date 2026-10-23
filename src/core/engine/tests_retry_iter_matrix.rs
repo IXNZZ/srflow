@@ -146,13 +146,14 @@ fn e05_controllers_expose_real_frames_callers_and_distinct_rounds() {
     let runtime = Runtime::new();
     let outcome = block_on(runtime.execute::<_, (), _>(
         |flow: &mut Flow<'_>, state: Ref<Tracked>| {
-            let () = flow.retry(1, |attempt| {
+            let () = flow.retry_output(1, |attempt| {
                 let inner = attempt.iter(state, 3, |current, round| {
                     let next = round.then_with_output(&bump_ctx, current);
                     round.then_with_output(&break_after_first, current);
                     next
                 });
-                attempt.then_with_output(&consume_ctx, inner)
+                let _: () = attempt.then_with_output(&consume_ctx, inner);
+                attempt.output::<()>();
             });
             flow.output_with(());
         },
@@ -278,12 +279,13 @@ fn e06_deep_ordinary_capture_and_state_import_meet_at_the_direct_caller() {
     let runtime = Runtime::new();
     let outcome = block_on(runtime.execute::<_, Tracked, _>(
         |flow: &mut Flow<'_>, (state, anchor): (Ref<Tracked>, Ref<Anchor>)| {
-            let out_refs = flow.chain(|sub| {
-                sub.iter(state, 3, |current, round| {
+            let out_refs: Ref<Tracked> = flow.chain_output(|sub| {
+                let out_refs = sub.iter(state, 3, |current, round| {
                     let next = round.then_with_output(&combine, (current, anchor));
                     round.then_with_output(&break_after_first, current);
                     next
-                })
+                });
+                sub.output_with(out_refs);
             });
             flow.output_with(out_refs);
         },
@@ -382,9 +384,10 @@ fn e08_retry_mixed_output_delivers_self_and_ancestor_alias() {
     let runtime = Runtime::new();
     let (report, prompt) = block_on(runtime.execute::<_, (Report, Prompt), _>(
         |flow: &mut Flow<'_>, prompt: Ref<Prompt>| {
-            let out_refs = flow.retry(1, |attempt| {
+            let out_refs: (Ref<Report>, Ref<Prompt>) = flow.retry_output(1, |attempt| {
                 let report = attempt.then_with_output(&generate, prompt);
-                (report, prompt)
+                let out_refs = (report, prompt);
+                attempt.output_with(out_refs);
             });
             flow.output_with(out_refs);
         },
@@ -420,12 +423,12 @@ fn e08_retry_duplicate_target_output_is_delivered_as_a_group() {
     let runtime = Runtime::new();
     let report = block_on(runtime.execute::<_, Report, _>(
         |flow: &mut Flow<'_>, prompt: Ref<Prompt>| {
-            let out_refs = flow
-                .retry(1, |attempt| {
-                    let report = attempt.then_with_output(&generate, prompt);
-                    (report, report)
-                })
-                .0;
+            let pair: (Ref<Report>, Ref<Report>) = flow.retry_output(1, |attempt| {
+                let report = attempt.then_with_output(&generate, prompt);
+                let out_refs = (report, report);
+                attempt.output_with(out_refs);
+            });
+            let out_refs = pair.0;
             flow.output_with(out_refs);
         },
         Prompt(9),
@@ -449,9 +452,10 @@ fn e28_duplicate_root_targets_are_rejected_with_zero_takes() {
     let runtime = Runtime::new();
     let outcome = block_on(runtime.execute::<_, (Report, Report), _>(
         |flow: &mut Flow<'_>, prompt: Ref<Prompt>| {
-            let out_refs = flow.retry(1, |attempt| {
+            let out_refs: (Ref<Report>, Ref<Report>) = flow.retry_output(1, |attempt| {
                 let report = attempt.then_with_output(&generate, prompt);
-                (report, report)
+                let out_refs = (report, report);
+                attempt.output_with(out_refs);
             });
             flow.output_with(out_refs);
         },
@@ -689,10 +693,11 @@ fn e28_retry_delivery_late_destination_occupied_rejects_without_partial_export()
     reset_all!();
     let log = Rc::new(RefCell::new(Vec::new()));
     let definition = build_definition::<Tracked, (Tracked, Tracked), _>(|flow, seed| {
-        let out_refs = flow.retry(1, |attempt| {
+        let out_refs: (Ref<Tracked>, Ref<Tracked>) = flow.retry_output(1, |attempt| {
             let first = attempt.then_with_output(&bump_ctx, seed);
             let second = attempt.then_with_output(&bump_ctx, seed);
-            (first, second)
+            let out_refs = (first, second);
+            attempt.output_with(out_refs);
         });
         flow.output_with(out_refs);
     })
@@ -1042,8 +1047,14 @@ fn e31_sequential_chains_close_before_recreating_and_reject_old_scope_access() {
     let runtime = Runtime::new();
     let value = block_on(runtime.execute::<_, u32, _>(
         |flow: &mut Flow<'_>, seed: Ref<u32>| {
-            let first = flow.chain(|sub| sub.then_with_output(&chain_first, seed));
-            let out_refs = flow.chain(|sub| sub.then_with_output(&chain_second, first));
+            let first: Ref<u32> = flow.chain_output(|sub| {
+                let out_refs = sub.then_with_output(&chain_first, seed);
+                sub.output_with(out_refs);
+            });
+            let out_refs: Ref<u32> = flow.chain_output(|sub| {
+                let out_refs = sub.then_with_output(&chain_second, first);
+                sub.output_with(out_refs);
+            });
             flow.output_with(out_refs);
         },
         0u32,
@@ -1150,13 +1161,14 @@ fn e24_outer_retry_restarts_the_inner_iter_from_the_original_state() {
     let runtime = Runtime::new();
     let delivered = block_on(runtime.execute::<_, Tracked, _>(
         |flow: &mut Flow<'_>, state: Ref<Tracked>| {
-            let out_refs = flow.retry(1, |attempt| {
+            let out_refs: Ref<Tracked> = flow.retry_output(1, |attempt| {
                 let iterated = attempt.iter(state, 3, |current, round| {
                     let next = round.then_with_output(&bump_ctx, current);
                     round.then_with_output(&break_after_first, current);
                     next
                 });
-                attempt.then_with_output(&judge_retry_once, iterated)
+                let out_refs = attempt.then_with_output(&judge_retry_once, iterated);
+                attempt.output_with(out_refs);
             });
             flow.output_with(out_refs);
         },
@@ -1375,7 +1387,10 @@ fn e03_unselected_branch_position_as_attempt_output_is_rejected() {
                     branch.then_with_output(&produce_u32, seed)
                 });
             });
-            let out_refs = flow.retry(1, |_attempt| forged.take().expect("captured forged ref"));
+            let out_refs: Ref<u32> = flow.retry_output(1, |_attempt| {
+                let out_refs = forged.take().expect("captured forged ref");
+                _attempt.output_with(out_refs);
+            });
             flow.output_with(out_refs);
         },
         1u32,
@@ -1406,8 +1421,9 @@ fn e04_retry_max_minus_one_first_attempt_success_runs_one_attempt() {
     let runtime = Runtime::new();
     let report = block_on(runtime.execute::<_, Report, _>(
         |flow: &mut Flow<'_>, prompt: Ref<Prompt>| {
-            let out_refs = flow.retry(usize::MAX - 1, |attempt| {
-                attempt.then_with_output(&generate, prompt)
+            let out_refs: Ref<Report> = flow.retry_output(usize::MAX - 1, |attempt| {
+                let out_refs = attempt.then_with_output(&generate, prompt);
+                attempt.output_with(out_refs);
             });
             flow.output_with(out_refs);
         },

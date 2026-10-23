@@ -4,7 +4,7 @@ System Runtime Workflow（SRFlow）是面向强类型业务流程的 Rust 执行
 
 ## 当前设计与实现
 
-**v2.2 设计基线已审定，T01～T03 已限定范围验收。公开 Node/Factory 与新 Root 已接入；控制结构门面仍保留旧契约。** [T03 最终复审 R2](docs/implementation_tasks_v2.2/V22_T03_REVIEW_R2_v0.1.md)关闭六项审查问题，后续按规划推进 T04～T07。
+**v2.2 设计基线已审定，T01～T04 已限定范围验收。公开 Node/Factory、新 Root 与 Chain/Retry 已接入。** [T04 最终复审 R2](docs/implementation_tasks_v2.2/V22_T04_REVIEW_R2_v0.1.md)关闭 R01～R04/S01；Choose/Each/Iter 门面由后续 T05/T06 推进。
 
 - [v2.2 总设计](docs/SRFlow_Design_v2.2.md)
 - [v2.2 Public API SPEC](docs/SRFlow_v2.2_Public_API_SPEC_v0.1.md)
@@ -34,15 +34,15 @@ SPEC 是目标契约，Probe 是证据，源码是当前实现。任何材料中
 
 ## v2.2 实施状态
 
-[实施规划 v0.1](docs/SRFlow_v2.2_Implementation_Plan_v0.1.md) 已评审通过，保留 V22-T01～T07 顺序。[V22-T01](docs/implementation_tasks_v2.2/V22_T01_Definition_Sources_And_Declarations_v0.1.md) R1.2 已独立复审验收通过，R01～R04 均关闭，登记 COMPLETED，限定 Definition 基础范围；[复审 R1](docs/implementation_tasks_v2.2/V22_T01_REVIEW_R1_v0.1.md)记录独立验证及边界，[HANDOVER](docs/implementation_tasks_v2.2/V22_T01_HANDOVER_v0.1.md)保留实施记录，[任务入口](docs/implementation_tasks_v2.2/README.md)维护状态。T01 实现已入库 312cbe7；T02 R1.3 已限定范围验收通过并提交为 271a0d7；T03 已按[最终复审 R2](docs/implementation_tasks_v2.2/V22_T03_REVIEW_R2_v0.1.md)验收并登记 COMPLETED，尚未提交/推送/发布。
+[实施规划 v0.1](docs/SRFlow_v2.2_Implementation_Plan_v0.1.md) 已评审通过，保留 V22-T01～T07 顺序。[V22-T01](docs/implementation_tasks_v2.2/V22_T01_Definition_Sources_And_Declarations_v0.1.md) R1.2 已独立复审验收通过，R01～R04 均关闭，登记 COMPLETED，限定 Definition 基础范围；[复审 R1](docs/implementation_tasks_v2.2/V22_T01_REVIEW_R1_v0.1.md)记录独立验证及边界，[HANDOVER](docs/implementation_tasks_v2.2/V22_T01_HANDOVER_v0.1.md)保留实施记录，[任务入口](docs/implementation_tasks_v2.2/README.md)维护状态。T01 实现已入库 312cbe7；T02 R1.3 已限定范围验收通过并提交为 271a0d7；T03 已按[最终复审 R2](docs/implementation_tasks_v2.2/V22_T03_REVIEW_R2_v0.1.md)验收并登记 COMPLETED，已提交为 071cd43；T04 验收实现仍在工作区，未提交/推送/发布。
 
 [V22-T02 详细任务书](docs/implementation_tasks_v2.2/V22_T02_Node_And_Factory_Internal_Integration_v0.1.md) 已登记 COMPLETED · R1.3，[独立验收](docs/implementation_tasks_v2.2/V22_T02_REVIEW_R2_v0.1.md)确认 R01～R03 全部关闭；[HANDOVER](docs/implementation_tasks_v2.2/V22_T02_HANDOVER_v0.1.md)保留实施记录。T02 完成内部接入；其后 T03 已完成公开 then/Runtime 切换，限定范围独立验收通过。
 
-[V22-T03 任务书](docs/implementation_tasks_v2.2/V22_T03_Public_Node_And_Root_Integration_v0.1.md) 已登记 COMPLETED · 独立复审 R2；Root → Node/Factory → output → owned Result 最小闭环及调用迁移通过。验收代码仍位于 `271a0d7` 上的工作区，指纹见[验收基线](docs/implementation_tasks_v2.2/V22_T03_ACCEPTED_SOURCE_SHA256.json)。早期回滚、[A 准备评审](docs/implementation_tasks_v2.2/V22_T03_CHECKPOINT_A_REVIEW_R3_v0.1.md)及[Root执行补充](docs/implementation_tasks_v2.2/V22_T03_ROOT_MIGRATION_GUIDE_v0.1.md)保留历史；T04 尚未开始。
+[V22-T03 任务书](docs/implementation_tasks_v2.2/V22_T03_Public_Node_And_Root_Integration_v0.1.md) 已登记 COMPLETED · 独立复审 R2；Root → Node/Factory → output → owned Result 最小闭环及调用迁移通过。验收代码现已提交为 `071cd43`，382 项指纹一致，见[验收基线](docs/implementation_tasks_v2.2/V22_T03_ACCEPTED_SOURCE_SHA256.json)。早期回滚、[A 准备评审](docs/implementation_tasks_v2.2/V22_T03_CHECKPOINT_A_REVIEW_R3_v0.1.md)及[Root执行补充](docs/implementation_tasks_v2.2/V22_T03_ROOT_MIGRATION_GUIDE_v0.1.md)保留历史；[T04 任务书](docs/implementation_tasks_v2.2/V22_T04_Chain_And_Retry_Integration_v0.1.md)已登记 COMPLETED · [独立复审 R2](docs/implementation_tasks_v2.2/V22_T04_REVIEW_R2_v0.1.md)，限定 Chain/Retry 四方法、声明交接及相应迁移；[源码指纹](docs/implementation_tasks_v2.2/V22_T04_ACCEPTED_SOURCE_SHA256.json)为后续基线。代码未提交，未开始 T05；[交接说明](docs/implementation_tasks_v2.2/V22_T04_HANDOVER_v0.1.md)保留实施时点。
 
 ## 开发入口
 
-先阅读 [AGENTS](AGENTS.md) 和当前已审定任务；T01～T03 已各自限定范围验收通过，T04～T07 尚未实施。
+先阅读 [AGENTS](AGENTS.md) 和当前已审定任务；T01～T04 已各自限定范围验收通过，T05～T07 尚未实施。
 
 现有工程工具链基线 Rust 1.97、edition 2024，常用离线检查：
 

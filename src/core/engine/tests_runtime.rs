@@ -210,7 +210,10 @@ fn b01_spec_minimal_example_returns_43() {
     let output = block_on(runtime.execute::<_, Amount, _>(
         |flow, amount| {
             let doubled = flow.then_with_output(double, amount);
-            let out_refs = flow.chain(|sub| sub.then_with_output(&add, doubled));
+            let out_refs: Ref<Amount> = flow.chain_output(|sub| {
+                let out_refs = sub.then_with_output(&add, doubled);
+                sub.output_with(out_refs);
+            });
             flow.output_with(out_refs);
         },
         Amount(21),
@@ -252,8 +255,11 @@ fn b03_fragment_forms_execute_with_non_static_nodes() {
     fn fragment<'n>(
         node: &'n AddOne,
         input: Ref<Doubled>,
-    ) -> impl FnOnce(&mut crate::Flow<'n>) -> Ref<Amount> + 'n {
-        move |sub| sub.then_with_output(node, input)
+    ) -> impl FnOnce(&mut crate::Flow<'n>) + 'n {
+        move |sub| {
+            let out_refs = sub.then_with_output(node, input);
+            sub.output_with(out_refs);
+        }
     }
 
     fn call_in_closure<'n>(
@@ -270,8 +276,11 @@ fn b03_fragment_forms_execute_with_non_static_nodes() {
     let output = block_on(runtime.execute::<_, Amount, _>(
         |flow, amount| {
             let doubled = flow.then_with_output(double, amount);
-            let first = flow.chain(fragment(&first_node, doubled));
-            let out_refs = flow.chain(|sub| call_in_closure(sub, &second_node, first));
+            let first: Ref<Amount> = flow.chain_output(fragment(&first_node, doubled));
+            let out_refs: Ref<Amount> = flow.chain_output(|sub| {
+                let out_refs = call_in_closure(sub, &second_node, first);
+                sub.output_with(out_refs);
+            });
             flow.output_with(out_refs);
         },
         Amount(20),
@@ -460,7 +469,7 @@ fn b05_unit_root_and_unit_chain_run() {
             let _: () = flow.then_with_output(unit_noop, ());
             flow.chain(|sub| {
                 let _: () = sub.then_with_output(unit_noop, ());
-                ()
+                sub.output::<()>();
             });
             let () = ();
             flow.output_with(());
@@ -629,8 +638,13 @@ fn b10_single_context_coordinator_and_container_per_execution() {
     let runtime = Runtime::new();
     let output = block_on(runtime.execute::<_, Amount, _>(
         |flow, seed| {
-            let out_refs =
-                flow.chain(|sub| sub.chain(|inner| inner.then_with_output(seed_reader, seed)));
+            let out_refs: Ref<Amount> = flow.chain_output(|sub| {
+                let inner_refs: Ref<Amount> = sub.chain_output(|inner| {
+                    let declared = inner.then_with_output(seed_reader, seed);
+                    inner.output_with(declared);
+                });
+                sub.output_with(inner_refs);
+            });
             flow.output_with(out_refs);
         },
         Seed {
@@ -662,8 +676,13 @@ fn b11_deep_capture_reads_the_real_value() {
     let runtime = Runtime::new();
     let output = block_on(runtime.execute::<_, Amount, _>(
         |flow, seed| {
-            let out_refs =
-                flow.chain(|outer| outer.chain(|inner| inner.then_with_output(seed_reader, seed)));
+            let out_refs: Ref<Amount> = flow.chain_output(|outer| {
+                let inner_refs: Ref<Amount> = outer.chain_output(|inner| {
+                    let declared = inner.then_with_output(seed_reader, seed);
+                    inner.output_with(declared);
+                });
+                outer.output_with(inner_refs);
+            });
             flow.output_with(out_refs);
         },
         Seed {
@@ -689,7 +708,7 @@ fn b12_chain_temporaries_drop_before_the_next_parent_step() {
             flow.chain(|sub| {
                 let temp = sub.then_with_output(track_temp, seed);
                 let _ = temp;
-                ()
+                sub.output::<()>();
             });
             let () = flow.then_with_output(seed_observer, seed);
             flow.output_with(());
@@ -719,9 +738,10 @@ fn b13_duplicate_and_alias_sources_export_through_child_exits() {
     // Root 只取其中一个输出（两个都取属于重复 DataId，见 b14）。
     let output = block_on(runtime.execute::<_, Amount, _>(
         |flow, seed| {
-            let pair = flow.chain(|sub| {
+            let pair: (Ref<Amount>, Ref<Amount>) = flow.chain_output(|sub| {
                 let value = inner_amount(sub, seed);
-                (value, value)
+                let out_refs = (value, value);
+                sub.output_with(out_refs);
             });
             let out_refs = pair.0;
             flow.output_with(out_refs);
@@ -748,7 +768,10 @@ fn b13_alias_output_keeps_ancestor_owner() {
     let runtime = Runtime::new();
     let output = block_on(runtime.execute::<_, Seed, _>(
         |flow, seed| {
-            let out_refs = flow.chain(|_sub| seed);
+            let out_refs: Ref<Seed> = flow.chain_output(|_sub| {
+                let out_refs = seed;
+                _sub.output_with(out_refs);
+            });
             flow.output_with(out_refs);
         },
         Seed {
@@ -768,9 +791,10 @@ fn b13_mixed_child_and_ancestor_sources_export_in_one_group() {
     // 同一组声明输出同时含 child 产出与祖先 alias：两条路径都经唯一出口正常 Export。
     let output = block_on(runtime.execute::<_, (Amount, Seed), _>(
         |flow, seed| {
-            let out_refs = flow.chain(|sub| {
+            let out_refs: (Ref<Amount>, Ref<Seed>) = flow.chain_output(|sub| {
                 let produced = inner_amount(sub, seed);
-                (produced, seed)
+                let out_refs = (produced, seed);
+                sub.output_with(out_refs);
             });
             flow.output_with(out_refs);
         },
@@ -794,9 +818,10 @@ fn b14_root_duplicate_data_id_is_rejected_before_any_take() {
     let runtime = Runtime::new();
     let error = block_on(runtime.execute::<_, (Amount, Amount), _>(
         |flow, seed| {
-            let out_refs = flow.chain(|sub| {
+            let out_refs: (Ref<Amount>, Ref<Amount>) = flow.chain_output(|sub| {
                 let value = inner_amount(sub, seed);
-                (value, value)
+                let out_refs = (value, value);
+                sub.output_with(out_refs);
             });
             flow.output_with(out_refs);
         },
@@ -844,7 +869,10 @@ fn b16_export_preflight_rejects_the_whole_group() {
     install_export_occupy_fault(0);
     let error = block_on(runtime.execute::<_, Amount, _>(
         |flow, seed| {
-            let out_refs = flow.chain(|sub| sub.then_with_output(seed_reader, seed));
+            let out_refs: Ref<Amount> = flow.chain_output(|sub| {
+                let out_refs = sub.then_with_output(seed_reader, seed);
+                sub.output_with(out_refs);
+            });
             flow.output_with(out_refs);
         },
         Seed {
@@ -929,9 +957,10 @@ fn b18_node_control_becomes_unhandled_control_at_root() {
     let runtime = Runtime::new();
     let error = block_on(runtime.execute::<_, Amount, _>(
         |flow, amount| {
-            let out_refs = flow.chain(|sub| {
+            let out_refs: Ref<Amount> = flow.chain_output(|sub| {
                 let retried = sub.then_with_output(retrying, amount);
-                sub.then_with_output(never, retried)
+                let out_refs = sub.then_with_output(never, retried);
+                sub.output_with(out_refs);
             });
             flow.output_with(out_refs);
         },
@@ -956,7 +985,10 @@ fn b18_iter_break_is_also_unhandled_without_a_controller() {
     let runtime = Runtime::new();
     let error = block_on(runtime.execute::<_, Amount, _>(
         |flow, amount| {
-            let out_refs = flow.chain(|sub| sub.then_with_output(breaking, amount));
+            let out_refs: Ref<Amount> = flow.chain_output(|sub| {
+                let out_refs = sub.then_with_output(breaking, amount);
+                sub.output_with(out_refs);
+            });
             flow.output_with(out_refs);
         },
         Amount(1),
@@ -979,7 +1011,10 @@ fn b19_control_cleanup_failure_becomes_runtime_error() {
     install_control_cleanup_fault();
     let error = block_on(runtime.execute::<_, Amount, _>(
         |flow, amount| {
-            let out_refs = flow.chain(|sub| sub.then_with_output(retrying, amount));
+            let out_refs: Ref<Amount> = flow.chain_output(|sub| {
+                let out_refs = sub.then_with_output(retrying, amount);
+                sub.output_with(out_refs);
+            });
             flow.output_with(out_refs);
         },
         Amount(1),
@@ -1407,7 +1442,10 @@ macro_rules! chain_arity_run {
             let input = ($($v,)+);
             let runtime = Runtime::new();
             let output = block_on(runtime.execute::<($($t,)+), ($($t,)+), _>(
-                |flow, refs| { let out = flow.chain(|_sub| refs);
+                |flow, refs| { let out: ($(Ref<$t>,)+) = flow.chain_output(|_sub|{
+                    let out_refs = refs;
+                    _sub.output_with(out_refs);
+                });
                 flow.output_with(out); },
                 input,
             ))
@@ -1445,11 +1483,12 @@ fn b05_chain_child_produced_arity_runs() {
     let runtime = Runtime::new();
     let output = block_on(runtime.execute::<_, (Doubled, Amount, Doubled), _>(
         |flow, amount| {
-            let out_refs = flow.chain(|sub| {
+            let out_refs: (Ref<Doubled>, Ref<Amount>, Ref<Doubled>) = flow.chain_output(|sub| {
                 let first = sub.then_with_output(double, amount);
                 let second = sub.then_with_output(add_one, first);
                 let third = sub.then_with_output(double, second);
-                (first, second, third)
+                let out_refs = (first, second, third);
+                sub.output_with(out_refs);
             });
             flow.output_with(out_refs);
         },
@@ -1467,8 +1506,13 @@ fn b10_real_frames_and_single_execution_domain_are_observed() {
     let runtime = Runtime::new();
     let output = block_on(runtime.execute::<_, Doubled, _>(
         |flow, amount| {
-            let out_refs =
-                flow.chain(|outer| outer.chain(|inner| inner.then_with_output(double, amount)));
+            let out_refs: Ref<Doubled> = flow.chain_output(|outer| {
+                let inner_refs: Ref<Doubled> = outer.chain_output(|inner| {
+                    let declared = inner.then_with_output(double, amount);
+                    inner.output_with(declared);
+                });
+                outer.output_with(inner_refs);
+            });
             flow.output_with(out_refs);
         },
         Amount(20),
@@ -1550,8 +1594,13 @@ fn b11_each_layer_imports_the_same_static_refid_once() {
     let runtime = Runtime::new();
     let output = block_on(runtime.execute::<_, Amount, _>(
         |flow, seed| {
-            let out_refs =
-                flow.chain(|outer| outer.chain(|inner| inner.then_with_output(seed_reader, seed)));
+            let out_refs: Ref<Amount> = flow.chain_output(|outer| {
+                let inner_refs: Ref<Amount> = outer.chain_output(|inner| {
+                    let declared = inner.then_with_output(seed_reader, seed);
+                    inner.output_with(declared);
+                });
+                outer.output_with(inner_refs);
+            });
             flow.output_with(out_refs);
         },
         Seed {
@@ -1599,8 +1648,13 @@ fn b12_chain_scopes_close_and_never_recur() {
     let runtime = Runtime::new();
     let output = block_on(runtime.execute::<_, Doubled, _>(
         |flow, amount| {
-            let out_refs =
-                flow.chain(|outer| outer.chain(|inner| inner.then_with_output(double, amount)));
+            let out_refs: Ref<Doubled> = flow.chain_output(|outer| {
+                let inner_refs: Ref<Doubled> = outer.chain_output(|inner| {
+                    let declared = inner.then_with_output(double, amount);
+                    inner.output_with(declared);
+                });
+                outer.output_with(inner_refs);
+            });
             flow.output_with(out_refs);
         },
         Amount(20),
@@ -1661,9 +1715,10 @@ fn b13_export_targets_and_single_transfer_are_observed() {
     let runtime = Runtime::new();
     let output = block_on(runtime.execute::<_, Amount, _>(
         |flow, seed| {
-            let pair = flow.chain(|sub| {
+            let pair: (Ref<Amount>, Ref<Amount>) = flow.chain_output(|sub| {
                 let value = inner_amount(sub, seed);
-                (value, value)
+                let out_refs = (value, value);
+                sub.output_with(out_refs);
             });
             let out_refs = pair.0;
             flow.output_with(out_refs);
@@ -1725,7 +1780,10 @@ fn b13_ancestor_alias_is_bound_without_transfer() {
     let runtime = Runtime::new();
     let output = block_on(runtime.execute::<_, Seed, _>(
         |flow, seed| {
-            let out_refs = flow.chain(|_sub| seed);
+            let out_refs: Ref<Seed> = flow.chain_output(|_sub| {
+                let out_refs = seed;
+                _sub.output_with(out_refs);
+            });
             flow.output_with(out_refs);
         },
         Seed {
@@ -1795,9 +1853,10 @@ fn b14_rejected_root_take_keeps_values_owned_and_takes_zero() {
     let runtime = Runtime::new();
     let error = block_on(runtime.execute::<_, (Amount, Amount), _>(
         |flow, seed| {
-            let out_refs = flow.chain(|sub| {
+            let out_refs: (Ref<Amount>, Ref<Amount>) = flow.chain_output(|sub| {
                 let value = inner_amount(sub, seed);
-                (value, value)
+                let out_refs = (value, value);
+                sub.output_with(out_refs);
             });
             flow.output_with(out_refs);
         },
@@ -1909,10 +1968,11 @@ fn b16_export_group_rejects_whole_group_and_keeps_kinds() {
     install_export_occupy_fault(1);
     let error = block_on(runtime.execute::<_, (TrackedValue, TrackedValue), _>(
         |flow, seed| {
-            let out_refs = flow.chain(|sub| {
+            let out_refs: (Ref<TrackedValue>, Ref<TrackedValue>) = flow.chain_output(|sub| {
                 let first = sub.then_with_output(produce_child_value, seed);
                 let second = sub.then_with_output(produce_child_value, seed);
-                (first, second)
+                let out_refs = (first, second);
+                sub.output_with(out_refs);
             });
             flow.output_with(out_refs);
         },
@@ -1963,9 +2023,9 @@ fn b16_import_group_rejects_whole_group_without_partial_bindings() {
     install_import_occupy_fault(1);
     let error = block_on(runtime.execute::<_, (), _>(
         |flow, (seed, amount)| {
-            let () = flow.chain(|sub| {
+            let () = flow.chain_output(|sub| {
                 let _: () = sub.then_with_output(two_inputs_unit, (seed, amount));
-                ()
+                sub.output::<()>();
             });
             flow.output_with(());
         },
@@ -2088,12 +2148,13 @@ fn b18_nested_control_closes_every_frame_and_stops_later_business() {
     let runtime = Runtime::new();
     let error = block_on(runtime.execute::<_, (), _>(
         |flow, ()| {
-            let () = flow.chain(|outer| {
-                outer.chain(|inner| {
+            let () = flow.chain_output(|outer| {
+                let out_refs: () = outer.chain_output(|inner| {
                     let _: () = inner.then_with_output(retrying, ());
                     let _: () = inner.then_with_output(never, ());
-                    ()
-                })
+                    inner.output::<()>();
+                });
+                outer.output_with(out_refs);
             });
             flow.output_with(());
         },
@@ -2161,10 +2222,10 @@ fn b19_cleanup_failure_keeps_unclosed_responsibility_and_stops_business() {
     install_control_cleanup_fault();
     let error = block_on(runtime.execute::<_, (), _>(
         |flow, ()| {
-            let () = flow.chain(|sub| {
+            let () = flow.chain_output(|sub| {
                 let _: () = sub.then_with_output(retrying, ());
                 let _: () = sub.then_with_output(never, ());
-                ()
+                sub.output::<()>();
             });
             flow.output_with(());
         },
@@ -2199,11 +2260,11 @@ fn b20_deep_pending_cancel_orders_every_drop() {
     let runtime = Runtime::new();
     let mut future = Box::pin(runtime.execute::<_, (), _>(
         |flow, seed| {
-            let () = flow.chain(|sub| {
+            let () = flow.chain_output(|sub| {
                 let produced = sub.then_with_output(read_tracked_seed, seed);
                 let _ = produced;
                 let _pending: Ref<Amount> = sub.then_with_output(pending_guard_node, seed);
-                ()
+                sub.output::<()>();
             });
             flow.output_with(());
         },
@@ -2237,7 +2298,10 @@ fn b21_executions_use_distinct_identity_domains() {
     let runtime = Runtime::new();
     let first = block_on(runtime.execute::<_, Doubled, _>(
         |flow, amount| {
-            let out_refs = flow.chain(|sub| sub.then_with_output(double, amount));
+            let out_refs: Ref<Doubled> = flow.chain_output(|sub| {
+                let out_refs = sub.then_with_output(double, amount);
+                sub.output_with(out_refs);
+            });
             flow.output_with(out_refs);
         },
         Amount(1),
@@ -2254,7 +2318,10 @@ fn b21_executions_use_distinct_identity_domains() {
 
     let second = block_on(runtime.execute::<_, Doubled, _>(
         |flow, amount| {
-            let out_refs = flow.chain(|sub| sub.then_with_output(double, amount));
+            let out_refs: Ref<Doubled> = flow.chain_output(|sub| {
+                let out_refs = sub.then_with_output(double, amount);
+                sub.output_with(out_refs);
+            });
             flow.output_with(out_refs);
         },
         Amount(10),
@@ -2309,15 +2376,16 @@ fn f01_legal_control_propagation_keeps_context_valid_until_root_close() {
         reset_observations();
         let error = block_on(runtime.execute::<_, (), _>(
             |flow, ()| {
-                let () = flow.chain(|outer| {
-                    outer.chain(|inner| {
+                let () = flow.chain_output(|outer| {
+                    let () = outer.chain_output(|inner| {
                         if round == 0 {
                             let _: () = inner.then_with_output(retrying, ());
                         } else {
                             let _: () = inner.then_with_output(breaking, ());
                         }
-                        ()
-                    })
+                        inner.output::<()>();
+                    });
+                    outer.output_with(());
                 });
                 flow.output_with(());
             },
@@ -2393,8 +2461,14 @@ fn f02_sequential_chains_close_before_the_next_child_and_reject_old_reads() {
     let runtime = Runtime::new();
     let output = block_on(runtime.execute::<_, (), _>(
         |flow, seed| {
-            let first = flow.chain(|sub| sub.then_with_output(seed_reader, seed));
-            let second = flow.chain(|sub| sub.then_with_output(AmountStep, first));
+            let first: Ref<Amount> = flow.chain_output(|sub| {
+                let out_refs = sub.then_with_output(seed_reader, seed);
+                sub.output_with(out_refs);
+            });
+            let second: Ref<Amount> = flow.chain_output(|sub| {
+                let out_refs = sub.then_with_output(AmountStep, first);
+                sub.output_with(out_refs);
+            });
             let _ = second;
             let () = flow.then_with_output(seed_observer, seed);
             flow.output_with(());
@@ -2455,7 +2529,10 @@ fn f03_cross_execution_identity_access_is_rejected() {
     // 第一次执行：取得完整 Root ScopeId 与真实 DataId（观察记录 + take 日志）。
     let first = block_on(runtime.execute::<_, Doubled, _>(
         |flow, amount| {
-            let out_refs = flow.chain(|sub| sub.then_with_output(double, amount));
+            let out_refs: Ref<Doubled> = flow.chain_output(|sub| {
+                let out_refs = sub.then_with_output(double, amount);
+                sub.output_with(out_refs);
+            });
             flow.output_with(out_refs);
         },
         Amount(3),
@@ -2473,7 +2550,10 @@ fn f03_cross_execution_identity_access_is_rejected() {
     install_foreign_access_fault(first_root.clone(), first_data.clone());
     let second = block_on(runtime.execute::<_, Doubled, _>(
         |flow, amount| {
-            let out_refs = flow.chain(|sub| sub.then_with_output(double, amount));
+            let out_refs: Ref<Doubled> = flow.chain_output(|sub| {
+                let out_refs = sub.then_with_output(double, amount);
+                sub.output_with(out_refs);
+            });
             flow.output_with(out_refs);
         },
         Amount(5),
@@ -2725,8 +2805,11 @@ fn c01_choose_nests_chain_choose_and_fragment_forms() {
     fn fragment<'n>(
         node: &'n AmountStep,
         input: Ref<Amount>,
-    ) -> impl FnOnce(&mut crate::Flow<'n>) -> Ref<Amount> + 'n {
-        move |branch| branch.then_with_output(node, input)
+    ) -> impl FnOnce(&mut crate::Flow<'n>) + 'n {
+        move |branch| {
+            let out_refs = branch.then_with_output(node, input);
+            branch.output_with(out_refs);
+        }
     }
 
     let log = Log::new();
@@ -2735,16 +2818,22 @@ fn c01_choose_nests_chain_choose_and_fragment_forms() {
     let output = block_on(runtime.execute::<_, Amount, _>(
         |flow, seed| {
             let selector = flow.then_with_output(route_of, seed);
-            let out_refs = flow.choose(selector, |choice| {
+            let out_refs: Ref<Amount> = flow.choose(selector, |choice| {
                 choice.case(route(10), |branch| {
                     // 分支内再 chain → choose；内层分支用 Fragment 形式定义。
-                    let inner = branch.chain(|sub| sub.then_with_output(seed_reader, seed));
+                    let inner: Ref<Amount> = branch.chain_output(|sub| {
+                        let out_refs = sub.then_with_output(seed_reader, seed);
+                        sub.output_with(out_refs);
+                    });
                     let inner_route = branch.then_with_output(route_of_amount, inner);
-                    let picked = branch.choose(inner_route, |inner_choice| {
-                        inner_choice.case(route(11), fragment(&step, inner));
+                    let picked: Ref<Amount> = branch.choose(inner_route, |inner_choice| {
+                        inner_choice.case(route(11), |b| {
+                            let refs: Ref<Amount> = b.chain_output(fragment(&step, inner));
+                            refs
+                        });
                         inner_choice.otherwise(|deep| deep.then_with_output(branch_fallback, seed));
                     });
-                    branch.chain(fragment(&step, picked))
+                    branch.chain_output(fragment(&step, picked))
                 });
             });
             flow.output_with(out_refs);
@@ -3156,16 +3245,17 @@ fn c07_deep_selector_and_branch_captures_import_once_and_keep_owner() {
     let runtime = Runtime::new();
     let output = block_on(runtime.execute::<_, (Amount, Amount), _>(
         |flow, seed| {
-            let out_refs = flow.chain(|sub| {
+            let out_refs: (Ref<Amount>, Ref<Amount>) = flow.chain_output(|sub| {
                 let selector = sub.then_with_output(route_of, seed);
-                sub.choose(selector, |choice| {
+                let chosen: (Ref<Amount>, Ref<Amount>) = sub.choose(selector, |choice| {
                     choice.case(route(9), |branch| {
                         // 同一祖先位置被两个 Node 使用：Imports 只登记一次、owner 不变。
                         let left = branch.then_with_output(seed_reader, seed);
                         let right = branch.then_with_output(seed_reader, seed);
                         (left, right)
                     });
-                })
+                });
+                sub.output_with(chosen);
             });
             flow.output_with(out_refs);
         },
@@ -4214,15 +4304,16 @@ fn c16_retry_crosses_choose_and_chain_then_locates_at_root() {
     let runtime = Runtime::new();
     let error = block_on(runtime.execute::<_, Amount, _>(
         |flow, amount| {
-            let out_refs = flow.chain(|sub| {
+            let out_refs: Ref<Amount> = flow.chain_output(|sub| {
                 let selector = sub.then_with_output(route_of_amount, amount);
-                sub.choose(selector, |choice| {
+                let out_refs = sub.choose(selector, |choice| {
                     choice.case(route(1), |branch| {
                         let retried = branch.then_with_output(retrying, amount);
                         branch.then_with_output(never, retried)
                     });
                     choice.otherwise(|branch| branch.then_with_output(fallback_observed, amount));
-                })
+                });
+                sub.output_with(out_refs);
             });
             flow.output_with(out_refs);
         },
@@ -4311,9 +4402,9 @@ fn c16_iter_break_crosses_a_nested_choose() {
     let runtime = Runtime::new();
     let error = block_on(runtime.execute::<_, Amount, _>(
         |flow, amount| {
-            let out_refs = flow.chain(|sub| {
+            let out_refs: Ref<Amount> = flow.chain_output(|sub| {
                 let selector = sub.then_with_output(route_of_amount, amount);
-                sub.choose(selector, |choice| {
+                let out_refs = sub.choose(selector, |choice| {
                     choice.case(route(1), |branch| {
                         let inner_selector = branch.then_with_output(route_of_amount, amount);
                         branch.choose(inner_selector, |inner_choice| {
@@ -4321,7 +4412,8 @@ fn c16_iter_break_crosses_a_nested_choose() {
                                 .case(route(1), |deep| deep.then_with_output(breaking, amount));
                         })
                     });
-                })
+                });
+                sub.output_with(out_refs);
             });
             flow.output_with(out_refs);
         },
@@ -4963,18 +5055,19 @@ fn c20_choose_nested_pending_cancel_releases_each_level_once() {
     // Root → Chain → Choose → branch：真实 Pending 位于嵌套 Choose 的分支内。
     let mut future = Box::pin(runtime.execute::<_, Amount, _>(
         |flow, seed| {
-            let out_refs = flow.chain(|sub| {
+            let out_refs: Ref<Amount> = flow.chain_output(|sub| {
                 let chain_temp = sub.then_with_output(track_chain_value, seed);
                 let _ = chain_temp;
                 let selector = sub.then_with_output(route_of_tracked, seed);
-                sub.choose(selector, |choice| {
+                let out_refs = sub.choose(selector, |choice| {
                     choice.case(route(5), |branch| {
                         let branch_temp = branch.then_with_output(track_branch_value, seed);
                         let _ = branch_temp;
                         let pending = branch.then_with_output(pending_guard_node, seed);
                         branch.then_with_output(after_choose, pending)
                     })
-                })
+                });
+                sub.output_with(out_refs);
             });
             flow.output_with(out_refs);
         },

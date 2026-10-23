@@ -192,32 +192,89 @@ impl<'n> Flow<'n> {
         <<O as NodeOutput>::Refs as ShapeOps>::from_positions(&mut handles)
     }
 
-    /// 同步构建 child Body，登记其声明输出并返回 parent 可见的新 Ref。
+    /// 创建 Ordinary child 并同步执行一次 unit Body；四种控制形式共用。
     ///
     /// child Body 完整保存；普通 Rust block 不提供该生命周期边界。闭包本身同步消费，
     /// 被登记 Node 句柄的寿命由 `then` 的 `N: 'n` 约束保证。
-    #[allow(private_bounds)]
-    pub fn chain<F, O>(&mut self, definition: F) -> O
+    fn open_child<F>(&mut self, definition: F) -> BodyId
     where
-        O: RefShape + ShapeOps,
-        F: FnOnce(&mut Flow<'n>) -> O,
+        F: FnOnce(&mut Flow<'n>),
     {
         let child = self
             .builder
             .borrow_mut()
             .new_body(Some(self.body), BodyRole::Ordinary);
-        let out = {
-            let mut sub = Flow {
-                builder: Rc::clone(&self.builder),
-                body: child,
-            };
-            definition(&mut sub)
+        let mut sub = Flow {
+            builder: Rc::clone(&self.builder),
+            body: child,
         };
-        let outputs =
+        definition(&mut sub);
+        child
+    }
+
+    /// 失败收口按请求的 RefShape 返回与槽数一致的失效句柄形状。
+    ///
+    /// 句柄来自 `missing_handle`：后续显式使用会被统一 availability 拒绝，既不会成为
+    /// 合法来源，也不会因少槽/多槽 panic。
+    fn failed_shape<O>(&self) -> O
+    where
+        O: ShapeOps,
+    {
+        let missing = self.builder.borrow().missing_handle();
+        let count = <O as ShapeOps>::type_descs().len();
+        let mut handles = std::iter::repeat_n(missing, count);
+        <O as ShapeOps>::from_positions(&mut handles)
+    }
+
+    /// 普通 Chain：建立真实 child 边界并登记其声明的输出，返回原 Flow。
+    ///
+    /// Body 是 `FnOnce(&mut Flow<'n>)`：在 child 内用 `output`／`output_with` 声明完整输出；
+    /// 声明属于该 Body，而不是闭包的返回契约。不取 Ref 不代表不登记、不 Export 或不执行：
+    /// 已声明输出照常按整组交接发布给 parent，后续步骤可依自己的 Query 找到它们。未声明
+    /// Body 合法（零业务输出），且与显式 unit 是两种不同状态。
+    pub fn chain<F>(&mut self, definition: F) -> &mut Self
+    where
+        F: FnOnce(&mut Flow<'n>),
+    {
+        let child = self.open_child(definition);
+        let _ = self
+            .builder
+            .borrow_mut()
+            .register_chain_outputs(self.body, child, None);
+        self
+    }
+
+    /// 取输出 Chain：与 [`Flow::chain`] 共享同一条 child 构建与登记路径，额外返回 parent 域
+    /// 可见的 RefShape。
+    ///
+    /// `O` 不从闭包返回值推导，而由调用处给出（局部 RefShape 注解、外层返回类型或显式实参）。
+    /// Definition 在收口时核对 `O` 与 child 的实际声明：不符是 Definition 错误（Rust 可以
+    /// 构建，业务执行前拒绝），并按请求槽数返回失效句柄形状，不制造合法假来源；零业务槽的
+    /// `O = ()` 合法，未声明状态保持未声明。
+    ///
+    /// ```ignore
+    /// let report: Ref<Report> = flow.chain_output(|sub| {
+    ///     sub.then(&generate);
+    ///     sub.output::<Report>();
+    /// });
+    /// ```
+    #[allow(private_bounds)]
+    pub fn chain_output<O, F>(&mut self, definition: F) -> O
+    where
+        O: RefShape + ShapeOps,
+        F: FnOnce(&mut Flow<'n>),
+    {
+        let child = self.open_child(definition);
+        let expected = <O as ShapeOps>::type_descs();
+        let (outputs, ok) =
             self.builder
                 .borrow_mut()
-                .register_chain_outputs(self.body, child, out.positions());
-        O::from_positions(&mut outputs.into_iter())
+                .register_chain_outputs(self.body, child, Some(&expected));
+        if ok {
+            <O as ShapeOps>::from_positions(&mut outputs.into_iter())
+        } else {
+            self.failed_shape::<O>()
+        }
     }
 
     /// 按 selector 的值匹配一个分支执行（SPEC §9、Engine §6.7）。
@@ -282,41 +339,62 @@ impl<'n> Flow<'n> {
         <O as ShapeOps>::from_positions(&mut outputs.into_iter())
     }
 
-    /// 控制器：按预算重复执行完整 attempt Body（SPEC §10、Engine §6.8）。
+    /// 普通 Retry：建立真实 child 边界并登记其声明的输出，返回原 Flow。
     ///
     /// `max_retries = N` 指首次 attempt 之外最多再执行 N 次，总尝试次数最多 N+1；`N = 0`
-    /// 仍执行首次 attempt。没有默认次数，也不按 arity 分类。尝试闭包同步执行一次并登记完整
-    /// child Flow；运行期复用同一静态 Body，不重新构建。`usize::MAX` 无法表达 N+1，在构建期
-    /// 拒绝。
+    /// 仍执行首次 attempt。没有默认次数，也不按 arity 分类。attempt 闭包同步执行一次并登记
+    /// 完整 child Flow；运行期复用同一静态 Body，不重新构建，`usize::MAX` 无法表达 N+1，
+    /// 在构建期拒绝。
     ///
-    /// 支持 `()`、单 Ref 与 2～16 个 flat Ref tuple 输出；unit 不登记假业务槽。预算耗尽返回
+    /// 支持 `()`、单 Ref 与 2～16 个 flat Ref tuple 输出；unit 不登记假业务槽。显式 unit
+    /// （`attempt.output::<()>()`）与未声明（不写 `output`）是两种不同状态。预算耗尽返回
     /// [`RunError::RetryExhausted`](crate::RunError::RetryExhausted)；该失败退出同时发生清理
     /// 故障时按 SPEC §12 返回 [`RunError::Runtime`](crate::RunError::Runtime)，并以
     /// `Error::source` 保留原预算错误。
-    #[allow(private_bounds)]
-    pub fn retry<O, F>(&mut self, max_retries: usize, definition: F) -> O
+    pub fn retry<F>(&mut self, max_retries: usize, definition: F) -> &mut Self
     where
-        O: RefShape + ShapeOps,
-        F: FnOnce(&mut Flow<'n>) -> O,
+        F: FnOnce(&mut Flow<'n>),
     {
-        let child = self
+        let child = self.open_child(definition);
+        let _ = self
             .builder
             .borrow_mut()
-            .new_body(Some(self.body), BodyRole::Ordinary);
-        let out = {
-            let mut sub = Flow {
-                builder: Rc::clone(&self.builder),
-                body: child,
-            };
-            definition(&mut sub)
-        };
-        let outputs = self.builder.borrow_mut().register_retry(
+            .register_retry(self.body, child, max_retries, None);
+        self
+    }
+
+    /// 取输出 Retry：与 [`Flow::retry`] 共享同一条 child 构建与登记路径，额外返回成功尝试的
+    /// 父域 RefShape。
+    ///
+    /// `O` 由调用处给出（局部 RefShape 注解、外层返回类型或显式实参）；Definition 在收口时
+    /// 核对它与 attempt 的实际声明，不符是 Definition 错误而非编译错误，并按请求槽数返回
+    /// 失效句柄形状。
+    ///
+    /// ```ignore
+    /// let response: Ref<ApiResponse> = flow.retry_output(3, |attempt| {
+    ///     attempt.provide(RequestContext::new).then(&call_api);
+    ///     attempt.output::<ApiResponse>();
+    /// });
+    /// ```
+    #[allow(private_bounds)]
+    pub fn retry_output<O, F>(&mut self, max_retries: usize, definition: F) -> O
+    where
+        O: RefShape + ShapeOps,
+        F: FnOnce(&mut Flow<'n>),
+    {
+        let child = self.open_child(definition);
+        let expected = <O as ShapeOps>::type_descs();
+        let (outputs, ok) = self.builder.borrow_mut().register_retry(
             self.body,
             child,
-            out.positions(),
             max_retries,
+            Some(&expected),
         );
-        <O as ShapeOps>::from_positions(&mut outputs.into_iter())
+        if ok {
+            <O as ShapeOps>::from_positions(&mut outputs.into_iter())
+        } else {
+            self.failed_shape::<O>()
+        }
     }
 
     /// 控制器：用 Normal next 推进受控状态，用 IterBreak 交付进入本轮时的 current

@@ -8,6 +8,7 @@
 #![allow(clippy::unused_unit, clippy::let_unit_value)]
 
 use futures::executor::block_on;
+use srflow::Ref;
 use srflow::{BodyError, Data, Node, Query, RunError, Runtime};
 
 #[derive(Data)]
@@ -76,7 +77,10 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             |flow, prompt| {
                 let checked = flow.then_with_output(require_prompt, prompt);
                 let draft = flow.then_with_output(generate, checked);
-                let out_refs = flow.chain(|sub| sub.then_with_output(&review, draft));
+                let out_refs: Ref<Report> = flow.chain_output(|sub| {
+                    let out_refs = sub.then_with_output(&review, draft);
+                    sub.output_with(out_refs);
+                });
                 flow.output_with(out_refs);
             },
             Prompt(20),
@@ -92,7 +96,10 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             |flow, prompt| {
                 let checked = flow.then_with_output(require_prompt, prompt);
                 let draft = flow.then_with_output(generate, checked);
-                let out_refs = flow.chain(|sub| sub.then_with_output(&review, draft));
+                let out_refs: Ref<Report> = flow.chain_output(|sub| {
+                    let out_refs = sub.then_with_output(&review, draft);
+                    sub.output_with(out_refs);
+                });
                 flow.output_with(out_refs);
             },
             Prompt(0),
@@ -116,7 +123,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             |flow, ()| {
                 flow.chain(|sub| {
                     let _: () = sub.then_with_output(stamp, ());
-                    ()
+                    sub.output::<()>();
                 });
                 let () = ();
                 flow.output_with(());

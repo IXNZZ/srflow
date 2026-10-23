@@ -80,11 +80,11 @@ impl Node for AddOne {
 }
 
 /// Fragment 首选形式：普通函数返回 closure，保留非 static Node 借用。
-fn fragment<'n>(
-    node: &'n AddOne,
-    input: Ref<Amount>,
-) -> impl FnOnce(&mut Flow<'n>) -> Ref<Amount> + 'n {
-    move |sub| sub.then_with_output(node, input)
+fn fragment<'n>(node: &'n AddOne, input: Ref<Amount>) -> impl FnOnce(&mut Flow<'n>) + 'n {
+    move |sub| {
+        let out_refs = sub.then_with_output(node, input);
+        sub.output_with(out_refs);
+    }
 }
 
 /// Fragment 第二种形式：接收 `&mut Flow` 的普通函数，在 chain closure 内调用。
@@ -524,10 +524,10 @@ fn a06_order_unit_steps_and_unused_outputs_are_kept() {
 #[test]
 fn a06_explicit_unit_children_are_complete() {
     let definition = build_definition::<Amount, (), _>(|flow, amount| {
-        let () = flow.chain(|sub| {
+        let () = flow.chain_output(|sub| {
             let produced = sub.then_with_output(double, amount);
             let _: () = sub.then_with_output(sink_doubled, produced);
-            ()
+            sub.output::<()>();
         });
         flow.output_with(());
     })
@@ -545,7 +545,10 @@ fn a06_explicit_unit_children_are_complete() {
 #[test]
 fn a07_chain_builds_child_body_and_parent_refs() {
     let definition = build_definition::<Amount, Doubled, _>(|flow, amount| {
-        let out_refs = flow.chain(|sub| sub.then_with_output(double, amount));
+        let out_refs: Ref<Doubled> = flow.chain_output(|sub| {
+            let out_refs = sub.then_with_output(double, amount);
+            sub.output_with(out_refs);
+        });
         flow.output_with(out_refs);
     })
     .expect("chain should build");
@@ -571,8 +574,11 @@ fn a07_chain_builds_child_body_and_parent_refs() {
 fn a07_fragment_forms_build_with_non_static_nodes() {
     let node = AddOne;
     let definition = build_definition::<Amount, Amount, _>(|flow, amount| {
-        let first = flow.chain(fragment(&node, amount));
-        let out_refs = flow.chain(|sub| call_in_closure(sub, &node, first));
+        let first: Ref<Amount> = flow.chain_output(fragment(&node, amount));
+        let out_refs: Ref<Amount> = flow.chain_output(|sub| {
+            let out_refs = call_in_closure(sub, &node, first);
+            sub.output_with(out_refs);
+        });
         flow.output_with(out_refs);
     })
     .expect("both fragment forms should build");
@@ -639,10 +645,11 @@ fn a09_foreign_definition_ref_is_rejected() {
 fn a09_child_local_leak_is_rejected() {
     let mut leaked: Option<Ref<Doubled>> = None;
     let error = build_definition::<Amount, (), _>(|flow, amount| {
-        let _kept = flow.chain(|sub| {
+        let _kept: Ref<Doubled> = flow.chain_output(|sub| {
             let produced = sub.then_with_output(double, amount);
             leaked = Some(produced);
-            produced
+            let out_refs = produced;
+            sub.output_with(out_refs);
         });
         let child_local = leaked.expect("leaked child ref");
         let _ = flow.then_with_output(sink_doubled, child_local);
@@ -667,13 +674,17 @@ fn a09_child_local_leak_is_rejected() {
 fn a09_sibling_internal_ref_is_rejected() {
     let mut leaked: Option<Ref<Doubled>> = None;
     let error = build_definition::<Amount, (), _>(|flow, amount| {
-        let _first = flow.chain(|sub| {
+        let _first: Ref<Doubled> = flow.chain_output(|sub| {
             let produced = sub.then_with_output(double, amount);
             leaked = Some(produced);
-            produced
+            let out_refs = produced;
+            sub.output_with(out_refs);
         });
         let sibling_local = leaked.expect("leaked first-child ref");
-        let () = flow.chain(move |sub| sub.then_with_output(sink_doubled, sibling_local));
+        let () = flow.chain_output(move |sub| {
+            let out_refs = sub.then_with_output(sink_doubled, sibling_local);
+            sub.output_with(out_refs);
+        });
         flow.output_with(());
     })
     .err()
@@ -693,7 +704,10 @@ fn a09_sibling_internal_ref_is_rejected() {
 #[test]
 fn a09_chain_output_is_usable_in_parent() {
     let definition = build_definition::<Amount, Doubled, _>(|flow, amount| {
-        let checked = flow.chain(|sub| sub.then_with_output(AddOne, amount));
+        let checked: Ref<Amount> = flow.chain_output(|sub| {
+            let out_refs = sub.then_with_output(AddOne, amount);
+            sub.output_with(out_refs);
+        });
         let out_refs = flow.then_with_output(double, checked);
         flow.output_with(out_refs);
     })
@@ -743,8 +757,13 @@ fn a12_deep_capture_records_every_intermediate_import() {
     let mut root_position: Option<PositionId> = None;
     let definition = build_definition::<Amount, Doubled, _>(|flow, amount| {
         root_position = Some(amount.handle().position);
-        let out_refs =
-            flow.chain(|outer| outer.chain(|inner| inner.then_with_output(double, amount)));
+        let out_refs: Ref<Doubled> = flow.chain_output(|outer| {
+            let inner_refs: Ref<Doubled> = outer.chain_output(|inner| {
+                let declared = inner.then_with_output(double, amount);
+                inner.output_with(declared);
+            });
+            outer.output_with(inner_refs);
+        });
         flow.output_with(out_refs);
     })
     .expect("deep ancestor capture should build");
@@ -805,9 +824,10 @@ fn a13_root_duplicate_ref_is_rejected() {
 #[test]
 fn a13_chain_duplicate_source_is_canonicalized_to_one_exit() {
     let definition = build_definition::<Amount, (), _>(|flow, amount| {
-        let pair = flow.chain(|sub| {
+        let pair = flow.chain_output(|sub| {
             let produced = sub.then_with_output(double, amount);
-            (produced, produced)
+            let out_refs = (produced, produced);
+            sub.output_with(out_refs);
         });
         let _: (Ref<Doubled>, Ref<Doubled>) = pair;
         let () = ();
@@ -831,9 +851,10 @@ fn a13_chain_duplicate_source_is_canonicalized_to_one_exit() {
 #[test]
 fn a13_root_returning_chain_refs_passes_static_checks() {
     let definition = build_definition::<Amount, (Doubled, Doubled), _>(|flow, amount| {
-        let out_refs = flow.chain(|sub| {
+        let out_refs: (Ref<Doubled>, Ref<Doubled>) = flow.chain_output(|sub| {
             let produced = sub.then_with_output(double, amount);
-            (produced, produced)
+            let out_refs = (produced, produced);
+            sub.output_with(out_refs);
         });
         flow.output_with(out_refs);
     })
@@ -861,7 +882,10 @@ fn a13_node_repeated_readonly_inputs_are_legal() {
 #[test]
 fn a13_chain_alias_output_imports_ancestor_without_transfer() {
     let definition = build_definition::<Amount, Amount, _>(|flow, amount| {
-        let out_refs = flow.chain(|_sub| amount);
+        let out_refs: Ref<Amount> = flow.chain_output(|_sub| {
+            let out_refs = amount;
+            _sub.output_with(out_refs);
+        });
         flow.output_with(out_refs);
     })
     .expect("chain alias output should be legal");
@@ -921,8 +945,14 @@ fn a15_definition_is_built_from_one_body_authority() {
     let mut root_position: Option<PositionId> = None;
     let definition = build_definition::<Amount, Amount, _>(|flow, amount| {
         root_position = Some(amount.handle().position);
-        let first = flow.chain(|sub| sub.then_with_output(AddOne, amount));
-        let out_refs = flow.chain(|sub| sub.then_with_output(AddOne, first));
+        let first: Ref<Amount> = flow.chain_output(|sub| {
+            let out_refs = sub.then_with_output(AddOne, amount);
+            sub.output_with(out_refs);
+        });
+        let out_refs: Ref<Amount> = flow.chain_output(|sub| {
+            let out_refs = sub.then_with_output(AddOne, first);
+            sub.output_with(out_refs);
+        });
         flow.output_with(out_refs);
     })
     .expect("nested chain bodies should build");

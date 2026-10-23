@@ -152,7 +152,8 @@ fn a02_ancestor_shadowing_and_chain_output_visibility() {
             let local = sub.then_with_output(add_one, amount_ref);
             let nearest = sub.ref_of::<Amount>();
             assert_eq!(nearest.handle(), local.handle());
-            local
+            let out_refs = local;
+            sub.output_with(out_refs);
         });
         let after = flow.ref_of::<Amount>();
         assert_ne!(after.handle(), root.handle());
@@ -168,7 +169,7 @@ fn a02_child_local_and_sibling_are_not_visible() {
     let error = build_definition::<Amount, Amount, _>(|flow, amount_ref| {
         flow.chain(|sub| {
             let _ = sub.then_with_output(double, amount_ref);
-            ()
+            sub.output::<()>();
         });
         let _ = flow.ref_of::<Doubled>();
         let out_refs = amount_ref;
@@ -187,11 +188,11 @@ fn a02_sibling_child_local_is_not_visible() {
     let error = build_definition::<Amount, Amount, _>(|flow, amount_ref| {
         flow.chain(|sub| {
             let _ = sub.then_with_output(double, amount_ref);
-            ()
+            sub.output::<()>();
         });
         flow.chain(|sub| {
             let _ = sub.ref_of::<Doubled>();
-            ()
+            sub.output::<()>();
         });
         let out_refs = amount_ref;
         flow.output_with(out_refs);
@@ -434,7 +435,10 @@ fn a03b_business_source_table_is_explicit() {
 #[test]
 fn a03b_newer_retry_and_iter_bridges_are_excluded_from_queries() {
     let retry_definition = build_definition::<Amount, Amount, _>(|flow, amount_ref| {
-        let retried = flow.retry(1, |sub| sub.then_with_output(add_one, amount_ref));
+        let retried: Ref<Amount> = flow.retry_output(1, |sub| {
+            let out_refs = sub.then_with_output(add_one, amount_ref);
+            sub.output_with(out_refs);
+        });
         let found = flow.ref_of::<Amount>();
         assert_eq!(found.handle(), retried.handle());
         let out_refs = retried;
@@ -1500,7 +1504,9 @@ fn a12_old_unit_and_next_mappings() {
     );
 
     let chain = build_definition::<(), (), _>(|flow, ()| {
-        flow.chain(|_sub| ());
+        flow.chain(|_sub| {
+            _sub.output::<()>();
+        });
         let () = ();
         flow.output_with(());
     })
@@ -1513,7 +1519,9 @@ fn a12_old_unit_and_next_mappings() {
     assert_eq!(child.output_declaration().state(), DeclarationState::Unit);
 
     let retry = build_definition::<(), (), _>(|flow, ()| {
-        flow.retry(1, |_sub| ());
+        flow.retry(1, |_sub| {
+            _sub.output::<()>();
+        });
         let () = ();
         flow.output_with(());
     })
@@ -1607,9 +1615,15 @@ fn a12_old_adapters_reject_second_declarations() {
             let mut flow = Flow::open(Rc::clone(&builder), child);
             flow.output::<()>();
         }
+        let order = builder.borrow_mut().fresh_order();
+        assert!(
+            !builder
+                .borrow_mut()
+                .declare_output(child, Vec::new(), order)
+        );
         builder
             .borrow_mut()
-            .register_chain_outputs(root, child, Vec::new());
+            .register_chain_outputs(root, child, None);
         assert_eq!(
             builder.borrow().body(child).output_declaration().state(),
             DeclarationState::Unit
@@ -1657,9 +1671,13 @@ fn a12_old_adapters_reject_second_declarations() {
             let mut flow = Flow::open(Rc::clone(&builder), child);
             flow.output::<()>();
         }
-        builder
-            .borrow_mut()
-            .register_retry(root, child, Vec::new(), 1);
+        let order = builder.borrow_mut().fresh_order();
+        assert!(
+            !builder
+                .borrow_mut()
+                .declare_output(child, Vec::new(), order)
+        );
+        builder.borrow_mut().register_retry(root, child, 1, None);
         assert_eq!(
             builder.borrow().body(child).output_declaration().state(),
             DeclarationState::Unit
@@ -1813,11 +1831,17 @@ fn a12_old_adapters_preserve_non_unit_and_first_failure() {
         }
         let before = output_snapshot(&builder, child);
         assert_eq!(before.0, DeclarationState::NonUnit);
-        let outputs = builder.borrow_mut().register_chain_outputs(
-            root,
+        let order = builder.borrow_mut().fresh_order();
+        assert!(!builder.borrow_mut().declare_output(
             child,
             vec![desc(inputs[0], TypeDesc::of::<Amount>())],
-        );
+            order
+        ));
+        let (outputs, _declared) = builder
+            .borrow_mut()
+            .register_chain_outputs(root, child, None);
+        // 重复声明使该 Body 的声明失败：收口保留第一份声明快照与首因，
+        // 但必须隔离派生的父输出（槽位对齐、来源保持失效）。
         assert!(
             builder
                 .borrow()
@@ -1844,10 +1868,19 @@ fn a12_old_adapters_preserve_non_unit_and_first_failure() {
         }
         let before = output_snapshot(&builder, child);
         assert_eq!(before.0, DeclarationState::Failed);
-        let outputs = builder
+        let (outputs, _declared) = builder
             .borrow_mut()
-            .register_chain_outputs(root, child, Vec::new());
-        assert!(outputs.is_empty());
+            .register_chain_outputs(root, child, None);
+        // 新契约：收口消费 child 的失败声明，按声明槽数发布失效句柄（槽位对齐 + taint），
+        // 不再像旧适配器那样按空槽位登记；首因仍由 child 自身保留。
+        assert_eq!(outputs.len(), 1, "失败声明仍保持槽位对齐");
+        assert!(
+            builder
+                .borrow()
+                .position(outputs[0])
+                .expect("chain output")
+                .is_tainted()
+        );
         assert_eq!(output_snapshot(&builder, child), before);
         finish_builder(builder, root).err()
     };
@@ -1980,12 +2013,14 @@ fn a12_old_adapters_preserve_non_unit_and_first_failure() {
             flow.output::<Amount>();
         }
         let before = output_snapshot(&builder, child);
-        let outputs = builder.borrow_mut().register_retry(
-            root,
+        let order = builder.borrow_mut().fresh_order();
+        assert!(!builder.borrow_mut().declare_output(
             child,
             vec![desc(inputs[0], TypeDesc::of::<Amount>())],
-            1,
-        );
+            order
+        ));
+        let (outputs, _declared) = builder.borrow_mut().register_retry(root, child, 1, None);
+        // 与 Chain 同理：重复声明后的 child 不得发布合法父域来源。
         assert!(
             builder
                 .borrow()
@@ -2011,10 +2046,16 @@ fn a12_old_adapters_preserve_non_unit_and_first_failure() {
             flow.output::<Missing>();
         }
         let before = output_snapshot(&builder, child);
-        let outputs = builder
-            .borrow_mut()
-            .register_retry(root, child, Vec::new(), 1);
-        assert!(outputs.is_empty());
+        let (outputs, _declared) = builder.borrow_mut().register_retry(root, child, 1, None);
+        // 新契约：失败声明仍按声明槽数发布失效句柄（槽位对齐 + taint），首因保留在 child。
+        assert_eq!(outputs.len(), 1, "失败声明仍保持槽位对齐");
+        assert!(
+            builder
+                .borrow()
+                .position(outputs[0])
+                .expect("retry output")
+                .is_tainted()
+        );
         assert_eq!(output_snapshot(&builder, child), before);
         finish_builder(builder, root).err()
     };
@@ -2235,11 +2276,15 @@ fn a13b_tainted_and_unpublished_sources_do_not_publish_outputs() {
             .borrow_mut()
             .new_body(Some(root), BodyRole::Ordinary);
         let tainted = tainted_amount(&builder, root);
-        let outputs = builder.borrow_mut().register_chain_outputs(
-            root,
+        let order = builder.borrow_mut().fresh_order();
+        let _ = builder.borrow_mut().declare_output(
             child,
             vec![desc(tainted, TypeDesc::of::<Amount>())],
+            order,
         );
+        let (outputs, _declared) = builder
+            .borrow_mut()
+            .register_chain_outputs(root, child, None);
         assert!(
             builder
                 .borrow()
@@ -2292,12 +2337,13 @@ fn a13b_tainted_and_unpublished_sources_do_not_publish_outputs() {
             .borrow_mut()
             .new_body(Some(root), BodyRole::Ordinary);
         let tainted = tainted_amount(&builder, root);
-        let outputs = builder.borrow_mut().register_retry(
-            root,
+        let order = builder.borrow_mut().fresh_order();
+        let _ = builder.borrow_mut().declare_output(
             child,
             vec![desc(tainted, TypeDesc::of::<Amount>())],
-            1,
+            order,
         );
+        let (outputs, _declared) = builder.borrow_mut().register_retry(root, child, 1, None);
         assert!(
             builder
                 .borrow()
@@ -2564,11 +2610,15 @@ fn a13b1_unpublished_source_is_rejected_by_all_register_paths() {
         let child = builder
             .borrow_mut()
             .new_body(Some(root), BodyRole::Ordinary);
-        let outputs = builder.borrow_mut().register_chain_outputs(
-            root,
+        let order = builder.borrow_mut().fresh_order();
+        let _ = builder.borrow_mut().declare_output(
             child,
             vec![desc(source, TypeDesc::of::<Amount>())],
+            order,
         );
+        let (outputs, _declared) = builder
+            .borrow_mut()
+            .register_chain_outputs(root, child, None);
         assert!(
             builder
                 .borrow()
@@ -2630,12 +2680,13 @@ fn a13b1_unpublished_source_is_rejected_by_all_register_paths() {
         let child = builder
             .borrow_mut()
             .new_body(Some(root), BodyRole::Ordinary);
-        let outputs = builder.borrow_mut().register_retry(
-            root,
+        let order = builder.borrow_mut().fresh_order();
+        let _ = builder.borrow_mut().declare_output(
             child,
             vec![desc(source, TypeDesc::of::<Amount>())],
-            1,
+            order,
         );
+        let (outputs, _declared) = builder.borrow_mut().register_retry(root, child, 1, None);
         assert!(
             builder
                 .borrow()
@@ -2930,7 +2981,10 @@ fn a15_runtime_rejects_missing_source_before_any_node() {
 #[test]
 fn a16_old_chain_path_still_builds() {
     let definition = build_definition::<Amount, Amount, _>(|flow, amount_ref| {
-        let chained = flow.chain(|sub| sub.then_with_output(add_one, amount_ref));
+        let chained: Ref<Amount> = flow.chain_output(|sub| {
+            let out_refs = sub.then_with_output(add_one, amount_ref);
+            sub.output_with(out_refs);
+        });
         flow.then_with_output(add_one, chained);
         let out_refs = chained;
         flow.output_with(out_refs);
