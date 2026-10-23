@@ -11,7 +11,7 @@ use super::error::{BodyError, BuildErrorDetail, RunError};
 use super::flow::Flow;
 use super::identity::{BodyId, DefinitionId, PositionHandle, PositionId};
 use super::runtime::Runtime;
-use super::shape::{EachCollect, PositionDesc, Query, Ref, StateShape, TypeDesc};
+use super::shape::{PositionDesc, Query, Ref, StateShape, TypeDesc};
 use futures::executor::block_on;
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -235,13 +235,13 @@ fn a03a_preallocated_choose_output_is_unpublished_in_branch() {
         order
     };
     assert!(query_order > step_order);
-    let branch = builder.borrow_mut().register_choose_branch(
-        branch,
-        0,
-        0,
-        vec![desc(amount_source, TypeDesc::of::<Amount>())],
-        &outputs,
-    );
+    {
+        let mut flow = Flow::open(Rc::clone(&builder), branch);
+        flow.output_with(amount(amount_source));
+    }
+    let branch = builder
+        .borrow_mut()
+        .register_choose_branch(branch, 0, 0, &outputs);
     let selector = desc(key, TypeDesc::of::<Key>());
     {
         let mut builder = builder.borrow_mut();
@@ -257,6 +257,7 @@ fn a03a_preallocated_choose_output_is_unpublished_in_branch() {
                 outputs.iter().map(|handle| handle.position).collect(),
                 step_order,
             ),
+            true,
         );
     }
     let published = builder
@@ -322,13 +323,13 @@ fn a03a_early_explicit_use_is_not_retroactively_published() {
         let mut flow = Flow::open(Rc::clone(&builder), branch);
         let _ = flow.then_with_output(add_one, amount(outputs[0]));
     }
-    let branch = builder.borrow_mut().register_choose_branch(
-        branch,
-        0,
-        0,
-        vec![desc(amount_source, TypeDesc::of::<Amount>())],
-        &outputs,
-    );
+    {
+        let mut flow = Flow::open(Rc::clone(&builder), branch);
+        flow.output_with(amount(amount_source));
+    }
+    let branch = builder
+        .borrow_mut()
+        .register_choose_branch(branch, 0, 0, &outputs);
     let selector = desc(key, TypeDesc::of::<Key>());
     {
         let mut builder = builder.borrow_mut();
@@ -344,6 +345,7 @@ fn a03a_early_explicit_use_is_not_retroactively_published() {
                 outputs.iter().map(|handle| handle.position).collect(),
                 step_order,
             ),
+            true,
         );
     }
     assert!(
@@ -465,13 +467,16 @@ fn a03b_newer_retry_and_iter_bridges_are_excluded_from_queries() {
 #[test]
 fn a04_item_and_current_are_visible_and_shadowed() {
     let _ = build_definition::<Vec<Amount>, Vec<Amount>, _>(|flow, items| {
-        let out_refs = flow.each(items, |item, sub| {
+        let out_refs: Ref<Vec<Amount>> = flow.each_output(items, |sub| {
+            let item = sub.ref_of::<Amount>();
+
             let found = sub.ref_of::<Amount>();
             assert_eq!(found.handle(), item.handle());
             let advanced = sub.then_with_output(add_one, item);
             let nearest = sub.ref_of::<Amount>();
             assert_eq!(nearest.handle(), advanced.handle());
-            advanced
+            let out_refs = advanced;
+            sub.output_with(out_refs);
         });
         flow.output_with(out_refs);
     })
@@ -1112,6 +1117,7 @@ fn push_choose_key(
     builder.borrow_mut().push_choose_step(
         root,
         super::definition::ChooseStep::new(selector, cases, otherwise, outputs, order),
+        true,
     );
 }
 
@@ -1534,7 +1540,12 @@ fn a12_old_unit_and_next_mappings() {
     assert_eq!(attempt.output_declaration().state(), DeclarationState::Unit);
 
     let each = build_definition::<Vec<Amount>, (), _>(|flow, items| {
-        flow.each(items, |_item, _sub| ());
+        flow.each(items, |_sub| {
+            let _item = _sub.ref_of::<Amount>();
+
+            let out_refs = ();
+            _sub.output_with(out_refs);
+        });
         let () = ();
         flow.output_with(());
     })
@@ -1548,9 +1559,15 @@ fn a12_old_unit_and_next_mappings() {
 
     let choose = build_definition::<Amount, (), _>(|flow, amount_ref| {
         let selector = flow.then_with_output(key_from_amount, amount_ref);
-        flow.choose(selector, |choice| {
-            choice.case(Key(1), |_sub| ());
-            choice.case(Key(2), |_sub| ());
+        flow.choose_with(selector, |choice| {
+            choice.case(Key(1), |_sub| {
+                let out_refs = ();
+                _sub.output_with(out_refs);
+            });
+            choice.case(Key(2), |_sub| {
+                let out_refs = ();
+                _sub.output_with(out_refs);
+            });
         });
         let () = ();
         flow.output_with(());
@@ -1647,10 +1664,12 @@ fn a12_old_adapters_reject_second_declarations() {
         {
             let mut flow = Flow::open(Rc::clone(&builder), child);
             flow.output::<()>();
+            // 第二次声明必须被拒绝：保留原有的 DuplicateDeclaration 目标。
+            flow.output::<()>();
         }
         builder
             .borrow_mut()
-            .register_choose_branch(child, step, 0, Vec::new(), &outputs);
+            .register_choose_branch(child, step, 0, &outputs);
         assert_eq!(
             builder.borrow().body(child).output_declaration().state(),
             DeclarationState::Unit
@@ -1702,6 +1721,8 @@ fn a12_old_adapters_reject_second_declarations() {
         {
             let mut flow = Flow::open(Rc::clone(&builder), item);
             flow.output::<()>();
+            // 第二次声明必须被拒绝：保留原有的 DuplicateDeclaration 目标。
+            flow.output::<()>();
         }
         builder.borrow_mut().register_each(
             root,
@@ -1709,12 +1730,9 @@ fn a12_old_adapters_reject_second_declarations() {
             0,
             collection,
             item_position,
-            Vec::new(),
-            Vec::new(),
-            <() as EachCollect>::begin_collectors,
+            None,
             super::shape::each_bind_item::<Amount>,
             super::shape::each_collection_len::<Amount>,
-            <() as EachCollect>::finish_collectors,
         );
         assert_eq!(
             builder.borrow().body(item).output_declaration().state(),
@@ -1903,15 +1921,13 @@ fn a12_old_adapters_preserve_non_unit_and_first_failure() {
         {
             let mut flow = Flow::open(Rc::clone(&builder), case);
             flow.output::<Amount>();
+            // 重复声明：保留 DuplicateDeclaration 与派生失效(taint) 的原有断言。
+            flow.output_with(amount(inputs[0]));
         }
         let case_before = output_snapshot(&builder, case);
-        builder.borrow_mut().register_choose_branch(
-            case,
-            step,
-            0,
-            vec![desc(inputs[0], TypeDesc::of::<Amount>())],
-            &outputs,
-        );
+        builder
+            .borrow_mut()
+            .register_choose_branch(case, step, 0, &outputs);
         assert_eq!(output_snapshot(&builder, case), case_before);
         assert!(
             builder
@@ -1927,15 +1943,13 @@ fn a12_old_adapters_preserve_non_unit_and_first_failure() {
         {
             let mut flow = Flow::open(Rc::clone(&builder), otherwise);
             flow.output::<Amount>();
+            // 重复声明：保留 DuplicateDeclaration 与派生失效(taint) 的原有断言。
+            flow.output_with(amount(inputs[0]));
         }
         let otherwise_before = output_snapshot(&builder, otherwise);
-        builder.borrow_mut().register_choose_branch(
-            otherwise,
-            step,
-            1,
-            vec![desc(inputs[0], TypeDesc::of::<Amount>())],
-            &outputs,
-        );
+        builder
+            .borrow_mut()
+            .register_choose_branch(otherwise, step, 1, &outputs);
         assert_eq!(output_snapshot(&builder, otherwise), otherwise_before);
         finish_builder(builder, root).err()
     };
@@ -1962,7 +1976,7 @@ fn a12_old_adapters_preserve_non_unit_and_first_failure() {
         assert_eq!(before.0, DeclarationState::Failed);
         builder
             .borrow_mut()
-            .register_choose_branch(branch, step, 0, Vec::new(), &outputs);
+            .register_choose_branch(branch, step, 0, &outputs);
         assert_eq!(output_snapshot(&builder, branch), before);
         assert!(
             builder
@@ -1985,7 +1999,7 @@ fn a12_old_adapters_preserve_non_unit_and_first_failure() {
         assert_eq!(otherwise_before.0, DeclarationState::Failed);
         builder
             .borrow_mut()
-            .register_choose_branch(otherwise, step, 1, Vec::new(), &outputs);
+            .register_choose_branch(otherwise, step, 1, &outputs);
         assert_eq!(output_snapshot(&builder, otherwise), otherwise_before);
         assert!(
             builder
@@ -2078,6 +2092,8 @@ fn a12_old_adapters_preserve_non_unit_and_first_failure() {
         {
             let mut flow = Flow::open(Rc::clone(&builder), item);
             flow.output::<Amount>();
+            // 重复声明：保留 DuplicateDeclaration 与派生失效(taint) 的原有断言。
+            flow.output_with(amount(inputs[1]));
         }
         let before = output_snapshot(&builder, item);
         let outputs = builder.borrow_mut().register_each(
@@ -2086,17 +2102,14 @@ fn a12_old_adapters_preserve_non_unit_and_first_failure() {
             0,
             desc(inputs[0], TypeDesc::of::<Vec<Amount>>()),
             item_position,
-            vec![desc(inputs[1], TypeDesc::of::<Amount>())],
-            vec![TypeDesc::of::<Vec<Amount>>()],
-            <Ref<Amount> as EachCollect>::begin_collectors,
+            None,
             super::shape::each_bind_item::<Amount>,
             super::shape::each_collection_len::<Amount>,
-            <Ref<Amount> as EachCollect>::finish_collectors,
         );
         assert!(
             builder
                 .borrow()
-                .position(outputs[0])
+                .position(outputs.0[0])
                 .expect("each output")
                 .is_tainted()
         );
@@ -2128,14 +2141,11 @@ fn a12_old_adapters_preserve_non_unit_and_first_failure() {
             0,
             desc(inputs[0], TypeDesc::of::<Vec<Amount>>()),
             item_position,
-            Vec::new(),
-            Vec::new(),
-            <() as EachCollect>::begin_collectors,
+            None,
             super::shape::each_bind_item::<Amount>,
             super::shape::each_collection_len::<Amount>,
-            <() as EachCollect>::finish_collectors,
         );
-        assert!(outputs.is_empty());
+        assert_eq!(outputs.0.len(), 1, "失败声明仍保持槽位对齐");
         assert_eq!(output_snapshot(&builder, item), before);
         finish_builder(builder, root).err()
     };
@@ -2310,13 +2320,13 @@ fn a13b_tainted_and_unpublished_sources_do_not_publish_outputs() {
             .borrow_mut()
             .new_body(Some(root), BodyRole::Ordinary);
         let tainted = tainted_amount(&builder, root);
-        builder.borrow_mut().register_choose_branch(
-            branch,
-            step,
-            0,
-            vec![desc(tainted, TypeDesc::of::<Amount>())],
-            &outputs,
-        );
+        {
+            let mut flow = Flow::open(Rc::clone(&builder), branch);
+            flow.output_with(amount(tainted));
+        }
+        builder
+            .borrow_mut()
+            .register_choose_branch(branch, step, 0, &outputs);
         assert!(
             builder
                 .borrow()
@@ -2402,23 +2412,24 @@ fn a13b_tainted_and_unpublished_sources_do_not_publish_outputs() {
                 .borrow_mut()
                 .allocate_each_item(item, 0, TypeDesc::of::<Amount>());
         let tainted = tainted_vec(&builder, root);
+        {
+            let mut flow = Flow::open(Rc::clone(&builder), item);
+            flow.output_with(amount(inputs[1]));
+        }
         let outputs = builder.borrow_mut().register_each(
             root,
             item,
             0,
             desc(tainted, TypeDesc::of::<Vec<Amount>>()),
             item_position,
-            vec![desc(inputs[1], TypeDesc::of::<Amount>())],
-            vec![TypeDesc::of::<Vec<Amount>>()],
-            <Ref<Amount> as EachCollect>::begin_collectors,
+            None,
             super::shape::each_bind_item::<Amount>,
             super::shape::each_collection_len::<Amount>,
-            <Ref<Amount> as EachCollect>::finish_collectors,
         );
         assert!(
             builder
                 .borrow()
-                .position(outputs[0])
+                .position(outputs.0[0])
                 .expect("each output")
                 .is_tainted()
         );
@@ -2652,13 +2663,14 @@ fn a13b1_unpublished_source_is_rejected_by_all_register_paths() {
         let branch = builder
             .borrow_mut()
             .new_body(Some(root), BodyRole::Ordinary);
-        let branch = builder.borrow_mut().register_choose_branch(
-            branch,
-            step,
-            0,
-            vec![desc(source, TypeDesc::of::<Amount>())],
-            &outputs,
-        );
+        {
+            let mut flow = Flow::open(Rc::clone(&builder), branch);
+            // 显式声明一个尚未发布的父输出：首因 NotPublished。
+            flow.output_with(amount(source));
+        }
+        let branch = builder
+            .borrow_mut()
+            .register_choose_branch(branch, step, 0, &outputs);
         assert!(branch.slots.is_empty());
         assert!(
             builder
@@ -2764,23 +2776,25 @@ fn a13b1_unpublished_source_is_rejected_by_all_register_paths() {
             builder
                 .borrow_mut()
                 .allocate_each_item(item, 0, TypeDesc::of::<Amount>());
+        {
+            let mut flow = Flow::open(Rc::clone(&builder), item);
+            // 显式声明一个尚未发布的位置：首因 NotPublished。
+            flow.output_with(amount(source));
+        }
         let outputs = builder.borrow_mut().register_each(
             root,
             item,
             0,
             desc(inputs[0], TypeDesc::of::<Vec<Amount>>()),
             item_position,
-            vec![desc(source, TypeDesc::of::<Amount>())],
-            vec![TypeDesc::of::<Vec<Amount>>()],
-            <Ref<Amount> as EachCollect>::begin_collectors,
+            None,
             super::shape::each_bind_item::<Amount>,
             super::shape::each_collection_len::<Amount>,
-            <Ref<Amount> as EachCollect>::finish_collectors,
         );
         assert!(
             builder
                 .borrow()
-                .position(outputs[0])
+                .position(outputs.0[0])
                 .expect("each output")
                 .is_tainted()
         );

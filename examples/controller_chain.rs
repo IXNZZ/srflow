@@ -85,14 +85,23 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
 
     // 组合链：Root(Vec<Span>, Route) → Each 收集 → Choose 路由。
     let sum: Counted = runtime
-        .execute(
+        .execute::<_, Counted, _>(
             |flow, (spans, route): (Ref<Vec<Span>>, Ref<Route>)| {
-                let lengths = flow.each(spans, |span, each| each.then_with_output(length, span));
-                let out_refs = flow.choose(route, |choice| {
+                let lengths: Ref<Vec<Length>> = flow.each_output(spans, |each| {
+                    let span = each.ref_of::<Span>();
+
+                    let out_refs = each.then_with_output(length, span);
+                    each.output_with(out_refs);
+                });
+                let out_refs: Ref<Counted> = flow.choose_with_output(route, |choice| {
                     choice.case(Route { code: 1 }, |branch| {
-                        branch.then_with_output(total, lengths)
+                        let out_refs = branch.then_with_output(total, lengths);
+                        branch.output_with(out_refs);
                     });
-                    choice.otherwise(|branch| branch.then_with_output(count, lengths));
+                    choice.otherwise(|branch| {
+                        let out_refs = branch.then_with_output(count, lengths);
+                        branch.output_with(out_refs);
+                    });
                 });
                 flow.output_with(out_refs);
             },
@@ -103,14 +112,23 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     println!("sum: {}", sum.0);
 
     let count: Counted = runtime
-        .execute(
+        .execute::<_, Counted, _>(
             |flow, (spans, route): (Ref<Vec<Span>>, Ref<Route>)| {
-                let lengths = flow.each(spans, |span, each| each.then_with_output(length, span));
-                let out_refs = flow.choose(route, |choice| {
+                let lengths: Ref<Vec<Length>> = flow.each_output(spans, |each| {
+                    let span = each.ref_of::<Span>();
+
+                    let out_refs = each.then_with_output(length, span);
+                    each.output_with(out_refs);
+                });
+                let out_refs: Ref<Counted> = flow.choose_with_output(route, |choice| {
                     choice.case(Route { code: 1 }, |branch| {
-                        branch.then_with_output(total, lengths)
+                        let out_refs = branch.then_with_output(total, lengths);
+                        branch.output_with(out_refs);
                     });
-                    choice.otherwise(|branch| branch.then_with_output(count, lengths));
+                    choice.otherwise(|branch| {
+                        let out_refs = branch.then_with_output(count, lengths);
+                        branch.output_with(out_refs);
+                    });
                 });
                 flow.output_with(out_refs);
             },
@@ -149,7 +167,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let outcome = runtime
         .execute::<_, (), _>(
             |flow, route: Ref<Route>| {
-                let _: () = flow.choose(route, |_choice| {});
+                let _: () = flow.choose_with_output(route, |_choice| {});
 
                 flow.output_with(());
             },

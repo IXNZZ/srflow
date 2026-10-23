@@ -264,10 +264,19 @@ fn s08_six_operations_compose_in_one_execution() {
                     attempt.output_with(out_refs);
                 });
                 // 3) choose：Key(2) 命中 triple，其余分支一个都不执行。
-                let amount = flow.choose(key, |choice| {
-                    choice.case(Key(1), |branch| branch.then_with_output(&double, verdict));
-                    choice.case(Key(2), |branch| branch.then_with_output(&triple, verdict));
-                    choice.otherwise(|branch| branch.then_with_output(&fallback, verdict));
+                let amount = flow.choose_with_output(key, |choice| {
+                    choice.case(Key(1), |branch| {
+                        let out_refs = branch.then_with_output(&double, verdict);
+                        branch.output_with(out_refs);
+                    });
+                    choice.case(Key(2), |branch| {
+                        let out_refs = branch.then_with_output(&triple, verdict);
+                        branch.output_with(out_refs);
+                    });
+                    choice.otherwise(|branch| {
+                        let out_refs = branch.then_with_output(&fallback, verdict);
+                        branch.output_with(out_refs);
+                    });
                 });
                 // 4) chain：child 边界 + 两槽输出。
                 let (merged, label): (Ref<Merged>, Ref<Label>) = flow.chain_output(|sub| {
@@ -277,15 +286,19 @@ fn s08_six_operations_compose_in_one_execution() {
                     sub.output_with(out_refs);
                 });
                 // 5) each：每项两个输出槽，item body 内再一层 chain（深层捕获 Root `Seed`）。
-                let (scores, summaries) = flow.each(items, |item, each| {
-                    let score = each.then_with_output(&score, item);
-                    let summary: Ref<Summary> = each.chain_output(|sub| {
-                        let label = sub.then_with_output(&label_in_item, seed);
-                        let out_refs = sub.then_with_output(&summary, (item, score, label));
-                        sub.output_with(out_refs);
+                let (scores, summaries): (Ref<Vec<Score>>, Ref<Vec<Summary>>) =
+                    flow.each_output(items, |each| {
+                        let item = each.ref_of::<Item>();
+
+                        let score = each.then_with_output(&score, item);
+                        let summary: Ref<Summary> = each.chain_output(|sub| {
+                            let label = sub.then_with_output(&label_in_item, seed);
+                            let out_refs = sub.then_with_output(&summary, (item, score, label));
+                            sub.output_with(out_refs);
+                        });
+                        let out_refs = (score, summary);
+                        each.output_with(out_refs);
                     });
-                    (score, summary)
-                });
                 // 6) iter：第一轮 Continue，第二轮 Break（本轮 next 已产生但不交付）。
                 let (draft, context) = flow.iter(
                     (draft, context),
@@ -806,14 +819,19 @@ fn s09_propagation_choose_control_and_failure_do_not_run_other_branches() {
     let error = match block_on(runtime.execute::<_, Summary, _>(
         |flow, seed| {
             let selector = flow.then_with_output(&selector_from_seed, seed);
-            let picked = flow.choose(selector, |choice| {
+            let picked: Ref<Amount> = flow.choose_with_output(selector, |choice| {
                 choice.case(Key(1), |branch| {
-                    branch.then_with_output(&branch_control, seed)
+                    let out_refs = branch.then_with_output(&branch_control, seed);
+                    branch.output_with(out_refs);
                 });
                 choice.case(Key(2), |branch| {
-                    branch.then_with_output(&branch_other, seed)
+                    let out_refs = branch.then_with_output(&branch_other, seed);
+                    branch.output_with(out_refs);
                 });
-                choice.otherwise(|branch| branch.then_with_output(&branch_fallback, seed));
+                choice.otherwise(|branch| {
+                    let out_refs = branch.then_with_output(&branch_fallback, seed);
+                    branch.output_with(out_refs);
+                });
             });
             let out_refs = flow.then_with_output(&after_choose, picked);
             flow.output_with(out_refs);
@@ -844,12 +862,19 @@ fn s09_propagation_choose_control_and_failure_do_not_run_other_branches() {
     let error = match block_on(runtime.execute::<_, Summary, _>(
         |flow, seed| {
             let selector = flow.then_with_output(&selector_from_seed, seed);
-            let picked = flow.choose(selector, |choice| {
-                choice.case(Key(1), |branch| branch.then_with_output(&branch_fail, seed));
-                choice.case(Key(2), |branch| {
-                    branch.then_with_output(&branch_other, seed)
+            let picked: Ref<Amount> = flow.choose_with_output(selector, |choice| {
+                choice.case(Key(1), |branch| {
+                    let out_refs = branch.then_with_output(&branch_fail, seed);
+                    branch.output_with(out_refs);
                 });
-                choice.otherwise(|branch| branch.then_with_output(&branch_fallback, seed));
+                choice.case(Key(2), |branch| {
+                    let out_refs = branch.then_with_output(&branch_other, seed);
+                    branch.output_with(out_refs);
+                });
+                choice.otherwise(|branch| {
+                    let out_refs = branch.then_with_output(&branch_fallback, seed);
+                    branch.output_with(out_refs);
+                });
             });
             let out_refs = flow.then_with_output(&after_choose, picked);
             flow.output_with(out_refs);
@@ -911,8 +936,11 @@ fn s09_propagation_each_stops_remaining_items() {
     // (a) 第二项 Failure：第三项不再执行。
     let error = match block_on(runtime.execute::<_, Vec<Score>, _>(
         |flow, items| {
-            let out_refs = flow.each(items, |item, each| {
-                each.then_with_output(&item_checked, item)
+            let out_refs: Ref<Vec<Score>> = flow.each_output(items, |each| {
+                let item = each.ref_of::<Item>();
+
+                let out_refs = each.then_with_output(&item_checked, item);
+                each.output_with(out_refs);
             });
             flow.output_with(out_refs);
         },
@@ -938,8 +966,11 @@ fn s09_propagation_each_stops_remaining_items() {
     reset();
     let error = match block_on(runtime.execute::<_, Vec<Score>, _>(
         |flow, items| {
-            let out_refs = flow.each(items, |item, each| {
-                each.then_with_output(&item_control, item)
+            let out_refs: Ref<Vec<Score>> = flow.each_output(items, |each| {
+                let item = each.ref_of::<Item>();
+
+                let out_refs = each.then_with_output(&item_control, item);
+                each.output_with(out_refs);
             });
             flow.output_with(out_refs);
         },
@@ -1372,12 +1403,14 @@ fn s09_terminal_no_matching_case() {
     let error = match block_on(runtime.execute::<_, Summary, _>(
         |flow, seed| {
             let selector = flow.then_with_output(&selector_from_seed, seed);
-            let picked = flow.choose(selector, |choice| {
+            let picked: Ref<Amount> = flow.choose_with_output(selector, |choice| {
                 choice.case(Key(1), |branch| {
-                    branch.then_with_output(&branch_other, seed)
+                    let out_refs = branch.then_with_output(&branch_other, seed);
+                    branch.output_with(out_refs);
                 });
                 choice.case(Key(2), |branch| {
-                    branch.then_with_output(&branch_fallback, seed)
+                    let out_refs = branch.then_with_output(&branch_fallback, seed);
+                    branch.output_with(out_refs);
                 });
             });
             let out_refs = flow.then_with_output(&after_choose, picked);

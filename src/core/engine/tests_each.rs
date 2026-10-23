@@ -315,7 +315,9 @@ fn full_item_flow<'n>(
     flow: &mut Flow<'n>,
     (items, rules, inner, seed): (Ref<Vec<Mark>>, Ref<Rules>, Ref<Vec<Mark>>, Ref<Score>),
 ) {
-    let out_refs = flow.each(items, |item, each| {
+    let out_refs: (Ref<Vec<Score>>, Ref<Vec<Mark>>) = flow.each_output(items, |each| {
+        let item = each.ref_of();
+
         bump_item_body_builds();
         // 1) then：item 与祖先 `Rules` 共同产生 Score。
         let scored = each.then_with_output(&score_of, (item, rules));
@@ -323,9 +325,15 @@ fn full_item_flow<'n>(
         let doubled: Ref<Score> = each.chain_output(frag_double(&DOUBLER, scored));
         // 3) choose：按 item 奇偶真实选取一条分支（另一分支只登记、不建立运行 Scope）。
         let selector = each.then_with_output(&key_of, item);
-        let chosen = each.choose(selector, |choice| {
-            choice.case(Key(0), |branch| branch.then_with_output(&add_ten, doubled));
-            choice.otherwise(|branch| branch.then_with_output(&add_hundred, doubled));
+        let chosen: Ref<Score> = each.choose_with_output(selector, |choice| {
+            choice.case(Key(0), |branch| {
+                let out_refs = branch.then_with_output(&add_ten, doubled);
+                branch.output_with(out_refs);
+            });
+            choice.otherwise(|branch| {
+                let out_refs = branch.then_with_output(&add_hundred, doubled);
+                branch.output_with(out_refs);
+            });
         });
         // 4) retry：最后一次 attempt 才成功的真实重试。
         let retried: Ref<Score> = each.retry_output(2, |attempt| {
@@ -338,12 +346,16 @@ fn full_item_flow<'n>(
         });
         let total = each.then_with_output(&combine, (retried, iter_done));
         // 6) 嵌套 each：对独立内层集合逐项执行，输出再交给普通节点。
-        let inner_vec = each.each(inner, |nested_item, nested| {
+        let inner_vec: Ref<Vec<Mark>> = each.each_output(inner, |nested| {
+            let nested_item = nested.ref_of::<Mark>();
+
             bump_item_body_builds();
-            nested.then_with_output(&inner_mark, nested_item)
+            let out_refs = nested.then_with_output(&inner_mark, nested_item);
+            nested.output_with(out_refs);
         });
         let first = each.then_with_output(&first_mark, inner_vec);
-        (total, first)
+        let out_refs = (total, first);
+        each.output_with(out_refs);
     });
     flow.output_with(out_refs);
 }
@@ -357,11 +369,15 @@ fn p01_frozen_usage_feeds_later_then_chain_and_root() {
     reset_all();
     let (total, head) = block_on(Runtime::new().execute::<_, (Total, Report), _>(
         |flow, (items, rules): (Ref<Vec<Mark>>, Ref<Rules>)| {
-            let (scores, reports) = flow.each(items, |item, each| {
-                let score = each.then_with_output(&score_of, (item, rules));
-                let report = each.then_with_output(&report_of, (item, score));
-                (score, report)
-            });
+            let (scores, reports): (Ref<Vec<Score>>, Ref<Vec<Report>>) =
+                flow.each_output(items, |each| {
+                    let item = each.ref_of();
+
+                    let score = each.then_with_output(&score_of, (item, rules));
+                    let report = each.then_with_output(&report_of, (item, score));
+                    let out_refs = (score, report);
+                    each.output_with(out_refs);
+                });
             // 后续 then 直接消费 Each 的自然返回形状 `Ref<Vec<Score>>`。
             let total = flow.then_with_output(&sum_scores, scores);
             // 后续 Chain 的 child 深层捕获另一个聚合槽 `Ref<Vec<Report>>`。
@@ -391,11 +407,15 @@ fn p01_frozen_usage_feeds_later_then_chain_and_root() {
 #[test]
 fn p01_frozen_usage_registers_one_each_step_with_declared_slots() {
     let definition = build_definition::<(Vec<Mark>, Rules), (), _>(|flow, (items, rules)| {
-        let (scores, reports) = flow.each(items, |item, each| {
-            let score = each.then_with_output(&score_of, (item, rules));
-            let report = each.then_with_output(&report_of, (item, score));
-            (score, report)
-        });
+        let (scores, reports): (Ref<Vec<Score>>, Ref<Vec<Report>>) =
+            flow.each_output(items, |each| {
+                let item = each.ref_of();
+
+                let score = each.then_with_output(&score_of, (item, rules));
+                let report = each.then_with_output(&report_of, (item, score));
+                let out_refs = (score, report);
+                each.output_with(out_refs);
+            });
         let _ = (scores, reports);
 
         flow.output_with(());
@@ -514,8 +534,11 @@ fn p02_collected_shapes_map_slot_by_slot_without_merging() {
 fn p02_definition_registers_unit_single_two_and_sixteen_slots() {
     // unit：零槽，不登记任何 Each 输出／Each 本地位置。
     let definition = build_definition::<Vec<Mark>, (), _>(|flow, items| {
-        let _collected: () = flow.each(items, |item, each| {
+        let _collected: () = flow.each_output(items, |each| {
+            let item = each.ref_of::<Mark>();
+
             let _: () = each.then_with_output(&count_unit, item);
+            each.output::<()>();
         });
 
         flow.output_with(());
@@ -536,8 +559,11 @@ fn p02_definition_registers_unit_single_two_and_sixteen_slots() {
 
     // 单槽：O = Ref<Mark> → Collected = Ref<Vec<Mark>>。
     let definition = build_definition::<Vec<Mark>, (), _>(|flow, items| {
-        let collected: Ref<Vec<Mark>> = flow.each(items, |item, each| {
-            each.then_with_output(&count_marks, item)
+        let collected: Ref<Vec<Mark>> = flow.each_output(items, |each| {
+            let item = each.ref_of::<Mark>();
+
+            let out_refs = each.then_with_output(&count_marks, item);
+            each.output_with(out_refs);
         });
         let _ = collected;
 
@@ -554,10 +580,13 @@ fn p02_definition_registers_unit_single_two_and_sixteen_slots() {
 
     // 2 槽同类型：两个槽的 source／local／output 全是不同位置。
     let definition = build_definition::<Vec<Mark>, (), _>(|flow, items| {
-        let _collected = flow.each(items, |item, each| {
+        let _collected: (Ref<Vec<Mark>>, Ref<Vec<Mark>>) = flow.each_output(items, |each| {
+            let item = each.ref_of::<Mark>();
+
             let first = each.then_with_output(&count_marks, item);
             let second = each.then_with_output(&count_marks, item);
-            (first, second)
+            let out_refs = (first, second);
+            each.output_with(out_refs);
         });
 
         flow.output_with(());
@@ -576,7 +605,26 @@ fn p02_definition_registers_unit_single_two_and_sixteen_slots() {
 
     // 16 槽（上限）：完整 flat tuple 正例。
     let definition = build_definition::<Vec<Mark>, (), _>(|flow, items| {
-        let _collected = flow.each(items, |item, each| {
+        let _collected: (
+            Ref<Vec<Mark>>,
+            Ref<Vec<Mark>>,
+            Ref<Vec<Mark>>,
+            Ref<Vec<Mark>>,
+            Ref<Vec<Mark>>,
+            Ref<Vec<Mark>>,
+            Ref<Vec<Mark>>,
+            Ref<Vec<Mark>>,
+            Ref<Vec<Mark>>,
+            Ref<Vec<Mark>>,
+            Ref<Vec<Mark>>,
+            Ref<Vec<Mark>>,
+            Ref<Vec<Mark>>,
+            Ref<Vec<Mark>>,
+            Ref<Vec<Mark>>,
+            Ref<Vec<Mark>>,
+        ) = flow.each_output(items, |each| {
+            let item = each.ref_of::<Mark>();
+
             let s0 = each.then_with_output(&count_marks, item);
             let s1 = each.then_with_output(&count_marks, item);
             let s2 = each.then_with_output(&count_marks, item);
@@ -593,9 +641,10 @@ fn p02_definition_registers_unit_single_two_and_sixteen_slots() {
             let s13 = each.then_with_output(&count_marks, item);
             let s14 = each.then_with_output(&count_marks, item);
             let s15 = each.then_with_output(&count_marks, item);
-            (
+            let out_refs = (
                 s0, s1, s2, s3, s4, s5, s6, s7, s8, s9, s10, s11, s12, s13, s14, s15,
-            )
+            );
+            each.output_with(out_refs);
         });
 
         flow.output_with(());
@@ -638,19 +687,23 @@ fn p02_definition_registers_unit_single_two_and_sixteen_slots() {
 #[test]
 fn p03_each_is_a_unified_step_with_a_full_body_and_a_single_plan() {
     let definition = build_definition::<Vec<Mark>, (), _>(|flow, items| {
-        let _collected: () = flow.each(items, |item, each| {
+        let _collected: () = flow.each_output(items, |each| {
+            let item = each.ref_of::<Mark>();
+
             let _: () = each.then_with_output(&count_unit, item);
             let chained: Ref<Mark> = each.chain_output(|sub| {
                 let out_refs = sub.then_with_output(&count_marks, item);
                 sub.output_with(out_refs);
             });
             let selector = each.then_with_output(&key_of, item);
-            each.choose(selector, |choice| {
+            each.choose_with(selector, |choice| {
                 choice.case(Key(0), |branch| {
                     let _: () = branch.then_with_output(&count_unit, item);
+                    branch.output::<()>();
                 });
                 choice.otherwise(|branch| {
                     let _: () = branch.then_with_output(&count_unit, item);
+                    branch.output::<()>();
                 });
             });
             each.retry(1, |attempt| {
@@ -661,10 +714,14 @@ fn p03_each_is_a_unified_step_with_a_full_body_and_a_single_plan() {
                 round.then_with_output(&count_unit, current);
                 current
             });
-            each.each(items, |nested_item, nested| {
+            each.each(items, |nested| {
+                let nested_item = nested.ref_of::<Mark>();
+
                 let _: () = nested.then_with_output(&count_unit, nested_item);
+                nested.output::<()>();
             });
             let _ = chained;
+            each.output::<()>();
         });
 
         flow.output_with(());
@@ -930,9 +987,12 @@ fn p04_parent_use_of_formal_item_is_rejected() {
     let outcome = block_on(Runtime::new().execute::<_, Mark, _>(
         |flow, items: Ref<Vec<Mark>>| {
             let mut escaped: Option<Ref<Mark>> = None;
-            let _collected: () = flow.each(items, |item, each| {
+            let _collected: () = flow.each_output(items, |each| {
+                let item = each.ref_of();
+
                 escaped = Some(item);
                 let _: () = each.then_with_output(&count_unit, item);
+                each.output::<()>();
             });
             let leaked = escaped.expect("captured the formal item");
             let out_refs = flow.then_with_output(&count_marks, leaked);
@@ -979,9 +1039,12 @@ fn p04_root_output_leak_of_formal_item_is_rejected() {
     let outcome = block_on(Runtime::new().execute::<_, Mark, _>(
         |flow, items: Ref<Vec<Mark>>| {
             let mut escaped: Option<Ref<Mark>> = None;
-            let _collected: () = flow.each(items, |item, each| {
+            let _collected: () = flow.each_output(items, |each| {
+                let item = each.ref_of();
+
                 escaped = Some(item);
                 let _: () = each.then_with_output(&count_unit, item);
+                each.output::<()>();
             });
             let out_refs = escaped.expect("captured the formal item");
             flow.output_with(out_refs);
@@ -1017,9 +1080,12 @@ fn p04_sibling_use_of_formal_item_is_rejected() {
         |flow, items: Ref<Vec<Mark>>| {
             let mut escaped: Option<Ref<Mark>> = None;
             let _first: () = flow.chain_output(|sub| {
-                let _collected: () = sub.each(items, |item, each| {
+                let _collected: () = sub.each_output(items, |each| {
+                    let item = each.ref_of();
+
                     escaped = Some(item);
                     let _: () = each.then_with_output(&count_unit, item);
+                    each.output::<()>();
                 });
                 sub.output::<()>();
             });
@@ -1065,8 +1131,11 @@ fn p04_position_from_another_definition_is_rejected() {
     let foreign = foreign.expect("captured the reference definition's collection ref");
 
     let error = build_definition::<Vec<Mark>, (), _>(|flow, _items| {
-        let _collected: () = flow.each(foreign, |item, each| {
+        let _collected: () = flow.each_output(foreign, |each| {
+            let item = each.ref_of::<Mark>();
+
             let _: () = each.then_with_output(&count_unit, item);
+            each.output::<()>();
         });
 
         flow.output_with(());
@@ -1103,8 +1172,11 @@ fn p04_position_from_another_definition_is_rejected() {
 fn p04_forward_collection_position_is_rejected() {
     reset_all();
     let reference = build_definition::<Vec<Mark>, (), _>(|flow, items| {
-        let _collected: Ref<Vec<Mark>> = flow.each(items, |item, each| {
-            each.then_with_output(&count_marks, item)
+        let _collected: Ref<Vec<Mark>> = flow.each_output(items, |each| {
+            let item = each.ref_of::<Mark>();
+
+            let out_refs = each.then_with_output(&count_marks, item);
+            each.output_with(out_refs);
         });
 
         flow.output_with(());
@@ -1129,8 +1201,11 @@ fn p04_forward_collection_position_is_rejected() {
             definition,
             position: forward,
         });
-        let _collected: Ref<Vec<Mark>> = flow.each(forged, |item, each| {
-            each.then_with_output(&count_marks, item)
+        let _collected: Ref<Vec<Mark>> = flow.each_output(forged, |each| {
+            let item = each.ref_of::<Mark>();
+
+            let out_refs = each.then_with_output(&count_marks, item);
+            each.output_with(out_refs);
         });
 
         flow.output_with(());
@@ -1158,9 +1233,10 @@ fn p04_unselected_branch_child_local_as_collection_is_rejected() {
     let outcome = block_on(Runtime::new().execute::<_, (), _>(
         |flow, items: Ref<Vec<Mark>>| {
             let selector = flow.then_with_output(&key_of_collection, items);
-            flow.choose(selector, |choice| {
+            flow.choose_with(selector, |choice| {
                 choice.case(Key(2), |branch| {
-                    branch.then_with_output(&key_of_collection, items)
+                    let out_refs = branch.then_with_output(&key_of_collection, items);
+                    branch.output_with(out_refs);
                 });
                 choice.case(Key(1), |branch| {
                     let definition = branch.definition_id();
@@ -1170,13 +1246,17 @@ fn p04_unselected_branch_child_local_as_collection_is_rejected() {
                         definition,
                         position: forward,
                     }));
-                    // 该分支真实登记这个位置（Node 输出），因此其 owner 就是分支 Body。
-                    branch.then_with_output(&key_of_collection, items)
+                    let out_refs = // 该分支真实登记这个位置（Node 输出），因此其 owner 就是分支 Body。
+                    branch.then_with_output(&key_of_collection, items);
+                    branch.output_with(out_refs);
                 });
             });
             let collection = forged.expect("captured the unselected branch's position");
-            let _collected: () = flow.each(collection, |item, each| {
+            let _collected: () = flow.each_output(collection, |each| {
+                let item = each.ref_of::<Mark>();
+
                 let _: () = each.then_with_output(&count_unit, item);
+                each.output::<()>();
             });
 
             flow.output_with(());
@@ -1216,12 +1296,15 @@ fn p04_legal_deep_capture_inside_item_body_runs() {
     reset_all();
     let collected = block_on(Runtime::new().execute::<_, (), _>(
         |flow, (items, rules): (Ref<Vec<Mark>>, Ref<Rules>)| {
-            let _: () = flow.each(items, |item, each| {
+            let _: () = flow.each_output(items, |each| {
+                let item = each.ref_of();
+
                 each.chain(|sub| {
                     let scored = sub.then_with_output(&score_of, (item, rules));
                     let out_refs = sub.then_with_output(&report_of, (item, scored));
                     sub.output_with(out_refs);
                 });
+                each.output::<()>();
             });
 
             flow.output_with(());
@@ -1245,9 +1328,12 @@ fn p05_body_builds_once_per_execute_and_rebinds_per_item_scope() {
     reset_all();
     let first = block_on(runtime.execute::<_, Vec<Mark>, _>(
         |flow, items: Ref<Vec<Mark>>| {
-            let out_refs = flow.each(items, |item, each| {
+            let out_refs: Ref<Vec<Mark>> = flow.each_output(items, |each| {
+                let item = each.ref_of::<Mark>();
+
                 bump_item_body_builds();
-                each.then_with_output(&count_marks, item)
+                let out_refs = each.then_with_output(&count_marks, item);
+                each.output_with(out_refs);
             });
             flow.output_with(out_refs);
         },
@@ -1276,9 +1362,12 @@ fn p05_body_builds_once_per_execute_and_rebinds_per_item_scope() {
     reset_all();
     let second = block_on(runtime.execute::<_, Vec<Mark>, _>(
         |flow, items: Ref<Vec<Mark>>| {
-            let out_refs = flow.each(items, |item, each| {
+            let out_refs: Ref<Vec<Mark>> = flow.each_output(items, |each| {
+                let item = each.ref_of::<Mark>();
+
                 bump_item_body_builds();
-                each.then_with_output(&count_marks, item)
+                let out_refs = each.then_with_output(&count_marks, item);
+                each.output_with(out_refs);
             });
             flow.output_with(out_refs);
         },
@@ -1362,9 +1451,12 @@ fn p05_body_builds_once_per_execute_and_rebinds_per_item_scope() {
 #[test]
 fn p05_one_item_body_and_one_formal_item_position_per_each() {
     let definition = build_definition::<Vec<Mark>, (), _>(|flow, items| {
-        let _collected = flow.each(items, |item, each| {
+        let _collected: Ref<Vec<Mark>> = flow.each_output(items, |each| {
+            let item = each.ref_of::<Mark>();
+
             let first = each.then_with_output(&count_marks, item);
-            each.then_with_output(&count_marks, first)
+            let out_refs = each.then_with_output(&count_marks, first);
+            each.output_with(out_refs);
         });
 
         flow.output_with(());
@@ -1400,8 +1492,11 @@ fn p06_real_scopes_frames_and_single_execution_domain() {
     reset_all();
     let output = block_on(Runtime::new().execute::<_, Vec<Mark>, _>(
         |flow, items: Ref<Vec<Mark>>| {
-            let out_refs = flow.each(items, |item, each| {
-                each.then_with_output(&count_marks, item)
+            let out_refs: Ref<Vec<Mark>> = flow.each_output(items, |each| {
+                let item = each.ref_of::<Mark>();
+
+                let out_refs = each.then_with_output(&count_marks, item);
+                each.output_with(out_refs);
             });
             flow.output_with(out_refs);
         },
@@ -1543,10 +1638,13 @@ fn p06_group_consume_reports_the_item_and_its_each_owner() {
     reset_all();
     let output = block_on(Runtime::new().execute::<_, (Vec<Mark>, Vec<Mark>), _>(
         |flow, items: Ref<Vec<Mark>>| {
-            let out_refs = flow.each(items, |item, each| {
+            let out_refs: (Ref<Vec<Mark>>, Ref<Vec<Mark>>) = flow.each_output(items, |each| {
+                let item = each.ref_of::<Mark>();
+
                 let first = each.then_with_output(&count_marks, item);
                 let second = each.then_with_output(&count_marks, item);
-                (first, second)
+                let out_refs = (first, second);
+                each.output_with(out_refs);
             });
             flow.output_with(out_refs);
         },
@@ -1650,8 +1748,11 @@ fn p07_item_borrow_is_the_original_element_of_the_collection() {
     reset_all();
     let output = block_on(Runtime::new().execute::<_, Vec<Score>, _>(
         |flow, items: Ref<Vec<Heavy>>| {
-            let out_refs = flow.each(items, |item, each| {
-                each.then_with_output(&note_heavy, (item, items))
+            let out_refs: Ref<Vec<Score>> = flow.each_output(items, |each| {
+                let item = each.ref_of();
+
+                let out_refs = each.then_with_output(&note_heavy, (item, items));
+                each.output_with(out_refs);
             });
             flow.output_with(out_refs);
         },
@@ -1791,10 +1892,13 @@ fn p07_data_id_sequence_matches_produced_values() {
         let collection: Vec<Mark> = (0..items).map(|index| Mark(index as u32)).collect();
         let output = block_on(Runtime::new().execute::<_, (Vec<Mark>, Vec<Mark>), _>(
             |flow, marks: Ref<Vec<Mark>>| {
-                let out_refs = flow.each(marks, |item, each| {
+                let out_refs: (Ref<Vec<Mark>>, Ref<Vec<Mark>>) = flow.each_output(marks, |each| {
+                    let item = each.ref_of::<Mark>();
+
                     let first = each.then_with_output(&count_marks, item);
                     let second = each.then_with_output(&count_marks, item);
-                    (first, second)
+                    let out_refs = (first, second);
+                    each.output_with(out_refs);
                 });
                 flow.output_with(out_refs);
             },
@@ -1888,7 +1992,9 @@ fn p08_collection_and_ancestors_are_imported_once_per_layer() {
     let definition = build_definition::<(Vec<Mark>, Rules), (), _>(|flow, (marks, rules)| {
         collection_position = Some(marks.handle().position);
         rules_position = Some(rules.handle().position);
-        let _collected: () = flow.each(marks, |item, each| {
+        let _collected: () = flow.each_output(marks, |each| {
+            let item = each.ref_of();
+
             let _: () = each.then_with_output(&read_pair, (item, rules));
             let _: () = each.then_with_output(&read_marks, marks);
             each.chain(|sub| {
@@ -1901,10 +2007,14 @@ fn p08_collection_and_ancestors_are_imported_once_per_layer() {
                 let _: () = attempt.then_with_output(&read_marks, marks);
                 attempt.output::<()>();
             });
-            each.each(marks, |nested_item, nested| {
+            each.each(marks, |nested| {
+                let nested_item = nested.ref_of();
+
                 let _: () = nested.then_with_output(&read_pair, (nested_item, rules));
                 let _: () = nested.then_with_output(&read_marks, marks);
+                nested.output::<()>();
             });
+            each.output::<()>();
         });
 
         flow.output_with(());
@@ -2005,9 +2115,12 @@ fn p08_collection_and_ancestors_are_imported_once_per_layer() {
     // 位置），EachScope 只持有（集合 + 祖先）两个不同位置各一份。
     let output = block_on(Runtime::new().execute::<_, Vec<Score>, _>(
         |flow, (marks, rules): (Ref<Vec<Mark>>, Ref<Rules>)| {
-            let out_refs = flow.each(marks, |item, each| {
+            let out_refs: Ref<Vec<Score>> = flow.each_output(marks, |each| {
+                let item = each.ref_of();
+
                 let _: () = each.then_with_output(&read_pair, (item, rules));
-                each.then_with_output(&score_of, (item, rules))
+                let out_refs = each.then_with_output(&score_of, (item, rules));
+                each.output_with(out_refs);
             });
             flow.output_with(out_refs);
         },
@@ -2114,9 +2227,12 @@ fn p12_empty_collection_finishes_empty_vecs_without_items() {
     reset_all();
     let output = block_on(Runtime::new().execute::<_, Vec<Mark>, _>(
         |flow, marks: Ref<Vec<Mark>>| {
-            let out_refs = flow.each(marks, |item, each| {
+            let out_refs: Ref<Vec<Mark>> = flow.each_output(marks, |each| {
+                let item = each.ref_of::<Mark>();
+
                 bump_item_body_builds();
-                each.then_with_output(&count_marks, item)
+                let out_refs = each.then_with_output(&count_marks, item);
+                each.output_with(out_refs);
             });
             flow.output_with(out_refs);
         },
@@ -2154,11 +2270,14 @@ fn p12_empty_collection_finishes_empty_vecs_without_items() {
     reset_all();
     let output = block_on(Runtime::new().execute::<_, (Vec<Mark>, Vec<Mark>), _>(
         |flow, marks: Ref<Vec<Mark>>| {
-            let out_refs = flow.each(marks, |item, each| {
+            let out_refs: (Ref<Vec<Mark>>, Ref<Vec<Mark>>) = flow.each_output(marks, |each| {
+                let item = each.ref_of::<Mark>();
+
                 bump_item_body_builds();
                 let first = each.then_with_output(&count_marks, item);
                 let second = each.then_with_output(&count_marks, item);
-                (first, second)
+                let out_refs = (first, second);
+                each.output_with(out_refs);
             });
             flow.output_with(out_refs);
         },
@@ -2180,9 +2299,12 @@ fn p12_empty_collection_finishes_empty_vecs_without_items() {
     reset_all();
     let output = block_on(Runtime::new().execute::<_, (), _>(
         |flow, marks: Ref<Vec<Mark>>| {
-            let _collected: () = flow.each(marks, |item, each| {
+            let _collected: () = flow.each_output(marks, |each| {
+                let item = each.ref_of::<Mark>();
+
                 bump_item_body_builds();
                 let _: () = each.then_with_output(&count_unit, item);
+                each.output::<()>();
             });
 
             flow.output_with(());
@@ -2233,9 +2355,12 @@ fn p12_illegal_static_source_is_rejected_with_an_empty_collection() {
     let outcome = block_on(Runtime::new().execute::<_, Mark, _>(
         |flow, items: Ref<Vec<Mark>>| {
             let mut escaped: Option<Ref<Mark>> = None;
-            let _collected: () = flow.each(items, |item, each| {
+            let _collected: () = flow.each_output(items, |each| {
+                let item = each.ref_of();
+
                 escaped = Some(item);
                 let _: () = each.then_with_output(&count_unit, item);
+                each.output::<()>();
             });
             let leaked = escaped.expect("captured the formal item");
             let out_refs = flow.then_with_output(&count_marks, leaked);

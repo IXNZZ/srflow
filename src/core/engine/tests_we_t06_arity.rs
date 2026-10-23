@@ -122,8 +122,19 @@ fn each_eight_slot_body_output_runs_with_distinct_collector_identities() {
         Vec<Out>,
     ), _>(
         |flow: &mut Flow<'_>, items: Ref<Vec<Item>>| {
-            let out_refs = flow.each(items, |item, sub| {
-                (
+            let out_refs: (
+                Ref<Vec<Out>>,
+                Ref<Vec<Out>>,
+                Ref<Vec<Out>>,
+                Ref<Vec<Out>>,
+                Ref<Vec<Out>>,
+                Ref<Vec<Out>>,
+                Ref<Vec<Out>>,
+                Ref<Vec<Out>>,
+            ) = flow.each_output(items, |sub| {
+                let item = sub.ref_of::<Item>();
+
+                let out_refs = (
                     sub.then_with_output(slot1, item),
                     sub.then_with_output(slot2, item),
                     sub.then_with_output(slot3, item),
@@ -132,7 +143,8 @@ fn each_eight_slot_body_output_runs_with_distinct_collector_identities() {
                     sub.then_with_output(slot6, item),
                     sub.then_with_output(slot7, item),
                     sub.then_with_output(slot8, item),
-                )
+                );
+                sub.output_with(out_refs);
             });
             flow.output_with(out_refs);
         },
@@ -225,8 +237,11 @@ fn generic_derive_data_wrapper_aggregates_as_each_collection_elements() {
     let runtime = Runtime::new();
     let outcome = block_on(runtime.execute::<_, Vec<Wrapper<u32>>, _>(
         |flow: &mut Flow<'_>, items: Ref<Vec<Wrapper<u32>>>| {
-            let out_refs = flow.each(items, |item, sub| {
-                sub.then_with_output(double_wrapper, item)
+            let out_refs: Ref<Vec<Wrapper<u32>>> = flow.each_output(items, |sub| {
+                let item = sub.ref_of::<Wrapper<u32>>();
+
+                let out_refs = sub.then_with_output(double_wrapper, item);
+                sub.output_with(out_refs);
             });
             flow.output_with(out_refs);
         },

@@ -196,10 +196,13 @@ async fn report_of(query: Query<(&Item, &Score)>) -> Result<Report, BodyError> {
 
 /// Each 多输出 Definition：逐项形成 `Ref<Vec<Score>>`／`Ref<Vec<Report>>`。
 fn score_and_report<'n>(flow: &mut Flow<'n>, items: Ref<Vec<Item>>) {
-    let out_refs = flow.each(items, |item, each| {
+    let out_refs: (Ref<Vec<Score>>, Ref<Vec<Report>>) = flow.each_output(items, |each| {
+        let item = each.ref_of::<Item>();
+
         let score = each.then_with_output(&score_of, item);
         let report = each.then_with_output(&report_of, (item, score));
-        (score, report)
+        let out_refs = (score, report);
+        each.output_with(out_refs);
     });
     flow.output_with(out_refs);
 }

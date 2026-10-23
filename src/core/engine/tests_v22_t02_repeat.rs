@@ -132,15 +132,15 @@ fn b10_each_runs_one_factory_per_item_with_independent_identity() {
     let collected: Vec<Item> = block_on(runtime.execute(
         |flow, items: Ref<Vec<u32>>| {
             *root_counter.borrow_mut() += 1;
-            let out_refs = flow.each(items, move |item, sub| {
+            let out_refs: Ref<Vec<Item>> = flow.each_output(items, move |sub| {
                 *body_counter.borrow_mut() += 1;
-                // item 由旧签名给出；Factory 每项独立构造新的 owned Data。
-                let _ = item;
+                // Factory 每项独立构造新的 owned Data；item 输出经 output_with 声明。
                 let calls = Rc::clone(&calls);
-                sub.provide_output(move || {
+                let item = sub.provide_output(move || {
                     calls.set(calls.get() + 1);
                     Item(calls.get())
-                })
+                });
+                sub.output_with(item);
             });
             flow.output_with(out_refs);
         },
@@ -295,13 +295,14 @@ fn b10_empty_collection_still_builds_the_body_without_factory_calls() {
     let runtime = Runtime;
     let collected: Vec<Item> = block_on(runtime.execute(
         |flow, items: Ref<Vec<u32>>| {
-            let out_refs = flow.each(items, move |_item, sub| {
+            let out_refs: Ref<Vec<Item>> = flow.each_output(items, move |sub| {
                 *body_counter.borrow_mut() += 1;
                 let calls = Rc::clone(&calls);
-                sub.provide_output(move || {
+                let item = sub.provide_output(move || {
                     calls.set(calls.get() + 1);
                     Item(0)
-                })
+                });
+                sub.output_with(item);
             });
             flow.output_with(out_refs);
         },
@@ -717,20 +718,22 @@ fn b12_unselected_branch_never_runs_its_factory() {
     let runtime = Runtime;
     let selected: Item = block_on(runtime.execute(
         |flow, selector: Ref<Route>| {
-            let out_refs = flow.choose(selector, |choice| {
+            let out_refs: Ref<Item> = flow.choose_with_output(selector, |choice| {
                 choice.case(Route(true), |sub| {
-                    sub.provide_output(|| {
+                    let out_refs = sub.provide_output(|| {
                         selected_calls.fetch_add(1, Ordering::SeqCst);
                         Item(1)
-                    })
+                    });
+                    sub.output_with(out_refs);
                 });
                 // 未选分支的 Factory 只是登记能力，运行期不执行。
                 choice.case(Route(false), |sub| {
-                    sub.provide_output(|| {
+                    let out_refs = sub.provide_output(|| {
                         unselected_calls.fetch_add(1, Ordering::SeqCst);
                         Item(2)
-                    })
-                })
+                    });
+                    sub.output_with(out_refs);
+                });
             });
             flow.output_with(out_refs);
         },

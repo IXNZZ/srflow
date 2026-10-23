@@ -7,7 +7,7 @@
 //! 运行期只执行选中的一个分支；无匹配且无 otherwise 时返回 `RunError::NoMatchingCase`。
 
 use futures::executor::block_on;
-use srflow::{BodyError, Data, Query, RunError, Runtime};
+use srflow::{BodyError, Data, Query, Ref, RunError, Runtime};
 use std::rc::Rc;
 
 /// 业务路由键：只实现 `Data + PartialEq`；`source` 用 `Rc` 承载共享标签。
@@ -83,10 +83,19 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         .execute::<_, Report, _>(
             |flow, seed| {
                 let selector = flow.then_with_output(route_of, seed);
-                let picked = flow.choose(selector, |choice| {
-                    choice.case(route(1), |branch| branch.then_with_output(double, seed));
-                    choice.case(route(2), |branch| branch.then_with_output(triple, seed));
-                    choice.otherwise(|branch| branch.then_with_output(fallback, seed));
+                let picked: Ref<Amount> = flow.choose_with_output(selector, |choice| {
+                    choice.case(route(1), |branch| {
+                        let out_refs = branch.then_with_output(double, seed);
+                        branch.output_with(out_refs);
+                    });
+                    choice.case(route(2), |branch| {
+                        let out_refs = branch.then_with_output(triple, seed);
+                        branch.output_with(out_refs);
+                    });
+                    choice.otherwise(|branch| {
+                        let out_refs = branch.then_with_output(fallback, seed);
+                        branch.output_with(out_refs);
+                    });
                 });
                 let out_refs = flow.then_with_output(report, picked);
                 flow.output_with(out_refs);
@@ -101,10 +110,19 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         .execute::<_, Report, _>(
             |flow, seed| {
                 let selector = flow.then_with_output(route_of, seed);
-                let picked = flow.choose(selector, |choice| {
-                    choice.case(route(1), |branch| branch.then_with_output(double, seed));
-                    choice.case(route(2), |branch| branch.then_with_output(triple, seed));
-                    choice.otherwise(|branch| branch.then_with_output(fallback, seed));
+                let picked: Ref<Amount> = flow.choose_with_output(selector, |choice| {
+                    choice.case(route(1), |branch| {
+                        let out_refs = branch.then_with_output(double, seed);
+                        branch.output_with(out_refs);
+                    });
+                    choice.case(route(2), |branch| {
+                        let out_refs = branch.then_with_output(triple, seed);
+                        branch.output_with(out_refs);
+                    });
+                    choice.otherwise(|branch| {
+                        let out_refs = branch.then_with_output(fallback, seed);
+                        branch.output_with(out_refs);
+                    });
                 });
                 let out_refs = flow.then_with_output(report, picked);
                 flow.output_with(out_refs);
@@ -119,9 +137,15 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         .execute::<_, Report, _>(
             |flow, seed| {
                 let selector = flow.then_with_output(route_of, seed);
-                let picked = flow.choose(selector, |choice| {
-                    choice.case(route(1), |branch| branch.then_with_output(double, seed));
-                    choice.case(route(2), |branch| branch.then_with_output(triple, seed));
+                let picked: Ref<Amount> = flow.choose_with_output(selector, |choice| {
+                    choice.case(route(1), |branch| {
+                        let out_refs = branch.then_with_output(double, seed);
+                        branch.output_with(out_refs);
+                    });
+                    choice.case(route(2), |branch| {
+                        let out_refs = branch.then_with_output(triple, seed);
+                        branch.output_with(out_refs);
+                    });
                 });
                 let out_refs = flow.then_with_output(report, picked);
                 flow.output_with(out_refs);

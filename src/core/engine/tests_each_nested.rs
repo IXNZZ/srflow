@@ -202,8 +202,16 @@ fn r01_witness_shape_executes_non_empty_and_stays_empty_for_empty_inputs() {
     let runtime = Runtime::new();
     let non_empty = block_on(runtime.execute::<_, Vec<Vec<Total>>, _>(
         |flow, groups: Ref<Vec<Vec<Item>>>| {
-            let out_refs: Ref<Vec<Vec<Total>>> = flow.each(groups, |group, outer| {
-                outer.each(group, |item, inner| inner.then_with_output(increment, item))
+            let out_refs: Ref<Vec<Vec<Total>>> = flow.each_output(groups, |outer| {
+                let group = outer.ref_of::<Vec<Item>>();
+
+                let out_refs: Ref<Vec<Total>> = outer.each_output(group, |inner| {
+                    let item = inner.ref_of::<Item>();
+
+                    let out_refs = inner.then_with_output(increment, item);
+                    inner.output_with(out_refs);
+                });
+                outer.output_with(out_refs);
             });
             flow.output_with(out_refs);
         },
@@ -220,8 +228,16 @@ fn r01_witness_shape_executes_non_empty_and_stays_empty_for_empty_inputs() {
     reset_observations();
     let empty = block_on(runtime.execute::<_, Vec<Vec<Total>>, _>(
         |flow, groups: Ref<Vec<Vec<Item>>>| {
-            let out_refs = flow.each(groups, |group, outer| {
-                outer.each(group, |item, inner| inner.then_with_output(increment, item))
+            let out_refs: Ref<Vec<Vec<Total>>> = flow.each_output(groups, |outer| {
+                let group = outer.ref_of::<Vec<Item>>();
+
+                let out_refs: Ref<Vec<Total>> = outer.each_output(group, |inner| {
+                    let item = inner.ref_of::<Item>();
+
+                    let out_refs = inner.then_with_output(increment, item);
+                    inner.output_with(out_refs);
+                });
+                outer.output_with(out_refs);
             });
             flow.output_with(out_refs);
         },
@@ -239,8 +255,16 @@ fn r01_the_outer_collection_stays_readable_after_the_nested_each() {
     reset_observations();
     let (nested, total) = block_on(Runtime::new().execute::<_, (Vec<Vec<Total>>, u64), _>(
         |flow, groups: Ref<Vec<Vec<Item>>>| {
-            let collected = flow.each(groups, |group, outer| {
-                outer.each(group, |item, inner| inner.then_with_output(increment, item))
+            let collected: Ref<Vec<Vec<Total>>> = flow.each_output(groups, |outer| {
+                let group = outer.ref_of::<Vec<Item>>();
+
+                let out_refs: Ref<Vec<Total>> = outer.each_output(group, |inner| {
+                    let item = inner.ref_of::<Item>();
+
+                    let out_refs = inner.then_with_output(increment, item);
+                    inner.output_with(out_refs);
+                });
+                outer.output_with(out_refs);
             });
             // 外层 Each 之后仍读取同一外层集合位置：来源没有被消费或搬走。
             let total = flow.then_with_output(&count_items, groups);
@@ -262,10 +286,21 @@ fn r01_three_levels_of_item_backed_collections_keep_values_and_caps() {
     reset_observations();
     let collected = block_on(Runtime::new().execute::<_, Vec<Vec<Vec<Total>>>, _>(
         |flow, cube: Ref<Vec<Vec<Vec<Item>>>>| {
-            let out_refs = flow.each(cube, |plane, level1| {
-                level1.each(plane, |row, level2| {
-                    level2.each(row, |cell, level3| level3.then_with_output(increment, cell))
-                })
+            let out_refs: Ref<Vec<Vec<Vec<Total>>>> = flow.each_output(cube, |level1| {
+                let plane = level1.ref_of::<Vec<Vec<Item>>>();
+
+                let out_refs: Ref<Vec<Vec<Total>>> = level1.each_output(plane, |level2| {
+                    let row = level2.ref_of::<Vec<Item>>();
+
+                    let out_refs: Ref<Vec<Total>> = level2.each_output(row, |level3| {
+                        let cell = level3.ref_of::<Item>();
+
+                        let out_refs = level3.then_with_output(increment, cell);
+                        level3.output_with(out_refs);
+                    });
+                    level2.output_with(out_refs);
+                });
+                level1.output_with(out_refs);
             });
             flow.output_with(out_refs);
         },
@@ -295,13 +330,20 @@ fn r01_a_chain_child_body_can_use_the_item_backed_collection() {
     reset_observations();
     let collected = block_on(Runtime::new().execute::<_, Vec<Vec<Total>>, _>(
         |flow, groups: Ref<Vec<Vec<Item>>>| {
-            let out_refs: Ref<Vec<Vec<Total>>> = flow.each(groups, |group, outer| {
+            let out_refs: Ref<Vec<Vec<Total>>> = flow.each_output(groups, |outer| {
+                let group = outer.ref_of::<Vec<Item>>();
+
                 let group_refs: Ref<Vec<Total>> = outer.chain_output(move |sub| {
-                    let out_refs =
-                        sub.each(group, |item, inner| inner.then_with_output(increment, item));
+                    let out_refs: Ref<Vec<Total>> = sub.each_output(group, |inner| {
+                        let item = inner.ref_of::<Item>();
+
+                        let out_refs = inner.then_with_output(increment, item);
+                        inner.output_with(out_refs);
+                    });
                     sub.output_with(out_refs);
                 });
-                group_refs
+                let out_refs = group_refs;
+                outer.output_with(out_refs);
             });
             flow.output_with(out_refs);
         },
@@ -769,10 +811,16 @@ fn r01_control_inside_the_nested_body_drops_each_instance_once() {
     reset_observations();
     let outcome = block_on(Runtime::new().execute::<_, Vec<Vec<Total>>, _>(
         |flow, groups: Ref<Vec<Vec<TrackItem>>>| {
-            let out_refs = flow.each(groups, |group, outer| {
-                outer.each(group, |item, inner| {
-                    inner.then_with_output(break_inside_nested, item)
-                })
+            let out_refs: Ref<Vec<Vec<Total>>> = flow.each_output(groups, |outer| {
+                let group = outer.ref_of::<Vec<TrackItem>>();
+
+                let out_refs: Ref<Vec<Total>> = outer.each_output(group, |inner| {
+                    let item = inner.ref_of::<TrackItem>();
+
+                    let out_refs = inner.then_with_output(break_inside_nested, item);
+                    inner.output_with(out_refs);
+                });
+                outer.output_with(out_refs);
             });
             flow.output_with(out_refs);
         },
@@ -794,10 +842,16 @@ fn r01_failure_inside_the_nested_body_drops_each_instance_once() {
     reset_observations();
     let outcome = block_on(Runtime::new().execute::<_, Vec<Vec<Total>>, _>(
         |flow, groups: Ref<Vec<Vec<TrackItem>>>| {
-            let out_refs = flow.each(groups, |group, outer| {
-                outer.each(group, |item, inner| {
-                    inner.then_with_output(fail_inside_nested, item)
-                })
+            let out_refs: Ref<Vec<Vec<Total>>> = flow.each_output(groups, |outer| {
+                let group = outer.ref_of::<Vec<TrackItem>>();
+
+                let out_refs: Ref<Vec<Total>> = outer.each_output(group, |inner| {
+                    let item = inner.ref_of::<TrackItem>();
+
+                    let out_refs = inner.then_with_output(fail_inside_nested, item);
+                    inner.output_with(out_refs);
+                });
+                outer.output_with(out_refs);
             });
             flow.output_with(out_refs);
         },
@@ -821,10 +875,16 @@ fn r01_pending_cancel_inside_the_nested_body_leaves_no_dangling_borrow() {
     let runtime = Runtime::new();
     let mut future = Box::pin(runtime.execute::<_, Vec<Vec<TrackedTotal>>, _>(
         |flow, (groups, shared): (Ref<Vec<Vec<TrackItem>>>, Ref<SharedLog>)| {
-            let out_refs = flow.each(groups, |group, outer| {
-                outer.each(group, |item, inner| {
-                    inner.then_with_output(&produce_then_pend, (item, shared))
-                })
+            let out_refs: Ref<Vec<Vec<TrackedTotal>>> = flow.each_output(groups, |outer| {
+                let group = outer.ref_of::<Vec<TrackItem>>();
+
+                let out_refs: Ref<Vec<TrackedTotal>> = outer.each_output(group, |inner| {
+                    let item = inner.ref_of::<TrackItem>();
+
+                    let out_refs = inner.then_with_output(&produce_then_pend, (item, shared));
+                    inner.output_with(out_refs);
+                });
+                outer.output_with(out_refs);
             });
             flow.output_with(out_refs);
         },

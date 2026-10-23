@@ -176,12 +176,18 @@ fn s04_plain_collection_slots_aggregate_in_item_order() {
         block_on(
             runtime.execute::<_, (Vec<Score>, Vec<Score>, Vec<Report>, Total), _>(
                 |flow: &mut Flow<'_>, (items, rules): (Ref<Vec<Item>>, Ref<Rule>)| {
-                    let (scores, bumped, reports) = flow.each(items, |item, each| {
-                        let score = each.then_with_output(&node, (item, rules));
-                        let bumped = each.then_with_output(&bump_score, (item, score));
-                        let report = each.then_with_output(&make_report, (item, score));
-                        (score, bumped, report)
-                    });
+                    // 聚合三槽的显式类型（O 需要由调用方钉住）；用具名别名避免复杂类型警告。
+                    type CollectedSlots = (Ref<Vec<Score>>, Ref<Vec<Score>>, Ref<Vec<Report>>);
+                    let (scores, bumped, reports): CollectedSlots =
+                        flow.each_output(items, |each| {
+                            let item = each.ref_of::<Item>();
+
+                            let score = each.then_with_output(&node, (item, rules));
+                            let bumped = each.then_with_output(&bump_score, (item, score));
+                            let report = each.then_with_output(&make_report, (item, score));
+                            let out_refs = (score, bumped, report);
+                            each.output_with(out_refs);
+                        });
                     let counted = flow.then_with_output(&count_items, items);
                     let out_refs = (scores, bumped, reports, counted);
                     flow.output_with(out_refs);
@@ -241,10 +247,16 @@ fn s04_item_backed_nested_and_three_level_collections() {
     let runtime = Runtime::new();
     let (nested, counted) = block_on(runtime.execute::<_, (Vec<Vec<Total>>, Count), _>(
         |flow: &mut Flow<'_>, groups: Ref<Vec<Vec<Item>>>| {
-            let nested = flow.each(groups, |group, outer| {
-                outer.each(group, |item, inner| {
-                    inner.then_with_output(&increment, item)
-                })
+            let nested: Ref<Vec<Vec<Total>>> = flow.each_output(groups, |outer| {
+                let group = outer.ref_of::<Vec<Item>>();
+
+                let out_refs: Ref<Vec<Total>> = outer.each_output(group, |inner| {
+                    let item = inner.ref_of::<Item>();
+
+                    let out_refs = inner.then_with_output(&increment, item);
+                    inner.output_with(out_refs);
+                });
+                outer.output_with(out_refs);
             });
             let counted = flow.then_with_output(&count_nested, groups);
             let out_refs = (nested, counted);
@@ -268,12 +280,21 @@ fn s04_item_backed_nested_and_three_level_collections() {
     reset();
     let three = block_on(runtime.execute::<_, Vec<Vec<Vec<Total>>>, _>(
         |flow: &mut Flow<'_>, cube: Ref<Vec<Vec<Vec<Item>>>>| {
-            let out_refs = flow.each(cube, |plane, level1| {
-                level1.each(plane, |row, level2| {
-                    level2.each(row, |cell, level3| {
-                        level3.then_with_output(&increment, cell)
-                    })
-                })
+            let out_refs: Ref<Vec<Vec<Vec<Total>>>> = flow.each_output(cube, |level1| {
+                let plane = level1.ref_of::<Vec<Vec<Item>>>();
+
+                let out_refs: Ref<Vec<Vec<Total>>> = level1.each_output(plane, |level2| {
+                    let row = level2.ref_of::<Vec<Item>>();
+
+                    let out_refs: Ref<Vec<Total>> = level2.each_output(row, |level3| {
+                        let cell = level3.ref_of::<Item>();
+
+                        let out_refs = level3.then_with_output(&increment, cell);
+                        level3.output_with(out_refs);
+                    });
+                    level2.output_with(out_refs);
+                });
+                level1.output_with(out_refs);
             });
             flow.output_with(out_refs);
         },
@@ -298,8 +319,11 @@ fn s04_unit_and_empty_collections_run_no_body() {
     // unit body：不产生业务槽。
     let outcome: Result<(), RunError> = block_on(runtime.execute(
         |flow: &mut Flow<'_>, items: Ref<Vec<Item>>| {
-            let () = flow.each(items, |item, each| {
+            let () = flow.each_output(items, |each| {
+                let item = each.ref_of::<Item>();
+
                 each.then_with_output(&audit, item);
+                each.output::<()>();
             });
             flow.output_with(());
         },
@@ -312,7 +336,12 @@ fn s04_unit_and_empty_collections_run_no_body() {
     reset();
     let empty = block_on(runtime.execute::<_, Vec<Total>, _>(
         |flow: &mut Flow<'_>, items: Ref<Vec<Item>>| {
-            let out_refs = flow.each(items, |item, each| each.then_with_output(&increment, item));
+            let out_refs: Ref<Vec<Total>> = flow.each_output(items, |each| {
+                let item = each.ref_of::<Item>();
+
+                let out_refs = each.then_with_output(&increment, item);
+                each.output_with(out_refs);
+            });
             flow.output_with(out_refs);
         },
         Vec::<Item>::new(),
@@ -359,10 +388,13 @@ fn s04_item_output_is_not_consumable() {
     let runtime = Runtime::new();
     let outcome: Result<Vec<Item>, RunError> = block_on(runtime.execute(
         |flow: &mut Flow<'_>, items: Ref<Vec<Item>>| {
-            let out_refs = flow.each(items, |item, each| {
+            let out_refs: Ref<Vec<Item>> = flow.each_output(items, |each| {
+                let item = each.ref_of::<Item>();
+
                 each.then_with_output(&touch, item);
-                // 期望拒绝：formal item 自身出现在被收集的输出槽。
-                item
+                let out_refs = // 期望拒绝：formal item 自身出现在被收集的输出槽。
+                item;
+                each.output_with(out_refs);
             });
             flow.output_with(out_refs);
         },
@@ -388,10 +420,13 @@ fn s04_ancestor_alias_output_is_not_consumable() {
     let runtime = Runtime::new();
     let outcome: Result<(Vec<Mark>, Vec<Rule>), RunError> = block_on(runtime.execute(
         |flow: &mut Flow<'_>, (items, rules): (Ref<Vec<Item>>, Ref<Rule>)| {
-            let out_refs = flow.each(items, |item, each| {
+            let out_refs: (Ref<Vec<Mark>>, Ref<Vec<Rule>>) = flow.each_output(items, |each| {
+                let item = each.ref_of::<Item>();
+
                 let mark = each.then_with_output(&touch_with_rule, (item, rules));
-                // 期望拒绝：ancestor Data（Root 输入 rules）出现在被收集的输出槽。
-                (mark, rules)
+                let out_refs = // 期望拒绝：ancestor Data（Root 输入 rules）出现在被收集的输出槽。
+                (mark, rules);
+                each.output_with(out_refs);
             });
             flow.output_with(out_refs);
         },
@@ -412,10 +447,13 @@ fn s04_duplicate_owned_alias_is_not_consumable() {
     let runtime = Runtime::new();
     let outcome: Result<(Vec<Mark>, Vec<Mark>), RunError> = block_on(runtime.execute(
         |flow: &mut Flow<'_>, items: Ref<Vec<Item>>| {
-            let out_refs = flow.each(items, |item, each| {
+            let out_refs: (Ref<Vec<Mark>>, Ref<Vec<Mark>>) = flow.each_output(items, |each| {
+                let item = each.ref_of::<Item>();
+
                 let mark = each.then_with_output(&touch, item);
-                // 期望拒绝：同一个 owned Ref 出现在两个输出槽（Ref 是 Copy，形态合法）。
-                (mark, mark)
+                let out_refs = // 期望拒绝：同一个 owned Ref 出现在两个输出槽（Ref 是 Copy，形态合法）。
+                (mark, mark);
+                each.output_with(out_refs);
             });
             flow.output_with(out_refs);
         },
@@ -530,21 +568,24 @@ fn s05_one_branch_runs_and_slots_stay_consistent() {
             |flow: &mut Flow<'_>, seed: Ref<Seed>| {
                 let selector = flow.then_with_output(&route_of, seed);
                 // 同一入口：Choose 的两槽输出由后续 parent step 读取。
-                let (amount, detail) = flow.choose(selector, |choice| {
+                let (amount, detail) = flow.choose_with_output(selector, |choice| {
                     choice.case(route(1, "selector"), |branch| {
                         let amount = branch.then_with_output(&double, seed);
                         let detail = branch.then_with_output(&detail, amount);
-                        (amount, detail)
+                        let out_refs = (amount, detail);
+                        branch.output_with(out_refs);
                     });
                     choice.case(route(2, "selector"), |branch| {
                         let amount = branch.then_with_output(&triple, seed);
                         let detail = branch.then_with_output(&detail, amount);
-                        (amount, detail)
+                        let out_refs = (amount, detail);
+                        branch.output_with(out_refs);
                     });
                     choice.otherwise(|branch| {
                         let amount = branch.then_with_output(&fallback, seed);
                         let detail = branch.then_with_output(&detail, amount);
-                        (amount, detail)
+                        let out_refs = (amount, detail);
+                        branch.output_with(out_refs);
                     });
                 });
                 let out_refs = flow.then_with_output(&sum, (amount, detail));
@@ -576,11 +617,15 @@ fn s05_key_uses_partial_eq_without_extra_bounds() {
     let output = block_on(runtime.execute::<_, Amount, _>(
         |flow: &mut Flow<'_>, seed: Ref<Seed>| {
             let selector = flow.then_with_output(&route_of, seed);
-            let out_refs = flow.choose(selector, |choice| {
+            let out_refs: Ref<Amount> = flow.choose_with_output(selector, |choice| {
                 choice.case(route(1, "different"), |branch| {
-                    branch.then_with_output(&double, seed)
+                    let out_refs = branch.then_with_output(&double, seed);
+                    branch.output_with(out_refs);
                 });
-                choice.otherwise(|branch| branch.then_with_output(&fallback, seed))
+                choice.otherwise(|branch| {
+                    let out_refs = branch.then_with_output(&fallback, seed);
+                    branch.output_with(out_refs);
+                })
             });
             flow.output_with(out_refs);
         },
@@ -602,10 +647,11 @@ fn s05_unselected_branch_illegal_source_is_rejected_at_definition() {
         |flow: &mut Flow<'_>, seed: Ref<Seed>| {
             let selector = flow.then_with_output(&route_of, seed);
             let leaked = &leaked;
-            let () = flow.choose(selector, |choice| {
+            let () = flow.choose_with_output(selector, |choice| {
                 choice.case(route(1, "selector"), |branch| {
                     let produced = branch.then_with_output(&double, seed);
                     *leaked.borrow_mut() = Some(produced);
+                    branch.output::<()>();
                 });
                 choice.case(route(2, "selector"), |branch| {
                     // 未选分支使用 sibling 分支内部的位置：Definition 静态验证必须拒绝。
@@ -617,6 +663,7 @@ fn s05_unselected_branch_illegal_source_is_rejected_at_definition() {
                             branch.then_with_output(&double, seed);
                         }
                     };
+                    branch.output::<()>();
                 });
             });
             flow.output_with(());
@@ -644,12 +691,14 @@ fn s05_duplicate_configs_and_empty_config_are_rejected() {
     let error = block_on(runtime.execute::<_, (), _>(
         |flow: &mut Flow<'_>, seed: Ref<Seed>| {
             let selector = flow.then_with_output(&route_of, seed);
-            let () = flow.choose(selector, |choice| {
+            let () = flow.choose_with_output(selector, |choice| {
                 choice.case(route(1, "selector"), |branch| {
                     branch.then_with_output(&double, seed);
+                    branch.output::<()>();
                 });
                 choice.case(route(1, "selector"), |branch| {
                     branch.then_with_output(&triple, seed);
+                    branch.output::<()>();
                 });
             });
             flow.output_with(());
@@ -667,9 +716,10 @@ fn s05_duplicate_configs_and_empty_config_are_rejected() {
     let error = block_on(runtime.execute::<_, (), _>(
         |flow: &mut Flow<'_>, seed: Ref<Seed>| {
             let selector = flow.then_with_output(&route_of, seed);
-            let () = flow.choose(selector, |choice| {
+            let () = flow.choose_with_output(selector, |choice| {
                 choice.case(route(1, "selector"), |branch| {
                     branch.then_with_output(&double, seed);
+                    branch.output::<()>();
                 });
                 choice.otherwise(|branch| {
                     branch.then_with_output(&fallback, seed);
@@ -693,7 +743,7 @@ fn s05_duplicate_configs_and_empty_config_are_rejected() {
     let error = block_on(runtime.execute::<_, (), _>(
         |flow: &mut Flow<'_>, seed: Ref<Seed>| {
             let selector = flow.then_with_output(&route_of, seed);
-            let _: () = flow.choose(selector, |_choice| {});
+            let _: () = flow.choose_with_output(selector, |_choice| {});
 
             flow.output_with(());
         },
@@ -724,11 +774,15 @@ fn s05_no_match_otherwise_and_failure_never_fall_back() {
     let covered = block_on(runtime.execute::<_, Amount, _>(
         |flow: &mut Flow<'_>, seed: Ref<Seed>| {
             let selector = flow.then_with_output(&route_of, seed);
-            let out_refs = flow.choose(selector, |choice| {
+            let out_refs: Ref<Amount> = flow.choose_with_output(selector, |choice| {
                 choice.case(route(1, "selector"), |branch| {
-                    branch.then_with_output(&double, seed)
+                    let out_refs = branch.then_with_output(&double, seed);
+                    branch.output_with(out_refs);
                 });
-                choice.otherwise(|branch| branch.then_with_output(&fallback, seed))
+                choice.otherwise(|branch| {
+                    let out_refs = branch.then_with_output(&fallback, seed);
+                    branch.output_with(out_refs);
+                })
             });
             flow.output_with(out_refs);
         },
@@ -744,9 +798,10 @@ fn s05_no_match_otherwise_and_failure_never_fall_back() {
     let error = block_on(runtime.execute::<_, (), _>(
         |flow: &mut Flow<'_>, seed: Ref<Seed>| {
             let selector = flow.then_with_output(&route_of, seed);
-            let () = flow.choose(selector, |choice| {
+            let () = flow.choose_with_output(selector, |choice| {
                 choice.case(route(1, "selector"), |branch| {
                     branch.then_with_output(&double, seed);
+                    branch.output::<()>();
                 });
             });
             flow.output_with(());
@@ -766,11 +821,15 @@ fn s05_no_match_otherwise_and_failure_never_fall_back() {
     let error = block_on(runtime.execute::<_, Amount, _>(
         |flow: &mut Flow<'_>, seed: Ref<Seed>| {
             let selector = flow.then_with_output(&route_of, seed);
-            let picked = flow.choose(selector, |choice| {
+            let picked: Ref<Amount> = flow.choose_with_output(selector, |choice| {
                 choice.case(route(1, "selector"), |branch| {
-                    branch.then_with_output(&failing, seed)
+                    let out_refs = branch.then_with_output(&failing, seed);
+                    branch.output_with(out_refs);
                 });
-                choice.otherwise(|branch| branch.then_with_output(&fallback, seed))
+                choice.otherwise(|branch| {
+                    let out_refs = branch.then_with_output(&fallback, seed);
+                    branch.output_with(out_refs);
+                })
             });
             let out_refs = flow.then_with_output(&detail, picked);
             flow.output_with(out_refs);
@@ -802,9 +861,10 @@ fn s05_no_match_otherwise_and_failure_never_fall_back() {
     let unit: Result<(), RunError> = block_on(runtime.execute(
         |flow: &mut Flow<'_>, seed: Ref<Seed>| {
             let selector = flow.then_with_output(&route_of, seed);
-            let _: () = flow.choose(selector, |choice| {
+            let _: () = flow.choose_with_output(selector, |choice| {
                 choice.case(route(1, "selector"), |branch| {
                     branch.then_with_output(&double, seed);
+                    branch.output::<()>();
                 });
             });
 

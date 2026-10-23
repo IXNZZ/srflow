@@ -1334,8 +1334,11 @@ fn e03_unselected_branch_position_as_iter_initial_is_rejected() {
     let outcome = block_on(runtime.execute::<_, u32, _>(
         |flow: &mut Flow<'_>, seed: Ref<u32>| {
             let selector = flow.then_with_output(&key_from_u32, seed);
-            flow.choose(selector, |choice| {
-                choice.case(Key(1), |branch| branch.then_with_output(&produce_u32, seed));
+            flow.choose_with(selector, |choice| {
+                choice.case(Key(1), |branch| {
+                    let out_refs = branch.then_with_output(&produce_u32, seed);
+                    branch.output_with(out_refs);
+                });
                 choice.case(Key(2), |branch| {
                     let definition = branch.definition_id();
                     let future = branch.next_position_id();
@@ -1343,7 +1346,8 @@ fn e03_unselected_branch_position_as_iter_initial_is_rejected() {
                         definition,
                         position: future,
                     }));
-                    branch.then_with_output(&produce_u32, seed)
+                    let out_refs = branch.then_with_output(&produce_u32, seed);
+                    branch.output_with(out_refs);
                 });
             });
             let initial = forged.expect("captured forged ref");
@@ -1375,8 +1379,11 @@ fn e03_unselected_branch_position_as_attempt_output_is_rejected() {
     let outcome = block_on(runtime.execute::<_, u32, _>(
         |flow: &mut Flow<'_>, seed: Ref<u32>| {
             let selector = flow.then_with_output(&key_from_u32, seed);
-            flow.choose(selector, |choice| {
-                choice.case(Key(1), |branch| branch.then_with_output(&produce_u32, seed));
+            flow.choose_with(selector, |choice| {
+                choice.case(Key(1), |branch| {
+                    let out_refs = branch.then_with_output(&produce_u32, seed);
+                    branch.output_with(out_refs);
+                });
                 choice.case(Key(2), |branch| {
                     let definition = branch.definition_id();
                     let future = branch.next_position_id();
@@ -1384,7 +1391,8 @@ fn e03_unselected_branch_position_as_attempt_output_is_rejected() {
                         definition,
                         position: future,
                     }));
-                    branch.then_with_output(&produce_u32, seed)
+                    let out_refs = branch.then_with_output(&produce_u32, seed);
+                    branch.output_with(out_refs);
                 });
             });
             let out_refs: Ref<u32> = flow.retry_output(1, |_attempt| {

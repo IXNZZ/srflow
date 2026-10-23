@@ -1013,19 +1013,27 @@ fn s03_chain_body_maps_all_six_operations() {
                 |flow, seed| {
                     let out_refs: SixOperationOutputs = flow.chain_output(|sub| {
                         let items = sub.then_with_output(items_of, seed);
-                        let scores =
-                            sub.each(items, |item, each| each.then_with_output(score_of, item));
+                        let scores: Ref<Vec<Score>> = sub.each_output(items, |each| {
+                            let item = each.ref_of::<Item>();
+
+                            let out_refs = each.then_with_output(score_of, item);
+                            each.output_with(out_refs);
+                        });
                         let amount = sub.then_with_output(amount_of, seed);
                         let nested: Ref<Amount> = sub.chain_output(|inner| {
                             let out_refs = inner.then_with_output(double_amount, amount);
                             inner.output_with(out_refs);
                         });
                         let route = sub.then_with_output(route_of, seed);
-                        let picked = sub.choose(route, |choice| {
+                        let picked: Ref<Amount> = sub.choose_with_output(route, |choice| {
                             choice.case(Route { code: 1 }, |branch| {
-                                branch.then_with_output(double_amount, amount)
+                                let out_refs = branch.then_with_output(double_amount, amount);
+                                branch.output_with(out_refs);
                             });
-                            choice.otherwise(|branch| branch.then_with_output(identity, amount));
+                            choice.otherwise(|branch| {
+                                let out_refs = branch.then_with_output(identity, amount);
+                                branch.output_with(out_refs);
+                            });
                         });
                         let report: Ref<Report> = sub.retry_output(1, |attempt| {
                             let candidate = attempt.then_with_output(amount_of, seed);

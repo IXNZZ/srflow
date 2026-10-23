@@ -16,8 +16,8 @@ use crate::core::engine::flow::Flow;
 use crate::core::engine::identity::{BodyId, DefinitionId, PositionHandle, PositionId};
 use crate::core::engine::node::Callable;
 use crate::core::engine::shape::{
-    InputOps, InputSpec, NodeOutput, OutputOps, PositionDesc, Query, RefShape, RootInput, ShapeOps,
-    TypeDesc,
+    EachCollect, EachShape, InputOps, InputSpec, NodeOutput, OutputOps, PositionDesc, Query,
+    RefShape, RootInput, ShapeOps, TypeDesc,
 };
 use crate::core::identity::{CollectorId, ScopeId};
 use crate::core::internal_error::ScopeError;
@@ -106,6 +106,8 @@ pub(crate) struct Declaration {
     /// 收口时据此隔离该 Body 派生的全部父输出（槽位对齐但保持失效），
     /// 同时保留第一份声明快照与错误首因。
     pub(crate) failed: bool,
+    /// 第一次成功声明时捕获的 Each typed 能力（声明时点冻结，重复/失败声明不覆盖）。
+    pub(crate) each_bridge: Option<EachBridge>,
 }
 
 impl Declaration {
@@ -133,6 +135,26 @@ pub(crate) struct ChooseContract {
     pub(crate) branches: Vec<BodyId>,
     /// 预分配/登记的 parent 输出槽类型。
     pub(crate) output_types: Vec<TypeDesc>,
+}
+
+/// Choose 一个共享输出槽的**真实交接**只读视图（branch/slot → source/exit/output，含类型）。
+///
+/// `ChooseStep<K>` 是泛型，无法在对象安全的 [`StepEntry`] 上直接取名；因此以非泛型视图
+/// 列出实际登记的 `HandoverSlot`，供结构画像比较真实接线（而非仅声明类型/位置数量）。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ChooseSlotView {
+    /// case 序号（otherwise 为最后一个）。
+    pub(crate) branch: u16,
+    /// 该分支内的槽序号。
+    pub(crate) slot: u16,
+    /// 该槽在分支 Body 内的来源位置（真实交接起点）。
+    pub(crate) source: RefId,
+    /// 分支本地声明出口。
+    pub(crate) exit: RefId,
+    /// 共享父输出位置。
+    pub(crate) output: RefId,
+    /// 该槽的类型。
+    pub(crate) type_desc: TypeDesc,
 }
 
 /// Body 内单个 Step 的只读登记视图与受控执行入口。
@@ -175,6 +197,12 @@ pub(crate) trait StepEntry {
     #[allow(dead_code)] // 由定向测试与结构检查使用
     fn iter(&self) -> Option<&IterStep> {
         None
+    }
+
+    /// Choose 的真实逐槽交接映射（非 Choose Step 返回空表）。
+    #[allow(dead_code)] // 由定向测试与结构检查使用
+    fn choose_slots(&self) -> Vec<ChooseSlotView> {
+        Vec::new()
     }
 
     /// 登记该 Step 时的定义顺序；用于拒绝前向来源。
@@ -430,6 +458,35 @@ where
         StepKind::Choose
     }
 
+    fn choose_slots(&self) -> Vec<ChooseSlotView> {
+        let mut rows = Vec::new();
+        for (index, case) in self.cases.iter().enumerate() {
+            for (slot, handover) in case.branch.slots.iter().enumerate() {
+                rows.push(ChooseSlotView {
+                    branch: index as u16,
+                    slot: slot as u16,
+                    source: handover.source.clone(),
+                    exit: handover.exit.clone(),
+                    output: handover.output.clone(),
+                    type_desc: handover.type_desc,
+                });
+            }
+        }
+        if let Some(otherwise) = &self.otherwise {
+            for (slot, handover) in otherwise.slots.iter().enumerate() {
+                rows.push(ChooseSlotView {
+                    branch: self.cases.len() as u16,
+                    slot: slot as u16,
+                    source: handover.source.clone(),
+                    exit: handover.exit.clone(),
+                    output: handover.output.clone(),
+                    type_desc: handover.type_desc,
+                });
+            }
+        }
+        rows
+    }
+
     fn inputs(&self) -> &[PositionDesc] {
         std::slice::from_ref(&self.selector)
     }
@@ -647,6 +704,75 @@ pub(crate) type CollectionLenFn =
 /// collector 的建构值变成普通 `Vec<A>` Data 并绑定到 Each 本地最终输出位置。
 pub(crate) type FinishCollectorsFn =
     fn(&mut ExecutionContext, &ScopeId, &[CollectorId], &[RefId]) -> Result<(), ScopeError>;
+
+/// 声明时捕获的 Each typed 能力（crate 内部元数据，随第一次成功声明冻结）。
+///
+/// 只保存静态类型与既有 begin／finish 回调，不保存业务值、Collector 实例或第二份执行
+/// 计划；运行期 Collector 仍由 EachStep 与调用上下文建立。能力缺失或与冻结槽位不符时，
+/// Each 在 Definition 阶段拒绝，不退化为运行期类型查找，也不建假数据槽。
+#[derive(Clone, Debug)]
+pub(crate) struct EachBridge {
+    /// 声明类型 `R` 的逐槽类型（`Ref<A>` 等），用于与冻结声明逐槽核对。
+    declared: Vec<TypeDesc>,
+    /// 聚合后每槽的声明类型（`Vec<A>` 等，来自 `<R as EachShape>::Collected`）。
+    collected: Vec<TypeDesc>,
+    /// 建立 typed 空 collector 的既有回调。
+    begin: BeginCollectorsFn,
+    /// 全部项成功后 finish 成普通 `Vec<A>` 的既有回调。
+    finish: FinishCollectorsFn,
+}
+
+impl EachBridge {
+    /// 从声明类型 `R` 捕获能力（`output`／`output_with` 在有具体声明类型时调用）。
+    #[allow(private_bounds)]
+    pub(crate) fn of<R>() -> Self
+    where
+        R: ShapeOps + EachCollect,
+        <R as EachShape>::Collected: ShapeOps,
+    {
+        Self {
+            declared: <R as ShapeOps>::type_descs(),
+            collected: <<R as EachShape>::Collected as ShapeOps>::type_descs(),
+            begin: <R as EachCollect>::begin_collectors,
+            finish: <R as EachCollect>::finish_collectors,
+        }
+    }
+}
+
+/// 某 Body 当前 Output 声明的只读视图（冻结槽位与首次尝试/成功/失败标志）。
+#[derive(Clone, Debug)]
+pub(crate) struct DeclaredOutput {
+    /// 冻结的逐槽位置与类型；失败尝试也保留已解析/已传入的槽位。
+    pub(crate) slots: Vec<PositionDesc>,
+    /// 声明时点。
+    pub(crate) order: u64,
+    /// 是否已经尝试过声明（含失败尝试）。
+    pub(crate) attempted: bool,
+    /// 是否已成功完成一次完整声明。
+    pub(crate) declared: bool,
+    /// 成功声明之后是否又记录了该 Body 的声明失败。
+    pub(crate) failed: bool,
+}
+
+impl DeclaredOutput {
+    /// 声明状态；与内部 `Declaration::state` 同一判据。
+    pub(crate) fn state(&self) -> DeclarationState {
+        if !self.attempted {
+            DeclarationState::Undeclared
+        } else if self.declared && self.slots.is_empty() {
+            DeclarationState::Unit
+        } else if self.declared {
+            DeclarationState::NonUnit
+        } else {
+            DeclarationState::Failed
+        }
+    }
+
+    /// 是否可作为合法来源：成功声明且其后未记录声明失败。
+    pub(crate) fn usable(&self) -> bool {
+        self.declared && !self.failed
+    }
+}
 
 /// Each 一个输出槽的运行期装配信息。
 ///
@@ -1074,6 +1200,17 @@ impl<'n> Builder<'n> {
 
     /// 失败查询的哨兵句柄；没有当前 Definition 的合法位置身份。
     #[allow(dead_code)] // 由内部查询/下游 T02/T03 使用
+    /// 本次 Definition 内“未登记位置”的替代句柄：身份属于当前 Definition，但下标不会被分配。
+    ///
+    /// 与 [`Builder::missing_handle`]（跨 Definition 哨兵）不同，声明这样的句柄只会得到
+    /// “未登记位置”这一派生拒绝，不会抢先盖掉更早的真实首因。
+    pub(crate) fn unresolved_handle(&self) -> PositionHandle {
+        PositionHandle {
+            definition: self.id,
+            position: PositionId::new(u32::MAX),
+        }
+    }
+
     pub(crate) fn missing_handle(&self) -> PositionHandle {
         PositionHandle {
             definition: self.missing_definition,
@@ -1569,7 +1706,9 @@ impl<'n> Builder<'n> {
         ok
     }
 
-    /// 声明普通 Output。
+    /// 声明普通 Output（低层直接登记；公开路径统一经 `Flow::output`／`output_with`，
+    /// 后者在成功声明时同时捕获 typed 能力）。
+    #[allow(dead_code)] // 由低层 Builder 定向测试直接使用
     pub(crate) fn declare_output(
         &mut self,
         body: BodyId,
@@ -1828,6 +1967,39 @@ impl<'n> Builder<'n> {
         self.errors.push(detail);
     }
 
+    /// 读取某 Body 已冻结的 Output 声明（不补声明、不改时点）。
+    pub(crate) fn output_declaration_of(&self, body: BodyId) -> DeclaredOutput {
+        let declaration = &self.bodies[body.index()].output;
+        DeclaredOutput {
+            slots: declaration.slots.clone(),
+            order: declaration.order,
+            attempted: declaration.attempted,
+            declared: declaration.declared,
+            failed: declaration.failed,
+        }
+    }
+
+    /// 读取某 Body 第一次成功声明时捕获的 Each typed 能力（失败/重复声明不产生能力）。
+    #[allow(dead_code)] // 供低层定向测试读取 Body 首次冻结的 typed 能力
+    pub(crate) fn declared_each_capability(&self, body: BodyId) -> Option<EachBridge> {
+        let declaration = &self.bodies[body.index()].output;
+        if declaration.declared && !declaration.failed {
+            declaration.each_bridge.clone()
+        } else {
+            None
+        }
+    }
+
+    /// 记录该 Body 第一次成功声明时捕获的 Each typed 能力。
+    ///
+    /// 只在成功且未失败的首份声明上生效：重复/失败声明不能覆盖或补写能力。
+    pub(crate) fn attach_each_bridge(&mut self, body: BodyId, bridge: EachBridge) {
+        let declaration = &mut self.bodies[body.index()].output;
+        if declaration.declared && !declaration.failed && declaration.each_bridge.is_none() {
+            declaration.each_bridge = Some(bridge);
+        }
+    }
+
     /// 为 Choose 分配共享的 parent 输出槽：每个逻辑槽位一个固定位置。
     ///
     /// 这些位置在分支构建期间保持“未发布”；只有 `push_choose_step` 实际完成登记后
@@ -1865,11 +2037,12 @@ impl<'n> Builder<'n> {
         child: BodyId,
         step: usize,
         branch: u16,
-        declared: Vec<PositionDesc>,
         outputs: &[PositionHandle],
     ) -> ChooseBranch {
-        let order = self.next_order();
-        let declared_ok = self.declare_output(child, declared.clone(), order);
+        let declaration = self.output_declaration_of(child);
+        let order = declaration.order;
+        let declared_ok = declaration.usable();
+        let declared = declaration.slots;
         let mut sources: Vec<PositionId> = Vec::new();
         let mut slots = Vec::with_capacity(declared.len());
         for (slot, desc) in declared.into_iter().enumerate() {
@@ -1930,9 +2103,16 @@ impl<'n> Builder<'n> {
 
     /// 把构建完成的 Choose Step 登记进 parent Body，并在实际 push 时发布父输出。
     ///
-    /// 发布时点必须晚于所有分支构建；`ChooseStep.order` 只是 selector/步骤使用点，
-    /// 不能复用为输出发布时间。
-    pub(crate) fn push_choose_step<K>(&mut self, parent: BodyId, step: ChooseStep<K>)
+    /// 发布时点必须晚于所有分支构建；`ChooseStep.order` 只是 selector／步骤使用点，
+    /// 不能复用为输出发布时间。共享输出只有在 selector、配置、全部分支契约与调用方
+    /// `O` 期望都合法时才发布；否则全部保持失效（`caller_ok` 由调用方按分支契约与
+    /// 期望核对给出，这里再做一次统一契约校验）。`finish` 仍会重复契约校验并给出诊断。
+    pub(crate) fn push_choose_step<K>(
+        &mut self,
+        parent: BodyId,
+        step: ChooseStep<K>,
+        caller_ok: bool,
+    ) -> bool
     where
         K: Data + PartialEq + 'static,
     {
@@ -1940,7 +2120,7 @@ impl<'n> Builder<'n> {
         let mut branches =
             Vec::with_capacity(step.cases.len() + usize::from(step.otherwise.is_some()));
         let mut output_types = Vec::with_capacity(step.outputs.len());
-        let mut publish = true;
+        let mut publish = caller_ok;
         for position in &step.outputs {
             let record = self.position(PositionHandle {
                 definition: self.id,
@@ -1961,12 +2141,16 @@ impl<'n> Builder<'n> {
         if let Some(otherwise) = &step.otherwise {
             branches.push(otherwise.body);
         }
-        self.choose_contracts.push(ChooseContract {
+        let contract = ChooseContract {
             body: parent,
             step: self.bodies[parent.index()].steps.len(),
             branches,
             output_types,
-        });
+        };
+        if self.validate_choose_contract(&contract).is_some() {
+            publish = false;
+        }
+        self.choose_contracts.push(contract);
         if publish {
             for position in &step.outputs {
                 self.mark_published(
@@ -1979,6 +2163,7 @@ impl<'n> Builder<'n> {
             }
         }
         self.bodies[parent.index()].steps.push(Box::new(step));
+        publish
     }
 
     /// 消费 attempt Body 已有的 Output 声明并登记 Retry Step（不补声明、不改声明 order）。
@@ -2261,6 +2446,11 @@ impl<'n> Builder<'n> {
     /// item Body 声明的逐槽输出（类型 `A`，成组 Consume 的来源）；`collected_descs` 是对应
     /// 聚合类型 `Vec<A>`，用于给 Each-local 与 caller 输出位置定型。祖先 alias 槽记录逐层
     /// Import（同 Retry／Iter）；无法解析的声明保持槽位对齐，由统一验证给出诊断。
+    /// 消费 item Body 已有的 Output 声明与声明时捕获的 typed 能力，登记 Each Step。
+    ///
+    /// 不补声明、不改声明时点。聚合槽类型来自声明元数据：非空声明缺失 typed 能力时拒绝；
+    /// 调用方 `O` 期望与**聚合后**类型比较（先声明状态，再 arity，再逐槽类型）。返回
+    /// （caller 可见聚合输出位置，收口是否成立）。
     pub(crate) fn register_each(
         &mut self,
         parent: BodyId,
@@ -2268,25 +2458,99 @@ impl<'n> Builder<'n> {
         step: usize,
         collection: PositionDesc,
         item_position: PositionHandle,
-        declared: Vec<PositionDesc>,
-        collected_descs: Vec<TypeDesc>,
-        begin_collectors: BeginCollectorsFn,
+        expected: Option<&[TypeDesc]>,
         bind_item: BindItemFn,
         collection_len: CollectionLenFn,
-        finish_collectors: FinishCollectorsFn,
-    ) -> Vec<PositionHandle> {
+    ) -> (Vec<PositionHandle>, bool) {
+        let declaration = self.output_declaration_of(item);
+        let declared_ok = declaration.usable();
+        // typed 能力只取该 Body **首次成功声明时冻结**的那一份：调用方不能另行传入一份
+        // 与被冻结声明/回调不一致的能力（声明类型、聚合描述与 typed 回调不可拆分）。
+        let bridge = self.bodies[item.index()].output.each_bridge.clone();
+        let collected_descs: Vec<TypeDesc> = bridge
+            .as_ref()
+            .map(|bridge| bridge.collected.clone())
+            .unwrap_or_default();
+        let mut capability_ok = true;
+        if declared_ok && bridge.is_none() && !declaration.slots.is_empty() {
+            // 声明了非空输出却没有声明时冻结的 typed 能力：不得按 item 槽类型或运行期
+            // 类型查找凑出聚合，必须在 Definition 阶段拒绝。
+            self.errors
+                .push(BuildErrorDetail::MissingEachBridge { body: item });
+            capability_ok = false;
+        }
+        if declared_ok && let Some(bridge) = &bridge {
+            // typed 能力必须确属这份冻结声明：槽数、逐槽声明类型与聚合槽数都要一致，
+            // 缺失的 collected 槽不得回填 item 槽类型，也不得发布为合法来源。
+            let mut bridge_error = None;
+            if bridge.declared.len() != declaration.slots.len() {
+                bridge_error = Some(BuildErrorDetail::DeclarationArityMismatch {
+                    body: item,
+                    kind: DeclarationKind::Output,
+                    slot: 0,
+                    expected: declaration.slots.len() as u16,
+                    found: bridge.declared.len() as u16,
+                });
+            } else if let Some((slot, (declared_type, desc))) = bridge
+                .declared
+                .iter()
+                .zip(declaration.slots.iter())
+                .enumerate()
+                .find(|(_, (declared_type, desc))| **declared_type != desc.type_desc)
+            {
+                bridge_error = Some(BuildErrorDetail::DeclarationShapeMismatch {
+                    body: item,
+                    kind: DeclarationKind::Output,
+                    slot: slot as u16,
+                    expected: desc.type_desc,
+                    found: Some(*declared_type),
+                });
+            } else if bridge.collected.len() != declaration.slots.len() {
+                bridge_error = Some(BuildErrorDetail::DeclarationArityMismatch {
+                    body: item,
+                    kind: DeclarationKind::Output,
+                    slot: 0,
+                    expected: declaration.slots.len() as u16,
+                    found: bridge.collected.len() as u16,
+                });
+            }
+            if let Some(error) = bridge_error {
+                self.errors.push(error);
+                capability_ok = false;
+            }
+        }
+        let mut expectation_ok = true;
+        if capability_ok
+            && declaration.state() != DeclarationState::Failed
+            && let Some(expected) = expected
+            && let Some(error) = self.validate_declaration_expectation(
+                item,
+                DeclarationKind::Output,
+                declaration.attempted,
+                declaration.declared,
+                &collected_descs,
+                expected,
+            )
+        {
+            self.errors.push(error);
+            expectation_ok = false;
+        }
         let order = self.next_order();
         let collection_ok = self
             .record_use_at(parent, Some(step), collection, order)
             .is_none();
-        let declared_ok = self.declare_output(item, declared.clone(), order);
+        let declared = declaration.slots;
         let mut slots = Vec::with_capacity(declared.len());
         let mut outputs = Vec::with_capacity(declared.len());
         for (slot, desc) in declared.iter().enumerate() {
             let collected_type = collected_descs.get(slot).copied().unwrap_or(desc.type_desc);
             let source_ok = declared_ok
+                && capability_ok
+                && expectation_ok
                 && collection_ok
-                && self.availability_error(item, None, *desc, order).is_none();
+                && self
+                    .availability_error(item, None, *desc, declaration.order)
+                    .is_none();
             let mut source = if source_ok {
                 self.position(desc.handle).map(|record| record.core.clone())
             } else {
@@ -2330,6 +2594,14 @@ impl<'n> Builder<'n> {
             }
             outputs.push(output);
         }
+        // 未声明（无 typed 能力）保持“未声明”语义：收口使用既有 unit 空操作，
+        // 零 collector、零业务槽，不建假 Vec。
+        let unit_begin: BeginCollectorsFn = <() as EachCollect>::begin_collectors;
+        let unit_finish: FinishCollectorsFn = <() as EachCollect>::finish_collectors;
+        let (begin_collectors, finish_collectors) = match &bridge {
+            Some(bridge) => (bridge.begin, bridge.finish),
+            None => (unit_begin, unit_finish),
+        };
         self.bodies[parent.index()].steps.push(Box::new(EachStep {
             item,
             collection,
@@ -2342,7 +2614,7 @@ impl<'n> Builder<'n> {
             collection_len,
             finish_collectors,
         }));
-        outputs
+        (outputs, declared_ok && capability_ok && expectation_ok)
     }
 
     /// 校验一次位置使用；与 resolver/register_* 共用同一 availability 判定。
@@ -2357,7 +2629,10 @@ impl<'n> Builder<'n> {
     }
 
     /// 比较 Choose 各分支的声明状态与 Shape。
-    fn validate_choose_contract(&self, contract: &ChooseContract) -> Option<BuildErrorDetail> {
+    pub(crate) fn validate_choose_contract(
+        &self,
+        contract: &ChooseContract,
+    ) -> Option<BuildErrorDetail> {
         let first = *contract.branches.first()?;
         let first_state = self.bodies[first.index()].output.state();
         for (index, branch) in contract.branches.iter().enumerate().skip(1) {
@@ -2428,7 +2703,7 @@ impl<'n> Builder<'n> {
 
     /// 按期望 Shape 核对某 Body 的 Output 声明；Root 与 child `_output` 共用同一判据。
     ///
-    /// 期望为空（`O = ()`）时只拒绝"已成功声明非空槽"；期望非空时要求已成功声明、arity
+    /// 期望为空（`O = ()`）时只拒绝“已成功声明非空槽”；期望非空时要求已成功声明、arity
     /// 与逐槽类型全部相符。未声明／失败状态是否叠加诊断由调用方决定（child 收口保留首因）。
     fn validate_output_expectation(
         &self,
@@ -2436,41 +2711,62 @@ impl<'n> Builder<'n> {
         expected: &[TypeDesc],
     ) -> Option<BuildErrorDetail> {
         let output = &self.bodies[body.index()].output;
+        let found: Vec<TypeDesc> = output.slots.iter().map(|desc| desc.type_desc).collect();
+        self.validate_declaration_expectation(
+            body,
+            DeclarationKind::Output,
+            output.attempted,
+            output.declared,
+            &found,
+            expected,
+        )
+    }
+
+    /// 按期望 Shape 核对一组声明槽（Root、child 收口与 Choose/Each 聚合契约共用同一判据）。
+    ///
+    /// `declared_ok` 反映该次声明的成功与否；`slots` 对 Choose/Each 是**聚合后**类型，
+    /// 因此“期望为空”只拒绝已成功声明的非空槽，与 Root/child 的 unit 语义一致。
+    pub(crate) fn validate_declaration_expectation(
+        &self,
+        body: BodyId,
+        kind: DeclarationKind,
+        attempted: bool,
+        declared: bool,
+        found: &[TypeDesc],
+        expected: &[TypeDesc],
+    ) -> Option<BuildErrorDetail> {
         if expected.is_empty() {
-            if output.attempted && output.declared && !output.slots.is_empty() {
+            if attempted && declared && !found.is_empty() {
                 return Some(BuildErrorDetail::DeclarationArityMismatch {
                     body,
-                    kind: DeclarationKind::Output,
+                    kind,
                     slot: 0,
                     expected: 0,
-                    found: output.slots.len() as u16,
+                    found: found.len() as u16,
                 });
             }
             return None;
         }
-        if !output.attempted || !output.declared {
-            return Some(BuildErrorDetail::MissingDeclaration {
-                body,
-                kind: DeclarationKind::Output,
-            });
+        if !attempted || !declared {
+            return Some(BuildErrorDetail::MissingDeclaration { body, kind });
         }
-        if output.slots.len() != expected.len() {
+        if found.len() != expected.len() {
             return Some(BuildErrorDetail::DeclarationArityMismatch {
                 body,
-                kind: DeclarationKind::Output,
+                kind,
                 slot: 0,
                 expected: expected.len() as u16,
-                found: output.slots.len() as u16,
+                found: found.len() as u16,
             });
         }
-        for (slot, (expected, desc)) in expected.iter().zip(output.slots.iter()).enumerate() {
-            if *expected != desc.type_desc {
+        for (slot, (expected, found)) in expected.iter().zip(found.iter()).enumerate() {
+            if *expected != *found {
                 return Some(BuildErrorDetail::DeclarationShapeMismatch {
                     body,
-                    kind: DeclarationKind::Output,
+                    kind,
                     slot: slot as u16,
                     expected: *expected,
-                    found: Some(desc.type_desc),
+                    found: Some(*found),
                 });
             }
         }
@@ -2704,11 +3000,15 @@ mod each_static_tests {
     fn t03_each_is_a_unified_ordered_step_with_declared_slots() {
         let definition =
             build_definition::<Vec<Item>, (Vec<Score>, Vec<Score>), _>(|flow, items| {
-                let out_refs = flow.each(items, |item, each| {
-                    let score = each.then_with_output(score_of, item);
-                    let doubled = each.then_with_output(double_score, score);
-                    (score, doubled)
-                });
+                let out_refs: (Ref<Vec<Score>>, Ref<Vec<Score>>) =
+                    flow.each_output(items, |each| {
+                        let item = each.ref_of::<Item>();
+
+                        let score = each.then_with_output(score_of, item);
+                        let doubled = each.then_with_output(double_score, score);
+                        let out_refs = (score, doubled);
+                        each.output_with(out_refs);
+                    });
                 flow.output_with(out_refs);
             })
             .expect("each with a flat tuple body should build");
@@ -2767,8 +3067,11 @@ mod each_static_tests {
     #[test]
     fn t11_unit_each_registers_no_collector_slots() {
         let definition = build_definition::<Vec<Item>, (), _>(|flow, items| {
-            let () = flow.each(items, |item, each| {
+            let () = flow.each_output(items, |each| {
+                let item = each.ref_of::<Item>();
+
                 let _score = each.then_with_output(score_of, item);
+                each.output::<()>();
             });
             flow.output_with(());
         })

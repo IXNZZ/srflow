@@ -328,7 +328,12 @@ fn p09_single_output_aggregates_in_index_order() {
     let runtime = Runtime::new();
     let outcome: Result<Vec<Out>, RunError> = block_on(runtime.execute(
         |flow: &mut Flow<'_>, items: Ref<Vec<Item>>| {
-            let out_refs = flow.each(items, |item, sub| sub.then_with_output(score, item));
+            let out_refs: Ref<Vec<Out>> = flow.each_output(items, |sub| {
+                let item = sub.ref_of::<Item>();
+
+                let out_refs = sub.then_with_output(score, item);
+                sub.output_with(out_refs);
+            });
             flow.output_with(out_refs);
         },
         vec![Item(1), Item(2), Item(3)],
@@ -393,12 +398,16 @@ fn p10_heterogeneous_and_same_type_slots_stay_independent() {
     let runtime = Runtime::new();
     let outcome = block_on(runtime.execute::<_, (Vec<Out>, Vec<Tag>, Vec<Out>), _>(
         |flow: &mut Flow<'_>, items: Ref<Vec<Item>>| {
-            let out_refs = flow.each(items, |item, sub| {
-                let doubled = sub.then_with_output(score, item);
-                let labelled = sub.then_with_output(tagger, item);
-                let scaled = sub.then_with_output(tens, item);
-                (doubled, labelled, scaled)
-            });
+            let out_refs: (Ref<Vec<Out>>, Ref<Vec<Tag>>, Ref<Vec<Out>>) =
+                flow.each_output(items, |sub| {
+                    let item = sub.ref_of::<Item>();
+
+                    let doubled = sub.then_with_output(score, item);
+                    let labelled = sub.then_with_output(tagger, item);
+                    let scaled = sub.then_with_output(tens, item);
+                    let out_refs = (doubled, labelled, scaled);
+                    sub.output_with(out_refs);
+                });
             flow.output_with(out_refs);
         },
         vec![Item(1), Item(2)],
@@ -475,8 +484,27 @@ fn p10_sixteen_slot_each_keeps_every_slot_independent() {
         Vec<Out>,
     ), _>(
         |flow: &mut Flow<'_>, items: Ref<Vec<Item>>| {
-            let out_refs = flow.each(items, |item, sub| {
-                (
+            let out_refs: (
+                Ref<Vec<Out>>,
+                Ref<Vec<Out>>,
+                Ref<Vec<Out>>,
+                Ref<Vec<Out>>,
+                Ref<Vec<Out>>,
+                Ref<Vec<Out>>,
+                Ref<Vec<Out>>,
+                Ref<Vec<Out>>,
+                Ref<Vec<Out>>,
+                Ref<Vec<Out>>,
+                Ref<Vec<Out>>,
+                Ref<Vec<Out>>,
+                Ref<Vec<Out>>,
+                Ref<Vec<Out>>,
+                Ref<Vec<Out>>,
+                Ref<Vec<Out>>,
+            ) = flow.each_output(items, |sub| {
+                let item = sub.ref_of::<Item>();
+
+                let out_refs = (
                     sub.then_with_output(times01, item),
                     sub.then_with_output(times02, item),
                     sub.then_with_output(times03, item),
@@ -493,7 +521,8 @@ fn p10_sixteen_slot_each_keeps_every_slot_independent() {
                     sub.then_with_output(times14, item),
                     sub.then_with_output(times15, item),
                     sub.then_with_output(times16, item),
-                )
+                );
+                sub.output_with(out_refs);
             });
             flow.output_with(out_refs);
         },
@@ -543,7 +572,12 @@ fn p11_unit_each_runs_the_body_without_collectors_or_fake_slots() {
     let runtime = Runtime::new();
     let outcome: Result<(), RunError> = block_on(runtime.execute(
         |flow: &mut Flow<'_>, items: Ref<Vec<Item>>| {
-            let () = flow.each(items, |item, sub| sub.then_with_output(audit, item));
+            let () = flow.each_output(items, |sub| {
+                let item = sub.ref_of::<Item>();
+
+                let out_refs = sub.then_with_output(audit, item);
+                sub.output_with(out_refs);
+            });
             flow.output_with(());
         },
         vec![Item(1), Item(2), Item(3)],
@@ -605,7 +639,12 @@ fn p13_engine_item_output_is_rejected_by_the_real_group_preflight() {
     let runtime = Runtime::new();
     let outcome: Result<Vec<Item>, RunError> = block_on(runtime.execute(
         |flow: &mut Flow<'_>, items: Ref<Vec<Item>>| {
-            let out_refs = flow.each(items, |item, _sub| item);
+            let out_refs: Ref<Vec<Item>> = flow.each_output(items, |_sub| {
+                let item = _sub.ref_of::<Item>();
+
+                let out_refs = item;
+                _sub.output_with(out_refs);
+            });
             flow.output_with(out_refs);
         },
         vec![Item(1), Item(2)],
@@ -647,7 +686,12 @@ fn p13_engine_ancestor_alias_output_is_rejected_as_illegal_owner() {
     let outcome: Result<Vec<Out>, RunError> = block_on(runtime.execute(
         |flow: &mut Flow<'_>, items: Ref<Vec<Item>>| {
             let anchor = flow.then_with_output(singleton, items);
-            let out_refs = flow.each(items, |_item, _sub| anchor);
+            let out_refs: Ref<Vec<Out>> = flow.each_output(items, |_sub| {
+                let _item = _sub.ref_of::<Item>();
+
+                let out_refs = anchor;
+                _sub.output_with(out_refs);
+            });
             flow.output_with(out_refs);
         },
         vec![Item(1), Item(2)],
@@ -831,21 +875,31 @@ fn p14_child_chain_choose_and_retry_results_are_collectible() {
     let runtime = Runtime::new();
     let outcome = block_on(runtime.execute::<_, (Vec<Out>, Vec<Out>, Vec<Out>), _>(
         |flow: &mut Flow<'_>, items: Ref<Vec<Item>>| {
-            let out_refs = flow.each(items, |item, sub| {
-                let chained: Ref<Out> = sub.chain_output(|inner| {
-                    let out_refs = inner.then_with_output(score, item);
-                    inner.output_with(out_refs);
+            let out_refs: (Ref<Vec<Out>>, Ref<Vec<Out>>, Ref<Vec<Out>>) =
+                flow.each_output(items, |sub| {
+                    let item = sub.ref_of::<Item>();
+
+                    let chained: Ref<Out> = sub.chain_output(|inner| {
+                        let out_refs = inner.then_with_output(score, item);
+                        inner.output_with(out_refs);
+                    });
+                    let chosen: Ref<Out> = sub.choose_with_output(item, |choice| {
+                        choice.case(Item(1), |branch| {
+                            let out_refs = branch.then_with_output(score, item);
+                            branch.output_with(out_refs);
+                        });
+                        choice.otherwise(|branch| {
+                            let out_refs = branch.then_with_output(tens, item);
+                            branch.output_with(out_refs);
+                        });
+                    });
+                    let retried: Ref<Out> = sub.retry_output(1, |attempt| {
+                        let out_refs = attempt.then_with_output(score, item);
+                        attempt.output_with(out_refs);
+                    });
+                    let out_refs = (chained, chosen, retried);
+                    sub.output_with(out_refs);
                 });
-                let chosen = sub.choose(item, |choice| {
-                    choice.case(Item(1), |branch| branch.then_with_output(score, item));
-                    choice.otherwise(|branch| branch.then_with_output(tens, item));
-                });
-                let retried: Ref<Out> = sub.retry_output(1, |attempt| {
-                    let out_refs = attempt.then_with_output(score, item);
-                    attempt.output_with(out_refs);
-                });
-                (chained, chosen, retried)
-            });
             flow.output_with(out_refs);
         },
         vec![Item(1), Item(2), Item(3)],
@@ -1098,14 +1152,23 @@ fn p16_repeated_reads_and_two_each_steps_over_one_collection_are_legal() {
         runtime.execute::<_, (Vec<Out>, Vec<Out>, Vec<Out>, Vec<Out>), _>(
             |flow: &mut Flow<'_>, items: Ref<Vec<Item>>| {
                 // 同一个集合同时是 Each 输入与 item Body 的祖先捕获；item 借用还出现两次。
-                let (doubled, sized, again) = flow.each(items, |item, sub| {
-                    let doubled = sub.then_with_output(pair, (item, item));
-                    let sized = sub.then_with_output(collection_size, (item, items));
-                    let again = sub.then_with_output(score, item);
-                    (doubled, sized, again)
-                });
+                let (doubled, sized, again): (Ref<Vec<Out>>, Ref<Vec<Out>>, Ref<Vec<Out>>) = flow
+                    .each_output(items, |sub| {
+                        let item = sub.ref_of::<Item>();
+
+                        let doubled = sub.then_with_output(pair, (item, item));
+                        let sized = sub.then_with_output(collection_size, (item, items));
+                        let again = sub.then_with_output(score, item);
+                        let out_refs = (doubled, sized, again);
+                        sub.output_with(out_refs);
+                    });
                 // 同一次执行里对同一集合再跑一次 Each。
-                let second = flow.each(items, |item, sub| sub.then_with_output(tens, item));
+                let second: Ref<Vec<Out>> = flow.each_output(items, |sub| {
+                    let item = sub.ref_of::<Item>();
+
+                    let out_refs = sub.then_with_output(tens, item);
+                    sub.output_with(out_refs);
+                });
                 let out_refs = (doubled, sized, again, second);
                 flow.output_with(out_refs);
             },
@@ -1183,13 +1246,16 @@ fn p17_item_cap_survives_the_iter_state_import_path() {
     let runtime = Runtime::new();
     let outcome = block_on(runtime.execute::<_, Vec<Out>, _>(
         |flow: &mut Flow<'_>, items: Ref<Vec<Item>>| {
-            let out_refs = flow.each(items, |item, sub| {
+            let out_refs: Ref<Vec<Out>> = flow.each_output(items, |sub| {
+                let item = sub.ref_of::<Item>();
+
                 let initial = sub.then_with_output(score, item);
                 let delivered = sub.iter(initial, 2, |current, round| {
                     let blended = round.then_with_output(blend, (item, current));
                     round.then_with_output(break_now, blended)
                 });
-                sub.then_with_output(rescore, delivered)
+                let out_refs = sub.then_with_output(rescore, delivered);
+                sub.output_with(out_refs);
             });
             flow.output_with(out_refs);
         },
@@ -1830,10 +1896,13 @@ fn p21_later_slot_reject_leaves_the_first_slot_unmoved() {
     install_consume_group_fault(ConsumeGroupFault::RejectPreflightAt(1));
     let outcome = block_on(runtime.execute::<_, (Vec<Out>, Vec<Tag>), _>(
         |flow: &mut Flow<'_>, items: Ref<Vec<Item>>| {
-            let out_refs = flow.each(items, |item, sub| {
+            let out_refs: (Ref<Vec<Out>>, Ref<Vec<Tag>>) = flow.each_output(items, |sub| {
+                let item = sub.ref_of::<Item>();
+
                 let doubled = sub.then_with_output(score, item);
                 let tag = sub.then_with_output(tagger, item);
-                (doubled, tag)
+                let out_refs = (doubled, tag);
+                sub.output_with(out_refs);
             });
             flow.output_with(out_refs);
         },
@@ -2171,10 +2240,13 @@ fn p23_group_commit_moves_every_slot_and_closes_the_item_once() {
     let runtime = Runtime::new();
     let outcome = block_on(runtime.execute::<_, (Vec<Out>, Vec<Tag>), _>(
         |flow: &mut Flow<'_>, items: Ref<Vec<Item>>| {
-            let out_refs = flow.each(items, |item, sub| {
+            let out_refs: (Ref<Vec<Out>>, Ref<Vec<Tag>>) = flow.each_output(items, |sub| {
+                let item = sub.ref_of::<Item>();
+
                 let doubled = sub.then_with_output(score, item);
                 let tag = sub.then_with_output(tagger, item);
-                (doubled, tag)
+                let out_refs = (doubled, tag);
+                sub.output_with(out_refs);
             });
             flow.output_with(out_refs);
         },
@@ -2571,10 +2643,13 @@ fn p26_post_finish_reject_leaves_no_partial_caller_success() {
 fn p27_late_destination_reject_keeps_the_caller_group_unchanged() {
     reset();
     let definition = |flow: &mut Flow<'_>, items: Ref<Vec<Item>>| {
-        let out_refs = flow.each(items, |item, sub| {
+        let out_refs: (Ref<Vec<Out>>, Ref<Vec<Tag>>) = flow.each_output(items, |sub| {
+            let item = sub.ref_of::<Item>();
+
             let doubled = sub.then_with_output(score, item);
             let tag = sub.then_with_output(tagger, item);
-            (doubled, tag)
+            let out_refs = (doubled, tag);
+            sub.output_with(out_refs);
         });
         flow.output_with(out_refs);
     };
@@ -2705,7 +2780,12 @@ fn p28_direct_duplicate_root_ref_is_rejected_by_the_definition() {
     let error = build_definition::<Vec<Item>, (Vec<Out>, Vec<Out>), _>(
         |flow: &mut Flow<'_>, items: Ref<Vec<Item>>| {
             // 同一个逻辑 Ref 直接占用两个 Root 输出槽：Definition 阶段拒绝。
-            let collected = flow.each(items, |item, sub| sub.then_with_output(score, item));
+            let collected: Ref<Vec<Out>> = flow.each_output(items, |sub| {
+                let item = sub.ref_of::<Item>();
+
+                let out_refs = sub.then_with_output(score, item);
+                sub.output_with(out_refs);
+            });
             let out_refs = (collected, collected);
             flow.output_with(out_refs);
         },
@@ -2721,8 +2801,18 @@ fn p28_direct_duplicate_root_ref_is_rejected_by_the_definition() {
     let runtime = Runtime::new();
     let outcome = block_on(runtime.execute::<_, (Vec<Out>, Vec<Out>), _>(
         |flow: &mut Flow<'_>, items: Ref<Vec<Item>>| {
-            let left = flow.each(items, |item, sub| sub.then_with_output(score, item));
-            let right = flow.each(items, |item, sub| sub.then_with_output(tens, item));
+            let left: Ref<Vec<Out>> = flow.each_output(items, |sub| {
+                let item = sub.ref_of::<Item>();
+
+                let out_refs = sub.then_with_output(score, item);
+                sub.output_with(out_refs);
+            });
+            let right: Ref<Vec<Out>> = flow.each_output(items, |sub| {
+                let item = sub.ref_of::<Item>();
+
+                let out_refs = sub.then_with_output(tens, item);
+                sub.output_with(out_refs);
+            });
             let out_refs = (left, right);
             flow.output_with(out_refs);
         },
@@ -2746,7 +2836,12 @@ fn p28_legal_alias_duplicate_root_target_takes_nothing() {
     let outcome = block_on(runtime.execute::<_, (Vec<Out>, Vec<Out>), _>(
         |flow: &mut Flow<'_>, items: Ref<Vec<Item>>| {
             let out_refs: (Ref<Vec<Out>>, Ref<Vec<Out>>) = flow.retry_output(0, |attempt| {
-                let collected = attempt.each(items, |item, sub| sub.then_with_output(score, item));
+                let collected: Ref<Vec<Out>> = attempt.each_output(items, |sub| {
+                    let item = sub.ref_of::<Item>();
+
+                    let out_refs = sub.then_with_output(score, item);
+                    sub.output_with(out_refs);
+                });
                 // 经合法 alias 把同一个聚合 Vec 交付到两个 Root 端口。
                 let declared = (collected, collected);
                 attempt.output_with(declared);

@@ -319,6 +319,8 @@ pub(crate) enum BuildErrorDetail {
         expected: u16,
         found: u16,
     },
+    /// 声明了非空输出却没有声明时冻结的 typed 能力（Each 聚合无法确定）。
+    MissingEachBridge { body: BodyId },
     /// Choose 分支逐槽类型不一致。
     ChooseSlotTypeMismatch {
         body: BodyId,
@@ -507,6 +509,11 @@ impl fmt::Display for BuildErrorDetail {
             Self::NextUnitUnsupported { body } => {
                 write!(f, "iter round body {body:?} cannot use a unit Next state")
             }
+            Self::MissingEachBridge { body } => write!(
+                f,
+                "body {body:?} declares a non-empty output without a captured typed \
+                 each-collector bridge"
+            ),
             Self::ChooseDeclarationStateMismatch {
                 body,
                 step,

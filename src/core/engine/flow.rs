@@ -6,7 +6,10 @@
 
 use crate::core::engine::choice::Choice;
 use crate::core::engine::data::Data;
-use crate::core::engine::definition::{BodyRole, Builder, ChooseStep, DeclarationKind};
+use crate::core::engine::definition::{
+    BodyRole, Builder, ChooseCase, ChooseContract, ChooseStep, DeclarationKind, DeclarationState,
+    EachBridge,
+};
 use crate::core::engine::error::BuildErrorDetail;
 use crate::core::engine::identity::{BodyId, PositionHandle};
 use crate::core::engine::node::{AutoCallable, Callable, ProvideNode, StructCall};
@@ -220,7 +223,7 @@ impl<'n> Flow<'n> {
     where
         O: ShapeOps,
     {
-        let missing = self.builder.borrow().missing_handle();
+        let missing = self.builder.borrow().unresolved_handle();
         let count = <O as ShapeOps>::type_descs().len();
         let mut handles = std::iter::repeat_n(missing, count);
         <O as ShapeOps>::from_positions(&mut handles)
@@ -277,45 +280,128 @@ impl<'n> Flow<'n> {
         }
     }
 
-    /// 按 selector 的值匹配一个分支执行（SPEC §9、Engine §6.7）。
+    /// 按 case 键类型自动解析 selector 并匹配一个分支执行（SPEC §8.2、Engine §6.7）。
     ///
-    /// 全部 case／otherwise 的定义闭包在构建期同步执行一次并登记各自分支 Body；运行期
-    /// 只执行选中分支，未选分支没有运行 Scope，也不调用其 Node。`case` 的键是 Definition
-    /// 匹配配置，不登记为业务输入；无匹配且无 `otherwise` 时返回
+    /// 自动形式在方法入口按 `K` 解析当前最近的合法 `Ref<K>` 并记录该次真实使用；分支构建
+    /// 期间新出现的同类型来源不改变已固定的 selector。全部分支在构建期各登记一次真实
+    /// Body；运行期只执行选中分支，未选分支没有运行 Scope，也不调用其 Node。`case` 的键是
+    /// Definition 匹配配置，不登记为业务输入；无匹配且无 `otherwise` 时返回
     /// [`RunError::NoMatchingCase`](crate::RunError::NoMatchingCase)——若该失败退出同时发生
     /// 清理故障，则返回 [`RunError::Runtime`](crate::RunError::Runtime)，并以 `Error::source`
     /// 保留原终止原因、以 `cleanup_source` 保留首个清理故障诊断。
     ///
-    /// 所有分支返回同一个输出 Shape `O`：类型、arity 与 unit 由 Rust 类型检查保证，
-    /// 返回的是 parent 可见的新 RefShape。
+    /// 分支输出类型来自各分支 Body 内的 `output`／`output_with` 声明：全部未声明或全部显式
+    /// unit 分别合法，混合拒绝；非 unit 分支必须 arity 与逐槽类型一致。普通形式照常发布
+    /// 全部已声明输出，不接收 Ref 也不表示不 Export、不执行。
+    pub fn choose<K, F>(&mut self, definition: F) -> &mut Self
+    where
+        K: Data + PartialEq,
+        F: FnOnce(&mut Choice<'n, K>),
+    {
+        let _ = self.register_choose::<K, F>(None, definition, None);
+        self
+    }
+
+    /// 自动 selector 的取输出形式：与 [`Flow::choose`] 共享同一条登记路径，额外返回父域
+    /// 可见的 RefShape。
+    ///
+    /// `O` 由调用处给出（局部 RefShape 注解、外层返回类型或显式实参）。Definition 在收口时
+    /// 先比较各分支的声明状态与共同 Shape，再核对 `O` 期望：不符是 Definition 错误（Rust 可以
+    /// 构建，业务执行前拒绝），共享父输出全部保持失效，并按请求槽数返回失效句柄形状。
+    ///
+    /// ```ignore
+    /// let report: Ref<Report> = flow.choose_output(|choice| {
+    ///     choice.case(Route::A, |sub| { sub.then(&process_a); sub.output::<Report>(); });
+    ///     choice.otherwise(|sub| { sub.then(&fallback); sub.output::<Report>(); });
+    /// });
+    /// ```
     #[allow(private_bounds)]
-    pub fn choose<K, O, F>(&mut self, selector: Ref<K>, definition: F) -> O
+    pub fn choose_output<K, O, F>(&mut self, definition: F) -> O
     where
         K: Data + PartialEq,
         O: RefShape + ShapeOps,
-        F: FnOnce(&mut Choice<'n, K, O>),
+        F: FnOnce(&mut Choice<'n, K>),
     {
-        let selector_desc = PositionDesc {
-            handle: selector.handle(),
-            type_desc: TypeDesc::of::<K>(),
-        };
-        let (step, order, outputs) = {
+        let expected = <O as ShapeOps>::type_descs();
+        let (outputs, ok) = self.register_choose::<K, F>(None, definition, Some(&expected));
+        if ok {
+            <O as ShapeOps>::from_positions(&mut outputs.into_iter())
+        } else {
+            self.failed_shape::<O>()
+        }
+    }
+
+    /// 显式 selector 的普通形式：精确保留所给 `Ref<K>` 作为 selector 使用点，不按类型重选
+    /// 最新来源；其余与 [`Flow::choose`] 相同。
+    pub fn choose_with<K, F>(&mut self, selector: Ref<K>, definition: F) -> &mut Self
+    where
+        K: Data + PartialEq,
+        F: FnOnce(&mut Choice<'n, K>),
+    {
+        let _ = self.register_choose::<K, F>(Some(selector), definition, None);
+        self
+    }
+
+    /// 显式 selector 的取输出形式：与 [`Flow::choose_with`] 共享同一条登记路径，返回父域
+    /// 可见的 RefShape；入口来源与自动形式只在 selector 解析上不同。
+    #[allow(private_bounds)]
+    pub fn choose_with_output<K, O, F>(&mut self, selector: Ref<K>, definition: F) -> O
+    where
+        K: Data + PartialEq,
+        O: RefShape + ShapeOps,
+        F: FnOnce(&mut Choice<'n, K>),
+    {
+        let expected = <O as ShapeOps>::type_descs();
+        let (outputs, ok) =
+            self.register_choose::<K, F>(Some(selector), definition, Some(&expected));
+        if ok {
+            <O as ShapeOps>::from_positions(&mut outputs.into_iter())
+        } else {
+            self.failed_shape::<O>()
+        }
+    }
+
+    /// Choose 的唯一登记实现（自动/显式与普通/取输出四种形式共用）。
+    ///
+    /// 顺序固定：入口固定 selector 使用点 → 构建全部分支与配置错误 → 读取各分支冻结声明并
+    /// 比较共同契约 → 按契约类型延后分配共享父输出 → 逐分支登记本地出口与槽位 → 在共享输出
+    /// 全部合法时按父域发布时点公开 →（可选）核对调用方 `O` 期望。任一步失败都不发布共享
+    /// 输出，也不产生可运行假来源。
+    #[allow(private_bounds)]
+    fn register_choose<K, F>(
+        &mut self,
+        selector: Option<Ref<K>>,
+        definition: F,
+        expected: Option<&[TypeDesc]>,
+    ) -> (Vec<PositionHandle>, bool)
+    where
+        K: Data + PartialEq,
+        F: FnOnce(&mut Choice<'n, K>),
+    {
+        let (step, order, selector_desc, selector_ok, errors_before) = {
             let mut builder = self.builder.borrow_mut();
             let step = builder.step_count(self.body);
             let order = builder.fresh_order();
+            let errors_before = builder.errors().len();
+            let type_desc = TypeDesc::of::<K>();
+            let desc = match selector {
+                Some(selector) => PositionDesc {
+                    handle: selector.handle(),
+                    type_desc,
+                },
+                None => builder
+                    .resolve(self.body, type_desc, None, order)
+                    .unwrap_or(PositionDesc {
+                        handle: builder.missing_handle(),
+                        type_desc,
+                    }),
+            };
             let selector_ok = builder
-                .record_use_at(self.body, Some(step), selector_desc, order)
+                .record_use_at(self.body, Some(step), desc, order)
                 .is_none();
-            let outputs =
-                builder.allocate_choose_outputs(self.body, step, &<O as ShapeOps>::type_descs());
-            if !selector_ok {
-                for handle in &outputs {
-                    builder.mark_tainted(*handle);
-                }
-            }
-            (step, order, outputs)
+            (step, order, desc, selector_ok, errors_before)
         };
-        let mut choice = Choice::new(Rc::clone(&self.builder), self.body, step, outputs.clone());
+        let mut choice = Choice::new(Rc::clone(&self.builder), self.body, step);
         definition(&mut choice);
         let (cases, otherwise) = choice.into_parts();
         let mut builder = self.builder.borrow_mut();
@@ -325,18 +411,106 @@ impl<'n> Flow<'n> {
                 step: Some(step),
             });
         }
-        builder.push_choose_step(
+        // 配置级错误（空配置、重复 case／otherwise）同样使共享输出保持失效：
+        // 发布门控必须覆盖 selector、配置、全部分支契约与调用方期望。
+        let config_ok = builder.errors().len() == errors_before;
+        // 分支契约：先用**统一判据**完成 状态 → arity → 逐槽类型 的全组一致性判定，
+        // 再（仅当契约成立时）核对调用方 O。合法 Undeclared 零输出契约与声明失败必须
+        // 区分：前者合法（零槽），后者由统一判据按状态不一致/缺声明拒绝。
+        let branch_bodies: Vec<BodyId> = cases
+            .iter()
+            .map(|(_, body)| *body)
+            .chain(otherwise.iter().copied())
+            .collect();
+        let mut contract_types: Vec<TypeDesc> = Vec::new();
+        if let Some(first) = branch_bodies.first() {
+            contract_types = builder
+                .output_declaration_of(*first)
+                .slots
+                .iter()
+                .map(|desc| desc.type_desc)
+                .collect();
+        }
+        let mut contract_ok = true;
+        if !branch_bodies.is_empty() {
+            let contract = ChooseContract {
+                body: self.body,
+                step,
+                branches: branch_bodies.clone(),
+                output_types: contract_types.clone(),
+            };
+            // 契约不成立时：既不发布共享输出，也不做 O 期望核对（保证 finish 报出的
+            // 是契约/来源错误，而不是被 O 期望遮蔽）；契约诊断由 finish 的统一判据给出，
+            // 不在此重复记录，避免盖掉更早的来源/deferred 首因。
+            if let Some(error) = builder.validate_choose_contract(&contract) {
+                contract_ok = false;
+                // 若某分支的声明自身失败（其首因更早，或由更深的来源/顺序问题派生），
+                // 不在此重复记录：让 finish 按真实因果给出源/顺序错误（既有前向来源
+                // 与更早真实输入的首因保持不变）。其余（状态一致但跨分支 arity/逐槽
+                // 类型不一致等）是自足契约错误，必须保留为语义首因，避免被失败形状
+                // 派生的占位错误（如 Root 声明失败 Ref 产生的 UnknownPosition）遮蔽。
+                let derived = branch_bodies.iter().any(|branch| {
+                    builder.output_declaration_of(*branch).state() == DeclarationState::Failed
+                });
+                if !derived {
+                    builder.record_config_error(error);
+                }
+            }
+        }
+        // 共享父输出按真实契约类型延后分配：分支构建期间它是“已分配未发布”，
+        // 任何分支都不可能解析到尚未成立的父输出。
+        let outputs = if contract_types.is_empty() {
+            Vec::new()
+        } else {
+            builder.allocate_choose_outputs(self.body, step, &contract_types)
+        };
+        let mut registered_cases: Vec<ChooseCase<K>> = Vec::with_capacity(cases.len());
+        for (index, (key, body)) in cases.into_iter().enumerate() {
+            let branch = builder.register_choose_branch(body, step, index as u16, &outputs);
+            registered_cases.push(ChooseCase { key, branch });
+        }
+        let registered_otherwise = otherwise.map(|body| {
+            builder.register_choose_branch(body, step, registered_cases.len() as u16, &outputs)
+        });
+        // O 期望只在分支契约自身成立时核对：契约已失败时保留首因，不叠加二次诊断。
+        let mut expectation_ok = true;
+        if let Some(expected) = expected
+            && contract_ok
+            && let Some(first) = registered_cases
+                .first()
+                .map(|case| case.branch.body)
+                .or_else(|| registered_otherwise.as_ref().map(|branch| branch.body))
+        {
+            let declaration = builder.output_declaration_of(first);
+            let found: Vec<TypeDesc> = declaration
+                .slots
+                .iter()
+                .map(|desc| desc.type_desc)
+                .collect();
+            if let Some(error) = builder.validate_declaration_expectation(
+                first,
+                DeclarationKind::Output,
+                declaration.attempted,
+                declaration.declared,
+                &found,
+                expected,
+            ) {
+                builder.record_config_error(error);
+                expectation_ok = false;
+            }
+        }
+        let published = builder.push_choose_step(
             self.body,
             ChooseStep::new(
                 selector_desc,
-                cases,
-                otherwise,
+                registered_cases,
+                registered_otherwise,
                 outputs.iter().map(|handle| handle.position).collect(),
                 order,
             ),
+            selector_ok && config_ok && contract_ok && expectation_ok,
         );
-        drop(builder);
-        <O as ShapeOps>::from_positions(&mut outputs.into_iter())
+        (outputs, published)
     }
 
     /// 普通 Retry：建立真实 child 边界并登记其声明的输出，返回原 Flow。
@@ -452,29 +626,69 @@ impl<'n> Flow<'n> {
         <S as ShapeOps>::from_positions(&mut outputs.into_iter())
     }
 
-    /// 控制器：按集合元素顺序对每项执行同一 item Body，并按槽聚合输出（SPEC §8、Engine §6.6）。
+    /// 控制器：按集合元素顺序对每项执行同一 item Body，并按槽聚合输出（SPEC §8.3、Engine §6.6）。
     ///
-    /// `collection` 是 `Ref<Vec<T>>`；每次 Item 闭包接收 `Ref<T>`——原集合元素的受限借用，
-    /// 无独立 DataId、不被 Clone 或移走。闭包返回的 item Body 输出 `()`／单 `Ref<O>`／
-    /// 2～16 个 flat `Ref` tuple，分别映射为 `()`／`Ref<Vec<O>>`／逐槽 `Ref<Vec<..>>`；
-    /// 同类型不同逻辑位置各有独立聚合槽。Body 只构建一次、多次执行；空集合不执行 Body，
-    /// 但仍完成构建与统一验证。item Body 与所有 child Flow 一样支持 then／chain／each／
-    /// choose／retry／iter。
+    /// `collection` 是 `Ref<Vec<T>>`；item Body 是单参数 unit Body，用 `ref_of::<Item>()`
+    /// 取得当前项的受限借用（`Ref<T>`，无独立 DataId、不被 Clone 或移走）。聚合类型来自
+    /// item Body 内 `output`／`output_with` 声明时捕获的 typed 能力：`()` 为零 collector、
+    /// 单 `Ref<A>` 聚合为 `Ref<Vec<A>>`、2～16 个 flat `Ref` 逐槽聚合；同类型不同逻辑位置
+    /// 各有独立槽。Body 只构建一次、多次执行；空集合不执行 Body，但仍完成构建与统一验证。
+    /// item Body 与所有 child Flow 一样支持 then／chain／each／choose／retry／iter。
     ///
-    /// 集合来源不受限：完整 `Vec<T>` Data 与外层 Each 的 item（`Ref<Vec<T>>`，其元素自身
-    /// 是集合）都合法。两种来源都只建立受限元素借用，不移动／复制集合，也不给来源任何
-    /// 独立消费权。
+    /// 集合来源不受限：完整 `Vec<T>` Data 与外层 Each 的 item（`Ref<Vec<T>>`）都合法。
+    pub fn each<T, F>(&mut self, collection: Ref<Vec<T>>, definition: F) -> &mut Self
+    where
+        T: Data,
+        F: FnOnce(&mut Flow<'n>),
+    {
+        let _ = self.register_each::<T, F>(collection, definition, None);
+        self
+    }
+
+    /// 取聚合输出形式：与 [`Flow::each`] 共享同一条登记路径，返回父域可见的聚合 RefShape。
+    ///
+    /// `O` 由调用处给出，Definition 与 item 声明的 `<ItemRefs as EachShape>::Collected`
+    /// 比较（单槽 `Ref<Vec<A>>`，多槽逐槽；`Ref<A>` 漏聚合会被拒绝）。不符是 Definition 错误，
+    /// 按请求槽数返回失效句柄形状。
+    ///
+    /// ```ignore
+    /// let reports: Ref<Vec<Report>> = flow.each_output(items, |item| {
+    ///     let current = item.ref_of::<Item>();
+    ///     item.then_with_output(&process, current);
+    ///     item.output::<Report>();
+    /// });
+    /// ```
     #[allow(private_bounds)]
-    pub fn each<T, O, F>(
+    pub fn each_output<T, O, F>(&mut self, collection: Ref<Vec<T>>, definition: F) -> O
+    where
+        T: Data,
+        O: RefShape + ShapeOps,
+        F: FnOnce(&mut Flow<'n>),
+    {
+        let expected = <O as ShapeOps>::type_descs();
+        let (outputs, ok) = self.register_each::<T, F>(collection, definition, Some(&expected));
+        if ok {
+            <O as ShapeOps>::from_positions(&mut outputs.into_iter())
+        } else {
+            self.failed_shape::<O>()
+        }
+    }
+
+    /// Each 的唯一登记实现（普通/取聚合两种形式共用）。
+    ///
+    /// 先建 item Body 并分配形式 item（owner=item Body），再同步执行一次 unit Body；随后读取
+    /// 其冻结声明与声明时捕获的 typed 能力，交给 `register_each` 完成槽位、聚合类型与调用方
+    /// 期望核对。缺失/失效/槽数或聚合类型不符的 typed 能力在 Definition 阶段拒绝。
+    #[allow(private_bounds)]
+    fn register_each<T, F>(
         &mut self,
         collection: Ref<Vec<T>>,
         definition: F,
-    ) -> <O as EachShape>::Collected
+        expected: Option<&[TypeDesc]>,
+    ) -> (Vec<PositionHandle>, bool)
     where
         T: Data,
-        O: RefShape + ShapeOps + EachCollect,
-        <O as EachShape>::Collected: RefShape + ShapeOps,
-        F: FnOnce(Ref<T>, &mut Flow<'n>) -> O,
+        F: FnOnce(&mut Flow<'n>),
     {
         let collection_desc = PositionDesc {
             handle: collection.handle(),
@@ -490,27 +704,20 @@ impl<'n> Flow<'n> {
             let item_position = builder.allocate_each_item(item, step, TypeDesc::of::<T>());
             (step, item, item_position)
         };
-        let declared = {
-            let mut sub = Flow {
-                builder: Rc::clone(&self.builder),
-                body: item,
-            };
-            definition(Ref::<T>::from_handle(item_position), &mut sub)
-        };
-        let outputs = self.builder.borrow_mut().register_each(
+        {
+            let mut sub = Flow::open(Rc::clone(&self.builder), item);
+            definition(&mut sub);
+        }
+        self.builder.borrow_mut().register_each(
             self.body,
             item,
             step,
             collection_desc,
             item_position,
-            declared.positions(),
-            <<O as EachShape>::Collected as ShapeOps>::type_descs(),
-            <O as EachCollect>::begin_collectors,
+            expected,
             crate::core::engine::shape::each_bind_item::<T>,
             crate::core::engine::shape::each_collection_len::<T>,
-            <O as EachCollect>::finish_collectors,
-        );
-        <<O as EachShape>::Collected as ShapeOps>::from_positions(&mut outputs.into_iter())
+        )
     }
 
     /// 当前位置最近的合法业务 Ref（只查询元数据，不登记 Step、位置或 Import）。
@@ -533,7 +740,8 @@ impl<'n> Flow<'n> {
     #[allow(private_bounds)]
     pub fn output<T: RootInput>(&mut self) -> &mut Self
     where
-        T::Refs: ShapeOps,
+        T::Refs: ShapeOps + EachCollect,
+        <T::Refs as EachShape>::Collected: ShapeOps,
     {
         let types = <T::Refs as ShapeOps>::type_descs();
         let mut builder = self.builder.borrow_mut();
@@ -552,7 +760,12 @@ impl<'n> Flow<'n> {
                 }
             }
         }
-        let _ = builder.declare(self.body, DeclarationKind::Output, slots, order, missing);
+        let ok = builder.declare(self.body, DeclarationKind::Output, slots, order, missing);
+        if ok {
+            // 声明时捕获该 Body 的 typed 能力：作为同一份输出声明的私有元数据保存，
+            // 供 Each 等控制结构消费；重复/失败声明不会覆盖第一份能力。
+            builder.attach_each_bridge(self.body, EachBridge::of::<T::Refs>());
+        }
         drop(builder);
         self
     }
@@ -562,11 +775,18 @@ impl<'n> Flow<'n> {
     /// 与 [`Flow::output`] 的区别是不做“最近来源”解析，因此可以直接声明多个不同来源的槽位；
     /// 同一逻辑位置重复声明仍按直接重复 Root Ref 拒绝。
     #[allow(private_bounds)]
-    pub fn output_with<R: ShapeOps>(&mut self, refs: R) -> &mut Self {
+    pub fn output_with<R>(&mut self, refs: R) -> &mut Self
+    where
+        R: ShapeOps + EachCollect,
+        <R as EachShape>::Collected: ShapeOps,
+    {
         let slots = refs.positions();
         let mut builder = self.builder.borrow_mut();
         let order = builder.fresh_order();
-        let _ = builder.declare(self.body, DeclarationKind::Output, slots, order, false);
+        let ok = builder.declare(self.body, DeclarationKind::Output, slots, order, false);
+        if ok {
+            builder.attach_each_bridge(self.body, EachBridge::of::<R>());
+        }
         drop(builder);
         self
     }

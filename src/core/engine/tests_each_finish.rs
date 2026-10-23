@@ -91,10 +91,13 @@ async fn tagger(query: Query<&Item>) -> Result<Tag, BodyError> {
 
 /// 两槽 item Body：集合逐项产生 `(Out, Tag)`，每个槽聚合成 Each-owned `Vec`。
 fn two_slots<'n>(flow: &mut Flow<'n>, items: Ref<Vec<Item>>) -> (Ref<Vec<Out>>, Ref<Vec<Tag>>) {
-    flow.each(items, |item, each| {
+    flow.each_output(items, |each| {
+        let item = each.ref_of::<Item>();
+
         let doubled = each.then_with_output(&score, item);
         let labelled = each.then_with_output(&tagger, item);
-        (doubled, labelled)
+        let out_refs = (doubled, labelled);
+        each.output_with(out_refs);
     })
 }
 

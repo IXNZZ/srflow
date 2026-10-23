@@ -990,10 +990,19 @@ async fn key_from_amount(query: Query<&Amount>) -> Result<Key, BodyError> {
 fn t03_choose_is_one_step_with_shared_parent_slots_and_per_branch_exits() {
     let definition = build_definition::<Amount, Amount, _>(|flow, amount| {
         let selector = flow.then_with_output(key_from_amount, amount);
-        let out_refs = flow.choose(selector, |choice| {
-            choice.case(Key(1), |branch| branch.then_with_output(add_one, amount));
-            choice.case(Key(2), |branch| branch.then_with_output(add_one, amount));
-            choice.otherwise(|branch| branch.then_with_output(add_one, amount));
+        let out_refs: Ref<Amount> = flow.choose_with_output(selector, |choice| {
+            choice.case(Key(1), |branch| {
+                let out_refs = branch.then_with_output(add_one, amount);
+                branch.output_with(out_refs);
+            });
+            choice.case(Key(2), |branch| {
+                let out_refs = branch.then_with_output(add_one, amount);
+                branch.output_with(out_refs);
+            });
+            choice.otherwise(|branch| {
+                let out_refs = branch.then_with_output(add_one, amount);
+                branch.output_with(out_refs);
+            });
         });
         flow.output_with(out_refs);
     })
@@ -1048,9 +1057,12 @@ fn t03_choose_is_one_step_with_shared_parent_slots_and_per_branch_exits() {
 fn t03_unselected_branch_forward_source_is_rejected() {
     let error = build_definition::<Amount, Amount, _>(|flow, amount| {
         let selector = flow.then_with_output(key_from_amount, amount);
-        let out_refs = flow.choose(selector, |choice| {
+        let out_refs: Ref<Amount> = flow.choose_with_output(selector, |choice| {
             // 第一个分支合法；第二个分支（将来不会被选中）使用前向位置。
-            choice.case(Key(1), |branch| branch.then_with_output(add_one, amount));
+            choice.case(Key(1), |branch| {
+                let out_refs = branch.then_with_output(add_one, amount);
+                branch.output_with(out_refs);
+            });
             choice.case(Key(2), |branch| {
                 let definition = branch.definition_id();
                 let future = branch.next_position_id();
@@ -1058,7 +1070,8 @@ fn t03_unselected_branch_forward_source_is_rejected() {
                     definition,
                     position: future,
                 });
-                branch.then_with_output(add_one, forged)
+                let out_refs = branch.then_with_output(add_one, forged);
+                branch.output_with(out_refs);
             });
         });
         flow.output_with(out_refs);

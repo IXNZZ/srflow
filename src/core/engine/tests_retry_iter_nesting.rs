@@ -498,13 +498,14 @@ fn e12_iter_break_crosses_choose_to_root() {
     let outcome = block_on(runtime.execute::<_, Report, _>(
         |flow: &mut crate::core::engine::flow::Flow<'_>, prompt: Ref<Prompt>| {
             let selector = flow.then_with_output(&to_selector, prompt);
-            let out_refs: Ref<Report> = flow.choose(selector, |choice| {
+            let out_refs: Ref<Report> = flow.choose_with_output(selector, |choice| {
                 choice.case(1u32, |branch| {
-                    branch.retry_output(2, |attempt| {
+                    let out_refs: Ref<Report> = branch.retry_output(2, |attempt| {
                         let candidate = attempt.then_with_output(&generate, prompt);
                         let out_refs = attempt.then_with_output(&breaking, candidate);
                         attempt.output_with(out_refs);
-                    })
+                    });
+                    branch.output_with(out_refs);
                 });
             });
             flow.output_with(out_refs);
@@ -537,13 +538,14 @@ fn e25_budget_error_propagates_through_choose_as_terminal() {
     let outcome = block_on(runtime.execute::<_, Report, _>(
         |flow: &mut crate::core::engine::flow::Flow<'_>, prompt: Ref<Prompt>| {
             let selector = flow.then_with_output(&to_selector, prompt);
-            let out_refs: Ref<Report> = flow.choose(selector, |choice| {
+            let out_refs: Ref<Report> = flow.choose_with_output(selector, |choice| {
                 choice.case(1u32, |branch| {
-                    branch.retry_output(1, |inner| {
+                    let out_refs: Ref<Report> = branch.retry_output(1, |inner| {
                         let candidate = inner.then_with_output(&generate, prompt);
                         let out_refs = inner.then_with_output(&judge_always_retrying, candidate);
                         inner.output_with(out_refs);
-                    })
+                    });
+                    branch.output_with(out_refs);
                 });
             });
             flow.output_with(out_refs);
@@ -637,8 +639,11 @@ fn e11_no_matching_case_does_not_drive_retry() {
         |flow: &mut crate::core::engine::flow::Flow<'_>, prompt: Ref<Prompt>| {
             let out_refs: Ref<Candidate> = flow.retry_output(2, |attempt| {
                 let selector = attempt.then_with_output(&to_selector, prompt);
-                let out_refs = attempt.choose(selector, |choice| {
-                    choice.case(9u32, |branch| branch.then_with_output(&generate, prompt));
+                let out_refs: Ref<Candidate> = attempt.choose_with_output(selector, |choice| {
+                    choice.case(9u32, |branch| {
+                        let out_refs = branch.then_with_output(&generate, prompt);
+                        branch.output_with(out_refs);
+                    });
                 });
                 attempt.output_with(out_refs);
             });

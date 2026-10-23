@@ -103,10 +103,13 @@ fn main() -> Result<(), Box<dyn Error>> {
     reset_calls();
     let (scores, reports) = block_on(runtime.execute::<_, (Vec<Score>, Vec<Report>), _>(
         |flow: &mut Flow<'_>, items: Ref<Vec<Item>>| {
-            let out_refs = flow.each(items, |item, each| {
+            let out_refs: (Ref<Vec<Score>>, Ref<Vec<Report>>) = flow.each_output(items, |each| {
+                let item = each.ref_of::<Item>();
+
                 let score = each.then_with_output(&score, item);
                 let report = each.then_with_output(&report, (item, score));
-                (score, report)
+                let out_refs = (score, report);
+                each.output_with(out_refs);
             });
             flow.output_with(out_refs);
         },
@@ -131,8 +134,11 @@ fn main() -> Result<(), Box<dyn Error>> {
     reset_calls();
     block_on(runtime.execute::<_, (), _>(
         |flow: &mut Flow<'_>, items: Ref<Vec<Item>>| {
-            let () = flow.each(items, |item, each| {
+            let () = flow.each_output(items, |each| {
+                let item = each.ref_of::<Item>();
+
                 each.then_with_output(&audit, item);
+                each.output::<()>();
             });
             flow.output_with(());
         },
@@ -145,8 +151,11 @@ fn main() -> Result<(), Box<dyn Error>> {
     reset_calls();
     block_on(runtime.execute::<_, (), _>(
         |flow: &mut Flow<'_>, items: Ref<Vec<Item>>| {
-            let () = flow.each(items, |item, each| {
+            let () = flow.each_output(items, |each| {
+                let item = each.ref_of::<Item>();
+
                 each.then_with_output(&audit, item);
+                each.output::<()>();
             });
             flow.output_with(());
         },
@@ -159,8 +168,11 @@ fn main() -> Result<(), Box<dyn Error>> {
     reset_calls();
     let error = match block_on(runtime.execute::<_, Vec<Score>, _>(
         |flow: &mut Flow<'_>, items: Ref<Vec<Item>>| {
-            let out_refs = flow.each(items, |item, each| {
-                each.then_with_output(&score_checked, item)
+            let out_refs: Ref<Vec<Score>> = flow.each_output(items, |each| {
+                let item = each.ref_of::<Item>();
+
+                let out_refs = each.then_with_output(&score_checked, item);
+                each.output_with(out_refs);
             });
             flow.output_with(out_refs);
         },
@@ -189,8 +201,11 @@ fn main() -> Result<(), Box<dyn Error>> {
     reset_calls();
     let error = match block_on(runtime.execute::<_, Vec<Score>, _>(
         |flow: &mut Flow<'_>, items: Ref<Vec<Item>>| {
-            let out_refs = flow.each(items, |item, each| {
-                each.then_with_output(&score_until_control, item)
+            let out_refs: Ref<Vec<Score>> = flow.each_output(items, |each| {
+                let item = each.ref_of::<Item>();
+
+                let out_refs = each.then_with_output(&score_until_control, item);
+                each.output_with(out_refs);
             });
             flow.output_with(out_refs);
         },

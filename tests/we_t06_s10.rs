@@ -394,21 +394,25 @@ async fn scheme_b(
                     let diagnosis = round.then_with_output(&nodes.diagnose, (current, basis));
                     round.then_with_output(&nodes.stop, diagnosis);
                     let action = round.then_with_output(&nodes.choose, diagnosis);
-                    round.choose(action, |choice| {
+                    round.choose_with_output(action, |choice| {
                         choice.case(RevisionAction::Reduce, |branch| {
-                            branch.then_with_output(&nodes.reduce, (current, diagnosis, boundary))
+                            let out_refs = branch
+                                .then_with_output(&nodes.reduce, (current, diagnosis, boundary));
+                            branch.output_with(out_refs);
                         });
                         choice.case(RevisionAction::Supplement, |branch| {
-                            branch.then_with_output(
+                            let out_refs = branch.then_with_output(
                                 &nodes.supplement,
                                 (current, diagnosis, task, boundary),
-                            )
+                            );
+                            branch.output_with(out_refs);
                         });
                         choice.case(RevisionAction::Rewrite, |branch| {
-                            branch.then_with_output(
+                            let out_refs = branch.then_with_output(
                                 &nodes.rewrite,
                                 (current, diagnosis, characters, facts),
-                            )
+                            );
+                            branch.output_with(out_refs);
                         });
                     })
                 });
