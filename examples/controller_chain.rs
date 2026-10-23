@@ -87,11 +87,14 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let sum: Counted = runtime
         .execute(
             |flow, (spans, route): (Ref<Vec<Span>>, Ref<Route>)| {
-                let lengths = flow.each(spans, |span, each| each.then(length, span));
-                flow.choose(route, |choice| {
-                    choice.case(Route { code: 1 }, |branch| branch.then(total, lengths));
-                    choice.otherwise(|branch| branch.then(count, lengths));
-                })
+                let lengths = flow.each(spans, |span, each| each.then_with_output(length, span));
+                let out_refs = flow.choose(route, |choice| {
+                    choice.case(Route { code: 1 }, |branch| {
+                        branch.then_with_output(total, lengths)
+                    });
+                    choice.otherwise(|branch| branch.then_with_output(count, lengths));
+                });
+                flow.output_with(out_refs);
             },
             (vec![Span(1), Span(2)], Route { code: 1 }),
         )
@@ -102,11 +105,14 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let count: Counted = runtime
         .execute(
             |flow, (spans, route): (Ref<Vec<Span>>, Ref<Route>)| {
-                let lengths = flow.each(spans, |span, each| each.then(length, span));
-                flow.choose(route, |choice| {
-                    choice.case(Route { code: 1 }, |branch| branch.then(total, lengths));
-                    choice.otherwise(|branch| branch.then(count, lengths));
-                })
+                let lengths = flow.each(spans, |span, each| each.then_with_output(length, span));
+                let out_refs = flow.choose(route, |choice| {
+                    choice.case(Route { code: 1 }, |branch| {
+                        branch.then_with_output(total, lengths)
+                    });
+                    choice.otherwise(|branch| branch.then_with_output(count, lengths));
+                });
+                flow.output_with(out_refs);
             },
             (vec![Span(1), Span(2)], Route { code: 9 }),
         )
@@ -118,10 +124,11 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let budget: Budget = runtime
         .execute(
             |flow, budget: Ref<Budget>| {
-                flow.iter(budget, 5, |current, round| {
-                    round.then(stop_after_three, current);
-                    round.then(spend, current)
-                })
+                let out_refs = flow.iter(budget, 5, |current, round| {
+                    round.then_with_output(stop_after_three, current);
+                    round.then_with_output(spend, current)
+                });
+                flow.output_with(out_refs);
             },
             Budget {
                 spent: 0,
@@ -140,9 +147,11 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
 
     // 定义期拒绝可观察：空的 Choose 配置（既无 case 也无 otherwise）在任何业务 Node 之前被拒。
     let outcome = runtime
-        .execute(
+        .execute::<_, (), _>(
             |flow, route: Ref<Route>| {
                 let _: () = flow.choose(route, |_choice| {});
+
+                flow.output_with(());
             },
             Route { code: 1 },
         )

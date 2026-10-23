@@ -144,16 +144,17 @@ fn e05_controllers_expose_real_frames_callers_and_distinct_rounds() {
     reset_all!();
     let log = Rc::new(RefCell::new(Vec::new()));
     let runtime = Runtime::new();
-    let outcome = block_on(runtime.execute(
+    let outcome = block_on(runtime.execute::<_, (), _>(
         |flow: &mut Flow<'_>, state: Ref<Tracked>| {
-            flow.retry(1, |attempt| {
+            let () = flow.retry(1, |attempt| {
                 let inner = attempt.iter(state, 3, |current, round| {
-                    let next = round.then(&bump_ctx, current);
-                    round.then(&break_after_first, current);
+                    let next = round.then_with_output(&bump_ctx, current);
+                    round.then_with_output(&break_after_first, current);
                     next
                 });
-                attempt.then(&consume_ctx, inner)
-            })
+                attempt.then_with_output(&consume_ctx, inner)
+            });
+            flow.output_with(());
         },
         Tracked {
             value: 0,
@@ -275,15 +276,16 @@ fn e06_deep_ordinary_capture_and_state_import_meet_at_the_direct_caller() {
     reset_all!();
     let log = Rc::new(RefCell::new(Vec::new()));
     let runtime = Runtime::new();
-    let outcome = block_on(runtime.execute(
+    let outcome = block_on(runtime.execute::<_, Tracked, _>(
         |flow: &mut Flow<'_>, (state, anchor): (Ref<Tracked>, Ref<Anchor>)| {
-            flow.chain(|sub| {
+            let out_refs = flow.chain(|sub| {
                 sub.iter(state, 3, |current, round| {
-                    let next = round.then(&combine, (current, anchor));
-                    round.then(&break_after_first, current);
+                    let next = round.then_with_output(&combine, (current, anchor));
+                    round.then_with_output(&break_after_first, current);
                     next
                 })
-            })
+            });
+            flow.output_with(out_refs);
         },
         (
             Tracked {
@@ -378,12 +380,13 @@ async fn generate(query: Query<&Prompt>) -> Result<Report, BodyError> {
 fn e08_retry_mixed_output_delivers_self_and_ancestor_alias() {
     reset_all!();
     let runtime = Runtime::new();
-    let (report, prompt) = block_on(runtime.execute(
+    let (report, prompt) = block_on(runtime.execute::<_, (Report, Prompt), _>(
         |flow: &mut Flow<'_>, prompt: Ref<Prompt>| {
-            flow.retry(1, |attempt| {
-                let report = attempt.then(&generate, prompt);
+            let out_refs = flow.retry(1, |attempt| {
+                let report = attempt.then_with_output(&generate, prompt);
                 (report, prompt)
-            })
+            });
+            flow.output_with(out_refs);
         },
         Prompt(41),
     ))
@@ -415,13 +418,15 @@ fn e08_retry_mixed_output_delivers_self_and_ancestor_alias() {
 fn e08_retry_duplicate_target_output_is_delivered_as_a_group() {
     reset_all!();
     let runtime = Runtime::new();
-    let report = block_on(runtime.execute(
+    let report = block_on(runtime.execute::<_, Report, _>(
         |flow: &mut Flow<'_>, prompt: Ref<Prompt>| {
-            flow.retry(1, |attempt| {
-                let report = attempt.then(&generate, prompt);
-                (report, report)
-            })
-            .0
+            let out_refs = flow
+                .retry(1, |attempt| {
+                    let report = attempt.then_with_output(&generate, prompt);
+                    (report, report)
+                })
+                .0;
+            flow.output_with(out_refs);
         },
         Prompt(9),
     ))
@@ -442,12 +447,13 @@ fn e28_duplicate_root_targets_are_rejected_with_zero_takes() {
     reset_all!();
     crate::core::test_support::take_log_reset();
     let runtime = Runtime::new();
-    let outcome = block_on(runtime.execute(
+    let outcome = block_on(runtime.execute::<_, (Report, Report), _>(
         |flow: &mut Flow<'_>, prompt: Ref<Prompt>| {
-            flow.retry(1, |attempt| {
-                let report = attempt.then(&generate, prompt);
+            let out_refs = flow.retry(1, |attempt| {
+                let report = attempt.then_with_output(&generate, prompt);
                 (report, report)
-            })
+            });
+            flow.output_with(out_refs);
         },
         Prompt(7),
     ));
@@ -682,12 +688,13 @@ fn assert_delivery_rejection(failure: &ExecFailure, observed: &DeliveryRejection
 fn e28_retry_delivery_late_destination_occupied_rejects_without_partial_export() {
     reset_all!();
     let log = Rc::new(RefCell::new(Vec::new()));
-    let definition = build_definition::<Tracked, _, _>(|flow, seed| {
-        flow.retry(1, |attempt| {
-            let first = attempt.then(&bump_ctx, seed);
-            let second = attempt.then(&bump_ctx, seed);
+    let definition = build_definition::<Tracked, (Tracked, Tracked), _>(|flow, seed| {
+        let out_refs = flow.retry(1, |attempt| {
+            let first = attempt.then_with_output(&bump_ctx, seed);
+            let second = attempt.then_with_output(&bump_ctx, seed);
             (first, second)
-        })
+        });
+        flow.output_with(out_refs);
     })
     .expect("the retry definition builds");
 
@@ -845,20 +852,22 @@ async fn break_tracked_now(query: Query<&Tracked>) -> Result<(), BodyError> {
 fn e28_iter_break_delivery_late_destination_occupied_rejects_without_partial_export() {
     reset_all!();
     let log = Rc::new(RefCell::new(Vec::new()));
-    let definition = build_definition::<(Tracked, Tracked), _, _>(|flow, (draft, context)| {
-        flow.iter(
-            (draft, context),
-            3,
-            |(current_draft, current_context), round| {
-                // 本轮已产生但未被接受的 next，随后发出 IterBreak。
-                let next_draft = round.then(&bump_ctx, current_draft);
-                let next_context = round.then(&bump_ctx, current_context);
-                round.then(&break_tracked_now, current_context);
-                (next_draft, next_context)
-            },
-        )
-    })
-    .expect("the iter definition builds");
+    let definition =
+        build_definition::<(Tracked, Tracked), (Tracked, Tracked), _>(|flow, (draft, context)| {
+            let out_refs = flow.iter(
+                (draft, context),
+                3,
+                |(current_draft, current_context), round| {
+                    // 本轮已产生但未被接受的 next，随后发出 IterBreak。
+                    let next_draft = round.then_with_output(&bump_ctx, current_draft);
+                    let next_context = round.then_with_output(&bump_ctx, current_context);
+                    round.then_with_output(&break_tracked_now, current_context);
+                    (next_draft, next_context)
+                },
+            );
+            flow.output_with(out_refs);
+        })
+        .expect("the iter definition builds");
 
     let destinations = definition_positions(&definition, |source| {
         matches!(source, PositionSource::IterOutput { .. })
@@ -1031,10 +1040,11 @@ async fn chain_second(query: Query<&u32>) -> Result<u32, BodyError> {
 fn e31_sequential_chains_close_before_recreating_and_reject_old_scope_access() {
     reset_all!();
     let runtime = Runtime::new();
-    let value = block_on(runtime.execute(
+    let value = block_on(runtime.execute::<_, u32, _>(
         |flow: &mut Flow<'_>, seed: Ref<u32>| {
-            let first = flow.chain(|sub| sub.then(&chain_first, seed));
-            flow.chain(|sub| sub.then(&chain_second, first))
+            let first = flow.chain(|sub| sub.then_with_output(&chain_first, seed));
+            let out_refs = flow.chain(|sub| sub.then_with_output(&chain_second, first));
+            flow.output_with(out_refs);
         },
         0u32,
     ))
@@ -1098,10 +1108,11 @@ async fn read_borrowing_await(query: Query<&Opaque>) -> Result<Report, BodyError
 fn e33_business_objects_and_borrowing_nodes_keep_minimal_bounds() {
     reset_all!();
     let runtime = Runtime::new();
-    let report = block_on(runtime.execute(
+    let report = block_on(runtime.execute::<_, Report, _>(
         |flow: &mut Flow<'_>, prompt: Ref<Prompt>| {
-            let opaque = flow.then(&make_opaque, prompt);
-            flow.then(&read_borrowing_await, opaque)
+            let opaque = flow.then_with_output(&make_opaque, prompt);
+            let out_refs = flow.then_with_output(&read_borrowing_await, opaque);
+            flow.output_with(out_refs);
         },
         Prompt(77),
     ))
@@ -1137,16 +1148,17 @@ fn e24_outer_retry_restarts_the_inner_iter_from_the_original_state() {
     reset_all!();
     let log = Rc::new(RefCell::new(Vec::new()));
     let runtime = Runtime::new();
-    let delivered = block_on(runtime.execute(
+    let delivered = block_on(runtime.execute::<_, Tracked, _>(
         |flow: &mut Flow<'_>, state: Ref<Tracked>| {
-            flow.retry(1, |attempt| {
+            let out_refs = flow.retry(1, |attempt| {
                 let iterated = attempt.iter(state, 3, |current, round| {
-                    let next = round.then(&bump_ctx, current);
-                    round.then(&break_after_first, current);
+                    let next = round.then_with_output(&bump_ctx, current);
+                    round.then_with_output(&break_after_first, current);
                     next
                 });
-                attempt.then(&judge_retry_once, iterated)
-            })
+                attempt.then_with_output(&judge_retry_once, iterated)
+            });
+            flow.output_with(out_refs);
         },
         Tracked {
             value: 0,
@@ -1248,14 +1260,15 @@ fn e03_child_local_round_position_used_in_parent_step_is_rejected() {
     reset_all!();
     let mut escaped: Option<Ref<u32>> = None;
     let runtime = Runtime::new();
-    let outcome = block_on(runtime.execute(
+    let outcome = block_on(runtime.execute::<_, (), _>(
         |flow: &mut Flow<'_>, initial: Ref<u32>| {
             let _output = flow.iter(initial, 1, |current, round| {
-                let produced = round.then(&produce_u32, current);
+                let produced = round.then_with_output(&produce_u32, current);
                 escaped = Some(produced);
                 current
             });
-            flow.then(&sink_u32, escaped.expect("captured round-local ref"))
+            let () = flow.then_with_output(&sink_u32, escaped.expect("captured round-local ref"));
+            flow.output_with(());
         },
         11u32,
     ));
@@ -1275,14 +1288,15 @@ fn e03_child_local_round_position_as_root_output_is_rejected() {
     reset_all!();
     let mut escaped: Option<Ref<u32>> = None;
     let runtime = Runtime::new();
-    let outcome = block_on(runtime.execute(
+    let outcome = block_on(runtime.execute::<_, u32, _>(
         |flow: &mut Flow<'_>, initial: Ref<u32>| {
             let _output = flow.iter(initial, 1, |current, round| {
-                let produced = round.then(&produce_u32, current);
+                let produced = round.then_with_output(&produce_u32, current);
                 escaped = Some(produced);
                 current
             });
-            escaped.expect("captured round-local ref")
+            let out_refs = escaped.expect("captured round-local ref");
+            flow.output_with(out_refs);
         },
         11u32,
     ));
@@ -1305,11 +1319,11 @@ fn e03_unselected_branch_position_as_iter_initial_is_rejected() {
     reset_all!();
     let mut forged: Option<Ref<u32>> = None;
     let runtime = Runtime::new();
-    let outcome = block_on(runtime.execute(
+    let outcome = block_on(runtime.execute::<_, u32, _>(
         |flow: &mut Flow<'_>, seed: Ref<u32>| {
-            let selector = flow.then(&key_from_u32, seed);
+            let selector = flow.then_with_output(&key_from_u32, seed);
             flow.choose(selector, |choice| {
-                choice.case(Key(1), |branch| branch.then(&produce_u32, seed));
+                choice.case(Key(1), |branch| branch.then_with_output(&produce_u32, seed));
                 choice.case(Key(2), |branch| {
                     let definition = branch.definition_id();
                     let future = branch.next_position_id();
@@ -1317,14 +1331,15 @@ fn e03_unselected_branch_position_as_iter_initial_is_rejected() {
                         definition,
                         position: future,
                     }));
-                    branch.then(&produce_u32, seed)
+                    branch.then_with_output(&produce_u32, seed)
                 });
             });
             let initial = forged.expect("captured forged ref");
-            flow.iter(initial, 1, |current, round| {
-                round.then(&break_now, current);
+            let out_refs = flow.iter(initial, 1, |current, round| {
+                round.then_with_output(&break_now, current);
                 current
-            })
+            });
+            flow.output_with(out_refs);
         },
         1u32,
     ));
@@ -1345,11 +1360,11 @@ fn e03_unselected_branch_position_as_attempt_output_is_rejected() {
     reset_all!();
     let mut forged: Option<Ref<u32>> = None;
     let runtime = Runtime::new();
-    let outcome = block_on(runtime.execute(
+    let outcome = block_on(runtime.execute::<_, u32, _>(
         |flow: &mut Flow<'_>, seed: Ref<u32>| {
-            let selector = flow.then(&key_from_u32, seed);
+            let selector = flow.then_with_output(&key_from_u32, seed);
             flow.choose(selector, |choice| {
-                choice.case(Key(1), |branch| branch.then(&produce_u32, seed));
+                choice.case(Key(1), |branch| branch.then_with_output(&produce_u32, seed));
                 choice.case(Key(2), |branch| {
                     let definition = branch.definition_id();
                     let future = branch.next_position_id();
@@ -1357,10 +1372,11 @@ fn e03_unselected_branch_position_as_attempt_output_is_rejected() {
                         definition,
                         position: future,
                     }));
-                    branch.then(&produce_u32, seed)
+                    branch.then_with_output(&produce_u32, seed)
                 });
             });
-            flow.retry(1, |_attempt| forged.take().expect("captured forged ref"))
+            let out_refs = flow.retry(1, |_attempt| forged.take().expect("captured forged ref"));
+            flow.output_with(out_refs);
         },
         1u32,
     ));
@@ -1388,9 +1404,12 @@ fn e03_unselected_branch_position_as_attempt_output_is_rejected() {
 fn e04_retry_max_minus_one_first_attempt_success_runs_one_attempt() {
     reset_all!();
     let runtime = Runtime::new();
-    let report = block_on(runtime.execute(
+    let report = block_on(runtime.execute::<_, Report, _>(
         |flow: &mut Flow<'_>, prompt: Ref<Prompt>| {
-            flow.retry(usize::MAX - 1, |attempt| attempt.then(&generate, prompt))
+            let out_refs = flow.retry(usize::MAX - 1, |attempt| {
+                attempt.then_with_output(&generate, prompt)
+            });
+            flow.output_with(out_refs);
         },
         Prompt(41),
     ))
@@ -1429,12 +1448,13 @@ fn e04_retry_max_minus_one_first_attempt_success_runs_one_attempt() {
 fn e04_iter_max_budget_first_round_break_is_legal() {
     reset_all!();
     let runtime = Runtime::new();
-    let delivered = block_on(runtime.execute(
+    let delivered = block_on(runtime.execute::<_, u32, _>(
         |flow: &mut Flow<'_>, initial: Ref<u32>| {
-            flow.iter(initial, usize::MAX, |current, round| {
-                round.then(&break_now, current);
+            let out_refs = flow.iter(initial, usize::MAX, |current, round| {
+                round.then_with_output(&break_now, current);
                 current
-            })
+            });
+            flow.output_with(out_refs);
         },
         11u32,
     ))

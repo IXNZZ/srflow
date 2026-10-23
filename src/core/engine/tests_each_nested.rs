@@ -200,11 +200,12 @@ fn values(collected: &[Vec<Total>]) -> Vec<Vec<u32>> {
 fn r01_witness_shape_executes_non_empty_and_stays_empty_for_empty_inputs() {
     reset_observations();
     let runtime = Runtime::new();
-    let non_empty = block_on(runtime.execute(
+    let non_empty = block_on(runtime.execute::<_, Vec<Vec<Total>>, _>(
         |flow, groups: Ref<Vec<Vec<Item>>>| {
-            flow.each(groups, |group, outer| {
-                outer.each(group, |item, inner| inner.then(increment, item))
-            })
+            let out_refs = flow.each(groups, |group, outer| {
+                outer.each(group, |item, inner| inner.then_with_output(increment, item))
+            });
+            flow.output_with(out_refs);
         },
         vec![vec![Item(1), Item(2)], vec![Item(3)]],
     ))
@@ -217,11 +218,12 @@ fn r01_witness_shape_executes_non_empty_and_stays_empty_for_empty_inputs() {
     assert_eq!(body_calls(), 3, "one item Body call per inner element");
 
     reset_observations();
-    let empty = block_on(runtime.execute(
+    let empty = block_on(runtime.execute::<_, Vec<Vec<Total>>, _>(
         |flow, groups: Ref<Vec<Vec<Item>>>| {
-            flow.each(groups, |group, outer| {
-                outer.each(group, |item, inner| inner.then(increment, item))
-            })
+            let out_refs = flow.each(groups, |group, outer| {
+                outer.each(group, |item, inner| inner.then_with_output(increment, item))
+            });
+            flow.output_with(out_refs);
         },
         vec![vec![], vec![]],
     ))
@@ -235,14 +237,15 @@ fn r01_witness_shape_executes_non_empty_and_stays_empty_for_empty_inputs() {
 #[test]
 fn r01_the_outer_collection_stays_readable_after_the_nested_each() {
     reset_observations();
-    let (nested, total) = block_on(Runtime::new().execute(
+    let (nested, total) = block_on(Runtime::new().execute::<_, (Vec<Vec<Total>>, u64), _>(
         |flow, groups: Ref<Vec<Vec<Item>>>| {
             let collected = flow.each(groups, |group, outer| {
-                outer.each(group, |item, inner| inner.then(increment, item))
+                outer.each(group, |item, inner| inner.then_with_output(increment, item))
             });
             // 外层 Each 之后仍读取同一外层集合位置：来源没有被消费或搬走。
-            let total = flow.then(&count_items, groups);
-            (collected, total)
+            let total = flow.then_with_output(&count_items, groups);
+            let out_refs = (collected, total);
+            flow.output_with(out_refs);
         },
         vec![vec![Item(1), Item(2)], vec![Item(3)]],
     ))
@@ -257,13 +260,14 @@ fn r01_the_outer_collection_stays_readable_after_the_nested_each() {
 #[test]
 fn r01_three_levels_of_item_backed_collections_keep_values_and_caps() {
     reset_observations();
-    let collected = block_on(Runtime::new().execute(
+    let collected = block_on(Runtime::new().execute::<_, Vec<Vec<Vec<Total>>>, _>(
         |flow, cube: Ref<Vec<Vec<Vec<Item>>>>| {
-            flow.each(cube, |plane, level1| {
+            let out_refs = flow.each(cube, |plane, level1| {
                 level1.each(plane, |row, level2| {
-                    level2.each(row, |cell, level3| level3.then(increment, cell))
+                    level2.each(row, |cell, level3| level3.then_with_output(increment, cell))
                 })
-            })
+            });
+            flow.output_with(out_refs);
         },
         vec![
             vec![vec![Item(1), Item(2)], vec![Item(3)]],
@@ -289,11 +293,14 @@ fn r01_three_levels_of_item_backed_collections_keep_values_and_caps() {
 #[test]
 fn r01_a_chain_child_body_can_use_the_item_backed_collection() {
     reset_observations();
-    let collected = block_on(Runtime::new().execute(
+    let collected = block_on(Runtime::new().execute::<_, Vec<Vec<Total>>, _>(
         |flow, groups: Ref<Vec<Vec<Item>>>| {
-            flow.each(groups, |group, outer| {
-                outer.chain(move |sub| sub.each(group, |item, inner| inner.then(increment, item)))
-            })
+            let out_refs = flow.each(groups, |group, outer| {
+                outer.chain(move |sub| {
+                    sub.each(group, |item, inner| inner.then_with_output(increment, item))
+                })
+            });
+            flow.output_with(out_refs);
         },
         vec![vec![Item(1), Item(2)], vec![Item(3)]],
     ))
@@ -757,11 +764,14 @@ fn assert_no_detached_scope() {
 #[test]
 fn r01_control_inside_the_nested_body_drops_each_instance_once() {
     reset_observations();
-    let outcome = block_on(Runtime::new().execute(
+    let outcome = block_on(Runtime::new().execute::<_, Vec<Vec<Total>>, _>(
         |flow, groups: Ref<Vec<Vec<TrackItem>>>| {
-            flow.each(groups, |group, outer| {
-                outer.each(group, |item, inner| inner.then(break_inside_nested, item))
-            })
+            let out_refs = flow.each(groups, |group, outer| {
+                outer.each(group, |item, inner| {
+                    inner.then_with_output(break_inside_nested, item)
+                })
+            });
+            flow.output_with(out_refs);
         },
         tracked_input().0,
     ));
@@ -779,11 +789,14 @@ fn r01_control_inside_the_nested_body_drops_each_instance_once() {
 #[test]
 fn r01_failure_inside_the_nested_body_drops_each_instance_once() {
     reset_observations();
-    let outcome = block_on(Runtime::new().execute(
+    let outcome = block_on(Runtime::new().execute::<_, Vec<Vec<Total>>, _>(
         |flow, groups: Ref<Vec<Vec<TrackItem>>>| {
-            flow.each(groups, |group, outer| {
-                outer.each(group, |item, inner| inner.then(fail_inside_nested, item))
-            })
+            let out_refs = flow.each(groups, |group, outer| {
+                outer.each(group, |item, inner| {
+                    inner.then_with_output(fail_inside_nested, item)
+                })
+            });
+            flow.output_with(out_refs);
         },
         tracked_input().0,
     ));
@@ -803,13 +816,14 @@ fn r01_pending_cancel_inside_the_nested_body_leaves_no_dangling_borrow() {
     reset_observations();
     let (input, log) = tracked_input();
     let runtime = Runtime::new();
-    let mut future = Box::pin(runtime.execute(
+    let mut future = Box::pin(runtime.execute::<_, Vec<Vec<TrackedTotal>>, _>(
         |flow, (groups, shared): (Ref<Vec<Vec<TrackItem>>>, Ref<SharedLog>)| {
-            flow.each(groups, |group, outer| {
+            let out_refs = flow.each(groups, |group, outer| {
                 outer.each(group, |item, inner| {
-                    inner.then(&produce_then_pend, (item, shared))
+                    inner.then_with_output(&produce_then_pend, (item, shared))
                 })
-            })
+            });
+            flow.output_with(out_refs);
         },
         (input, SharedLog { log }),
     ));

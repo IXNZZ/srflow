@@ -84,22 +84,23 @@ fn fragment<'n>(
     node: &'n AddOne,
     input: Ref<Amount>,
 ) -> impl FnOnce(&mut Flow<'n>) -> Ref<Amount> + 'n {
-    move |sub| sub.then(node, input)
+    move |sub| sub.then_with_output(node, input)
 }
 
 /// Fragment 第二种形式：接收 `&mut Flow` 的普通函数，在 chain closure 内调用。
 fn call_in_closure<'n>(flow: &mut Flow<'n>, node: &'n AddOne, input: Ref<Amount>) -> Ref<Amount> {
-    flow.then(node, input)
+    flow.then_with_output(node, input)
 }
 
 // ---------------------------------------------------------------- A01 Root Shape
 
 #[test]
 fn a01_unit_root_registers_no_position_and_keeps_zero_input_node() {
-    let definition = build_definition::<(), _, _>(|flow, ()| {
-        let produced = flow.then(load, ());
+    let definition = build_definition::<(), (), _>(|flow, ()| {
+        let produced = flow.then_with_output(load, ());
         let _: Ref<Amount> = produced;
-        ()
+        let () = ();
+        flow.output_with(());
     })
     .expect("zero-input root should build");
     let root = definition.root();
@@ -112,11 +113,19 @@ fn a01_unit_root_registers_no_position_and_keeps_zero_input_node() {
 
 #[test]
 fn a01_root_shapes_single_tuple_and_boundaries() {
-    let single = build_definition::<Amount, _, _>(|_flow, amount| amount).unwrap();
+    let single = build_definition::<Amount, Amount, _>(|_flow, amount| {
+        let out_refs = amount;
+        _flow.output_with(out_refs);
+    })
+    .unwrap();
     assert_eq!(single.root().output().len(), 1);
     assert_eq!(single.positions().len(), 1);
 
-    let pair = build_definition::<(Amount, Doubled), _, _>(|_flow, pair| pair).unwrap();
+    let pair = build_definition::<(Amount, Doubled), (Amount, Doubled), _>(|_flow, pair| {
+        let out_refs = pair;
+        _flow.output_with(out_refs);
+    })
+    .unwrap();
     assert_eq!(pair.root().output().len(), 2);
     assert_ne!(
         pair.root().output()[0].handle.position,
@@ -142,9 +151,29 @@ fn a01_root_shapes_single_tuple_and_boundaries() {
             f32,
             f64,
         ),
+        (
+            u8,
+            u16,
+            u32,
+            u64,
+            u128,
+            usize,
+            i8,
+            i16,
+            i32,
+            i64,
+            i128,
+            isize,
+            bool,
+            char,
+            f32,
+            f64,
+        ),
         _,
-        _,
-    >(|_flow, refs| refs)
+    >(|_flow, refs| {
+        let out_refs = refs;
+        _flow.output_with(out_refs);
+    })
     .unwrap();
     assert_eq!(wide.root().output().len(), 16);
     assert_eq!(wide.positions().len(), 16);
@@ -161,9 +190,10 @@ macro_rules! arity_case {
                 let _ = view;
                 Ok(())
             }
-            let definition = build_definition::<($($t,)+), _, _>(|flow, refs| {
-                let _: () = flow.then(node, refs);
-                refs
+            let definition = build_definition::<($($t,)+), ($($t,)+), _>(|flow, refs| {
+                let _: () = flow.then_with_output(node, refs);
+                let out_refs = refs;
+                flow.output_with(out_refs);
             })
             .expect("every promised arity should register and build");
             assert_eq!(definition.root().steps().len(), 1);
@@ -316,13 +346,17 @@ fn a02_native_tuple_shape_differs_from_box_data_leaf() {
         Ok(())
     }
 
-    let single = build_definition::<Box<(u8, u16)>, _, _>(|flow, leaf| flow.then(boxed_leaf, leaf))
-        .expect("Box tuple should be a single Data leaf");
+    let single = build_definition::<Box<(u8, u16)>, (), _>(|flow, leaf| {
+        let () = flow.then_with_output(boxed_leaf, leaf);
+        flow.output_with(());
+    })
+    .expect("Box tuple should be a single Data leaf");
     assert_eq!(single.root().steps()[0].inputs().len(), 1);
 
-    let tuple = build_definition::<(u8, u16), _, _>(|flow, refs| {
-        let _: () = flow.then(two_inputs, refs);
-        ()
+    let tuple = build_definition::<(u8, u16), (), _>(|flow, refs| {
+        let _: () = flow.then_with_output(two_inputs, refs);
+        let () = ();
+        flow.output_with(());
     })
     .expect("native tuple should be a two-position shape");
     assert_eq!(tuple.root().steps()[0].inputs().len(), 2);
@@ -332,12 +366,13 @@ fn a02_native_tuple_shape_differs_from_box_data_leaf() {
 
 #[test]
 fn a03_ref_copy_keeps_identity_and_supports_non_clone_data() {
-    let definition = build_definition::<Payload, _, _>(|flow, payload| {
+    let definition = build_definition::<Payload, (u32, u32), _>(|flow, payload| {
         let copy = payload;
         assert_eq!(payload.handle(), copy.handle());
-        let first = flow.then(consume_payload_a, payload);
-        let second = flow.then(consume_payload_b, copy);
-        (first, second)
+        let first = flow.then_with_output(consume_payload_a, payload);
+        let second = flow.then_with_output(consume_payload_b, copy);
+        let out_refs = (first, second);
+        flow.output_with(out_refs);
     })
     .expect("non-Clone data should build through Copy Refs");
     // Root 输入 1 个位置 + 2 个 Node 输出位置；Ref 复制不分配新位置。
@@ -351,11 +386,13 @@ fn a03_ref_copy_keeps_identity_and_supports_non_clone_data() {
 
 #[test]
 fn a03_same_type_distinct_inputs_keep_distinct_identity() {
-    let definition = build_definition::<(Payload, Payload), _, _>(|_flow, (left, right)| {
-        assert_ne!(left.handle(), right.handle());
-        (left, right)
-    })
-    .expect("same-type distinct inputs should stay distinct");
+    let definition =
+        build_definition::<(Payload, Payload), (Payload, Payload), _>(|_flow, (left, right)| {
+            assert_ne!(left.handle(), right.handle());
+            let out_refs = (left, right);
+            _flow.output_with(out_refs);
+        })
+        .expect("same-type distinct inputs should stay distinct");
     assert_eq!(definition.positions().len(), 2);
 }
 
@@ -364,10 +401,11 @@ fn a03_same_type_distinct_inputs_keep_distinct_identity() {
 /// [`Ref`]（`Copy`，与业务类型无关）与真实 `build_definition` 入口。
 #[test]
 fn v21_05_data_ref_clone_needs_no_data_clone() {
-    let definition = build_definition::<Payload, _, _>(|flow, payload| {
+    let definition = build_definition::<Payload, u32, _>(|flow, payload| {
         let copy = payload; // 复制位置句柄；`Payload` 不是 `Clone`／`Copy`
         assert_eq!(payload.handle(), copy.handle(), "复制共享同一位置");
-        flow.then(consume_payload_a, copy)
+        let out_refs = flow.then_with_output(consume_payload_a, copy);
+        flow.output_with(out_refs);
     })
     .expect("a copied Ref must not require the business type to be Clone");
     // Root 输入 1 个位置 + 1 个 Node 输出位置；句柄复制不分配新位置。
@@ -415,13 +453,14 @@ fn a04_all_supported_node_forms_register_without_calling() {
         async |query: Query<&Amount>| -> Result<Amount, BodyError> { Ok(Amount(query.get().0)) };
     let function_ref = &add_one;
 
-    let definition = build_definition::<Amount, _, _>(|flow, amount| {
-        let a = flow.then(&configured, amount);
-        let b = flow.then(owned, a);
-        let c = flow.then(Arc::clone(&shared), b);
-        let d = flow.then(add_one, c);
-        let e = flow.then(function_ref, d);
-        flow.then(async_closure, e)
+    let definition = build_definition::<Amount, Amount, _>(|flow, amount| {
+        let a = flow.then_with_output(&configured, amount);
+        let b = flow.then_with_output(owned, a);
+        let c = flow.then_with_output(Arc::clone(&shared), b);
+        let d = flow.then_with_output(add_one, c);
+        let e = flow.then_with_output(function_ref, d);
+        let out_refs = flow.then_with_output(async_closure, e);
+        flow.output_with(out_refs);
     })
     .expect("all supported node forms should register");
 
@@ -457,12 +496,13 @@ fn a05_query_maps_declarations_to_leaf_borrows() {
 
 #[test]
 fn a06_order_unit_steps_and_unused_outputs_are_kept() {
-    let definition = build_definition::<Amount, _, _>(|flow, amount| {
-        let doubled = flow.then(double, amount);
-        let _unit: () = flow.then(sink_doubled, doubled);
-        let unused = flow.then(double, amount);
+    let definition = build_definition::<Amount, (), _>(|flow, amount| {
+        let doubled = flow.then_with_output(double, amount);
+        let _unit: () = flow.then_with_output(sink_doubled, doubled);
+        let unused = flow.then_with_output(double, amount);
         let _ = unused;
-        ()
+        let () = ();
+        flow.output_with(());
     })
     .expect("unit and unused steps should build");
 
@@ -483,12 +523,13 @@ fn a06_order_unit_steps_and_unused_outputs_are_kept() {
 
 #[test]
 fn a06_explicit_unit_children_are_complete() {
-    let definition = build_definition::<Amount, _, _>(|flow, amount| {
-        flow.chain(|sub| {
-            let produced = sub.then(double, amount);
-            let _: () = sub.then(sink_doubled, produced);
+    let definition = build_definition::<Amount, (), _>(|flow, amount| {
+        let () = flow.chain(|sub| {
+            let produced = sub.then_with_output(double, amount);
+            let _: () = sub.then_with_output(sink_doubled, produced);
             ()
-        })
+        });
+        flow.output_with(());
     })
     .expect("explicit unit child should be a complete body");
 
@@ -503,9 +544,11 @@ fn a06_explicit_unit_children_are_complete() {
 
 #[test]
 fn a07_chain_builds_child_body_and_parent_refs() {
-    let definition =
-        build_definition::<Amount, _, _>(|flow, amount| flow.chain(|sub| sub.then(double, amount)))
-            .expect("chain should build");
+    let definition = build_definition::<Amount, Doubled, _>(|flow, amount| {
+        let out_refs = flow.chain(|sub| sub.then_with_output(double, amount));
+        flow.output_with(out_refs);
+    })
+    .expect("chain should build");
 
     let root = definition.root();
     assert_eq!(root.steps().len(), 1);
@@ -527,9 +570,10 @@ fn a07_chain_builds_child_body_and_parent_refs() {
 #[test]
 fn a07_fragment_forms_build_with_non_static_nodes() {
     let node = AddOne;
-    let definition = build_definition::<Amount, _, _>(|flow, amount| {
+    let definition = build_definition::<Amount, Amount, _>(|flow, amount| {
         let first = flow.chain(fragment(&node, amount));
-        flow.chain(|sub| call_in_closure(sub, &node, first))
+        let out_refs = flow.chain(|sub| call_in_closure(sub, &node, first));
+        flow.output_with(out_refs);
     })
     .expect("both fragment forms should build");
 
@@ -549,9 +593,10 @@ fn a07_fragment_forms_build_with_non_static_nodes() {
 
 #[test]
 fn a08_root_input_and_node_output_refs_are_accepted() {
-    let definition = build_definition::<Amount, _, _>(|flow, amount| {
-        let produced = flow.then(AddOne, amount);
-        flow.then(double, produced)
+    let definition = build_definition::<Amount, Doubled, _>(|flow, amount| {
+        let produced = flow.then_with_output(AddOne, amount);
+        let out_refs = flow.then_with_output(double, produced);
+        flow.output_with(out_refs);
     })
     .expect("legal root input and node output refs should be accepted");
 
@@ -569,16 +614,18 @@ fn a08_root_input_and_node_output_refs_are_accepted() {
 #[test]
 fn a09_foreign_definition_ref_is_rejected() {
     let mut leaked: Option<Ref<Amount>> = None;
-    let _first = build_definition::<Amount, _, _>(|_flow, amount| {
+    let _first = build_definition::<Amount, Amount, _>(|_flow, amount| {
         leaked = Some(amount);
-        amount
+        let out_refs = amount;
+        _flow.output_with(out_refs);
     })
     .expect("first definition should build");
 
     let foreign = leaked.expect("captured root ref");
-    let error = build_definition::<Amount, _, _>(|flow, amount| {
-        let _ = flow.then(AddOne, foreign);
-        amount
+    let error = build_definition::<Amount, Amount, _>(|flow, amount| {
+        let _ = flow.then_with_output(AddOne, foreign);
+        let out_refs = amount;
+        flow.output_with(out_refs);
     })
     .err()
     .expect("foreign definition ref must be rejected");
@@ -591,15 +638,16 @@ fn a09_foreign_definition_ref_is_rejected() {
 #[test]
 fn a09_child_local_leak_is_rejected() {
     let mut leaked: Option<Ref<Doubled>> = None;
-    let error = build_definition::<Amount, _, _>(|flow, amount| {
+    let error = build_definition::<Amount, (), _>(|flow, amount| {
         let _kept = flow.chain(|sub| {
-            let produced = sub.then(double, amount);
+            let produced = sub.then_with_output(double, amount);
             leaked = Some(produced);
             produced
         });
         let child_local = leaked.expect("leaked child ref");
-        let _ = flow.then(sink_doubled, child_local);
-        ()
+        let _ = flow.then_with_output(sink_doubled, child_local);
+        let () = ();
+        flow.output_with(());
     })
     .err()
     .expect("child-local ref used in the parent must be rejected");
@@ -618,14 +666,15 @@ fn a09_child_local_leak_is_rejected() {
 #[test]
 fn a09_sibling_internal_ref_is_rejected() {
     let mut leaked: Option<Ref<Doubled>> = None;
-    let error = build_definition::<Amount, _, _>(|flow, amount| {
+    let error = build_definition::<Amount, (), _>(|flow, amount| {
         let _first = flow.chain(|sub| {
-            let produced = sub.then(double, amount);
+            let produced = sub.then_with_output(double, amount);
             leaked = Some(produced);
             produced
         });
         let sibling_local = leaked.expect("leaked first-child ref");
-        flow.chain(move |sub| sub.then(sink_doubled, sibling_local))
+        let () = flow.chain(move |sub| sub.then_with_output(sink_doubled, sibling_local));
+        flow.output_with(());
     })
     .err()
     .expect("sibling internal ref must be rejected");
@@ -643,9 +692,10 @@ fn a09_sibling_internal_ref_is_rejected() {
 
 #[test]
 fn a09_chain_output_is_usable_in_parent() {
-    let definition = build_definition::<Amount, _, _>(|flow, amount| {
-        let checked = flow.chain(|sub| sub.then(AddOne, amount));
-        flow.then(double, checked)
+    let definition = build_definition::<Amount, Doubled, _>(|flow, amount| {
+        let checked = flow.chain(|sub| sub.then_with_output(AddOne, amount));
+        let out_refs = flow.then_with_output(double, checked);
+        flow.output_with(out_refs);
     })
     .expect("chain output should be a legal parent-visible ref");
     assert_eq!(definition.root().steps().len(), 2);
@@ -655,14 +705,15 @@ fn a09_chain_output_is_usable_in_parent() {
 
 #[test]
 fn a10_position_without_registered_source_is_rejected() {
-    let error = build_definition::<Amount, _, _>(|flow, amount| {
+    let error = build_definition::<Amount, Amount, _>(|flow, amount| {
         let definition = flow.definition_id();
         let forged = Ref::<Amount>::from_handle(PositionHandle {
             definition,
             position: PositionId::new(9_999),
         });
-        let _ = flow.then(AddOne, forged);
-        amount
+        let _ = flow.then_with_output(AddOne, forged);
+        let out_refs = amount;
+        flow.output_with(out_refs);
     })
     .err()
     .expect("unregistered position must be rejected");
@@ -674,11 +725,12 @@ fn a10_position_without_registered_source_is_rejected() {
 
 #[test]
 fn a11_registered_source_survives_handle_reconstruction() {
-    let definition = build_definition::<Amount, _, _>(|flow, amount| {
-        let produced = flow.then(double, amount);
+    let definition = build_definition::<Amount, Doubled, _>(|flow, amount| {
+        let produced = flow.then_with_output(double, amount);
         let reconstructed = Ref::<Doubled>::from_handle(produced.handle());
-        let _: () = flow.then(sink_doubled, reconstructed);
-        produced
+        let _: () = flow.then_with_output(sink_doubled, reconstructed);
+        let out_refs = produced;
+        flow.output_with(out_refs);
     })
     .expect("a handle to a registered position keeps its legal source");
     assert_eq!(definition.root().steps().len(), 2);
@@ -689,9 +741,11 @@ fn a11_registered_source_survives_handle_reconstruction() {
 #[test]
 fn a12_deep_capture_records_every_intermediate_import() {
     let mut root_position: Option<PositionId> = None;
-    let definition = build_definition::<Amount, _, _>(|flow, amount| {
+    let definition = build_definition::<Amount, Doubled, _>(|flow, amount| {
         root_position = Some(amount.handle().position);
-        flow.chain(|outer| outer.chain(|inner| inner.then(double, amount)))
+        let out_refs =
+            flow.chain(|outer| outer.chain(|inner| inner.then_with_output(double, amount)));
+        flow.output_with(out_refs);
     })
     .expect("deep ancestor capture should build");
 
@@ -713,15 +767,16 @@ fn a12_deep_capture_records_every_intermediate_import() {
 
 #[test]
 fn a12_forward_position_is_rejected() {
-    let error = build_definition::<Amount, _, _>(|flow, amount| {
+    let error = build_definition::<Amount, Amount, _>(|flow, amount| {
         let definition = flow.definition_id();
         let future = flow.next_position_id();
         let forged = Ref::<Amount>::from_handle(PositionHandle {
             definition,
             position: future,
         });
-        let _ = flow.then(AddOne, forged);
-        amount
+        let _ = flow.then_with_output(AddOne, forged);
+        let out_refs = amount;
+        flow.output_with(out_refs);
     })
     .err()
     .expect("a position allocated after its use must be rejected");
@@ -735,9 +790,12 @@ fn a12_forward_position_is_rejected() {
 
 #[test]
 fn a13_root_duplicate_ref_is_rejected() {
-    let error = build_definition::<Amount, _, _>(|_flow, amount| (amount, amount))
-        .err()
-        .expect("root direct duplicate must be rejected");
+    let error = build_definition::<Amount, (Amount, Amount), _>(|_flow, amount| {
+        let out_refs = (amount, amount);
+        _flow.output_with(out_refs);
+    })
+    .err()
+    .expect("root direct duplicate must be rejected");
     assert!(
         matches!(error, BuildErrorDetail::DuplicateRootOutput { .. }),
         "{error}"
@@ -746,13 +804,14 @@ fn a13_root_duplicate_ref_is_rejected() {
 
 #[test]
 fn a13_chain_duplicate_source_is_canonicalized_to_one_exit() {
-    let definition = build_definition::<Amount, _, _>(|flow, amount| {
+    let definition = build_definition::<Amount, (), _>(|flow, amount| {
         let pair = flow.chain(|sub| {
-            let produced = sub.then(double, amount);
+            let produced = sub.then_with_output(double, amount);
             (produced, produced)
         });
         let _: (Ref<Doubled>, Ref<Doubled>) = pair;
-        ()
+        let () = ();
+        flow.output_with(());
     })
     .expect("chain duplicate source should be accepted and canonicalized");
 
@@ -771,11 +830,12 @@ fn a13_chain_duplicate_source_is_canonicalized_to_one_exit() {
 
 #[test]
 fn a13_root_returning_chain_refs_passes_static_checks() {
-    let definition = build_definition::<Amount, _, _>(|flow, amount| {
-        flow.chain(|sub| {
-            let produced = sub.then(double, amount);
+    let definition = build_definition::<Amount, (Doubled, Doubled), _>(|flow, amount| {
+        let out_refs = flow.chain(|sub| {
+            let produced = sub.then_with_output(double, amount);
             (produced, produced)
-        })
+        });
+        flow.output_with(out_refs);
     })
     .expect("two distinct parent refs from one chain exit are statically legal");
     let output = definition.root().output();
@@ -785,9 +845,11 @@ fn a13_root_returning_chain_refs_passes_static_checks() {
 
 #[test]
 fn a13_node_repeated_readonly_inputs_are_legal() {
-    let definition =
-        build_definition::<Amount, _, _>(|flow, amount| flow.then(pair_reader, (amount, amount)))
-            .expect("repeated read-only node inputs should be legal");
+    let definition = build_definition::<Amount, Doubled, _>(|flow, amount| {
+        let out_refs = flow.then_with_output(pair_reader, (amount, amount));
+        flow.output_with(out_refs);
+    })
+    .expect("repeated read-only node inputs should be legal");
     let step = &definition.root().steps()[0];
     assert_eq!(step.inputs().len(), 2);
     assert_eq!(
@@ -798,8 +860,11 @@ fn a13_node_repeated_readonly_inputs_are_legal() {
 
 #[test]
 fn a13_chain_alias_output_imports_ancestor_without_transfer() {
-    let definition = build_definition::<Amount, _, _>(|flow, amount| flow.chain(|_sub| amount))
-        .expect("chain alias output should be legal");
+    let definition = build_definition::<Amount, Amount, _>(|flow, amount| {
+        let out_refs = flow.chain(|_sub| amount);
+        flow.output_with(out_refs);
+    })
+    .expect("chain alias output should be legal");
 
     let root = definition.root();
     let chain = root.steps()[0].chain().expect("chain step");
@@ -836,10 +901,11 @@ fn a14_failing_build_never_calls_nodes() {
         }
     }
 
-    let error = build_definition::<Amount, _, _>(|flow, amount| {
-        let produced = flow.then(Counting, amount);
+    let error = build_definition::<Amount, (Amount, Amount), _>(|flow, amount| {
+        let produced = flow.then_with_output(Counting, amount);
         let _ = produced;
-        (amount, amount)
+        let out_refs = (amount, amount);
+        flow.output_with(out_refs);
     })
     .err()
     .expect("duplicate root output should fail the build");
@@ -853,10 +919,11 @@ fn a14_failing_build_never_calls_nodes() {
 #[test]
 fn a15_definition_is_built_from_one_body_authority() {
     let mut root_position: Option<PositionId> = None;
-    let definition = build_definition::<Amount, _, _>(|flow, amount| {
+    let definition = build_definition::<Amount, Amount, _>(|flow, amount| {
         root_position = Some(amount.handle().position);
-        let first = flow.chain(|sub| sub.then(AddOne, amount));
-        flow.chain(|sub| sub.then(AddOne, first))
+        let first = flow.chain(|sub| sub.then_with_output(AddOne, amount));
+        let out_refs = flow.chain(|sub| sub.then_with_output(AddOne, first));
+        flow.output_with(out_refs);
     })
     .expect("nested chain bodies should build");
 
@@ -891,13 +958,14 @@ async fn key_from_amount(query: Query<&Amount>) -> Result<Key, BodyError> {
 
 #[test]
 fn t03_choose_is_one_step_with_shared_parent_slots_and_per_branch_exits() {
-    let definition = build_definition::<Amount, _, _>(|flow, amount| {
-        let selector = flow.then(key_from_amount, amount);
-        flow.choose(selector, |choice| {
-            choice.case(Key(1), |branch| branch.then(add_one, amount));
-            choice.case(Key(2), |branch| branch.then(add_one, amount));
-            choice.otherwise(|branch| branch.then(add_one, amount));
-        })
+    let definition = build_definition::<Amount, Amount, _>(|flow, amount| {
+        let selector = flow.then_with_output(key_from_amount, amount);
+        let out_refs = flow.choose(selector, |choice| {
+            choice.case(Key(1), |branch| branch.then_with_output(add_one, amount));
+            choice.case(Key(2), |branch| branch.then_with_output(add_one, amount));
+            choice.otherwise(|branch| branch.then_with_output(add_one, amount));
+        });
+        flow.output_with(out_refs);
     })
     .expect("a valid choose definition builds");
 
@@ -948,11 +1016,11 @@ fn t03_choose_is_one_step_with_shared_parent_slots_and_per_branch_exits() {
 
 #[test]
 fn t03_unselected_branch_forward_source_is_rejected() {
-    let error = build_definition::<Amount, _, _>(|flow, amount| {
-        let selector = flow.then(key_from_amount, amount);
-        flow.choose(selector, |choice| {
+    let error = build_definition::<Amount, Amount, _>(|flow, amount| {
+        let selector = flow.then_with_output(key_from_amount, amount);
+        let out_refs = flow.choose(selector, |choice| {
             // 第一个分支合法；第二个分支（将来不会被选中）使用前向位置。
-            choice.case(Key(1), |branch| branch.then(add_one, amount));
+            choice.case(Key(1), |branch| branch.then_with_output(add_one, amount));
             choice.case(Key(2), |branch| {
                 let definition = branch.definition_id();
                 let future = branch.next_position_id();
@@ -960,9 +1028,10 @@ fn t03_unselected_branch_forward_source_is_rejected() {
                     definition,
                     position: future,
                 });
-                branch.then(add_one, forged)
+                branch.then_with_output(add_one, forged)
             });
-        })
+        });
+        flow.output_with(out_refs);
     })
     .err()
     .expect("an unselected branch with a forward source must be rejected");

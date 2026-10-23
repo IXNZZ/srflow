@@ -172,20 +172,24 @@ fn s04_plain_collection_slots_aggregate_in_item_order() {
     reset();
     let runtime = Runtime::new();
     let node = ScoreNode { delta: 1 };
-    let (scores, bumped, reports, counted) = block_on(runtime.execute(
-        |flow: &mut Flow<'_>, (items, rules): (Ref<Vec<Item>>, Ref<Rule>)| {
-            let (scores, bumped, reports) = flow.each(items, |item, each| {
-                let score = each.then(&node, (item, rules));
-                let bumped = each.then(&bump_score, (item, score));
-                let report = each.then(&make_report, (item, score));
-                (score, bumped, report)
-            });
-            let counted = flow.then(&count_items, items);
-            (scores, bumped, reports, counted)
-        },
-        (vec![Item(1), Item(2), Item(3)], Rule(10)),
-    ))
-    .expect("a plain collection Each runs");
+    let (scores, bumped, reports, counted) =
+        block_on(
+            runtime.execute::<_, (Vec<Score>, Vec<Score>, Vec<Report>, Total), _>(
+                |flow: &mut Flow<'_>, (items, rules): (Ref<Vec<Item>>, Ref<Rule>)| {
+                    let (scores, bumped, reports) = flow.each(items, |item, each| {
+                        let score = each.then_with_output(&node, (item, rules));
+                        let bumped = each.then_with_output(&bump_score, (item, score));
+                        let report = each.then_with_output(&make_report, (item, score));
+                        (score, bumped, report)
+                    });
+                    let counted = flow.then_with_output(&count_items, items);
+                    let out_refs = (scores, bumped, reports, counted);
+                    flow.output_with(out_refs);
+                },
+                (vec![Item(1), Item(2), Item(3)], Rule(10)),
+            ),
+        )
+        .expect("a plain collection Each runs");
 
     // 逐槽值：score = v*10+1；bumped = score+v；report = v*100+score。
     assert_eq!(
@@ -235,13 +239,16 @@ fn s04_plain_collection_slots_aggregate_in_item_order() {
 fn s04_item_backed_nested_and_three_level_collections() {
     reset();
     let runtime = Runtime::new();
-    let (nested, counted) = block_on(runtime.execute(
+    let (nested, counted) = block_on(runtime.execute::<_, (Vec<Vec<Total>>, Count), _>(
         |flow: &mut Flow<'_>, groups: Ref<Vec<Vec<Item>>>| {
             let nested = flow.each(groups, |group, outer| {
-                outer.each(group, |item, inner| inner.then(&increment, item))
+                outer.each(group, |item, inner| {
+                    inner.then_with_output(&increment, item)
+                })
             });
-            let counted = flow.then(&count_nested, groups);
-            (nested, counted)
+            let counted = flow.then_with_output(&count_nested, groups);
+            let out_refs = (nested, counted);
+            flow.output_with(out_refs);
         },
         vec![vec![Item(1), Item(2)], vec![Item(3)]],
     ))
@@ -259,13 +266,16 @@ fn s04_item_backed_nested_and_three_level_collections() {
     );
 
     reset();
-    let three = block_on(runtime.execute(
+    let three = block_on(runtime.execute::<_, Vec<Vec<Vec<Total>>>, _>(
         |flow: &mut Flow<'_>, cube: Ref<Vec<Vec<Vec<Item>>>>| {
-            flow.each(cube, |plane, level1| {
+            let out_refs = flow.each(cube, |plane, level1| {
                 level1.each(plane, |row, level2| {
-                    level2.each(row, |cell, level3| level3.then(&increment, cell))
+                    level2.each(row, |cell, level3| {
+                        level3.then_with_output(&increment, cell)
+                    })
                 })
-            })
+            });
+            flow.output_with(out_refs);
         },
         vec![
             vec![vec![Item(1), Item(2)], vec![Item(3)]],
@@ -288,9 +298,10 @@ fn s04_unit_and_empty_collections_run_no_body() {
     // unit body：不产生业务槽。
     let outcome: Result<(), RunError> = block_on(runtime.execute(
         |flow: &mut Flow<'_>, items: Ref<Vec<Item>>| {
-            flow.each(items, |item, each| {
-                each.then(&audit, item);
-            })
+            let () = flow.each(items, |item, each| {
+                each.then_with_output(&audit, item);
+            });
+            flow.output_with(());
         },
         vec![Item(1), Item(2)],
     ));
@@ -299,9 +310,10 @@ fn s04_unit_and_empty_collections_run_no_body() {
 
     // 空集合：不执行 body，正常输出空 Vec。
     reset();
-    let empty = block_on(runtime.execute(
+    let empty = block_on(runtime.execute::<_, Vec<Total>, _>(
         |flow: &mut Flow<'_>, items: Ref<Vec<Item>>| {
-            flow.each(items, |item, each| each.then(&increment, item))
+            let out_refs = flow.each(items, |item, each| each.then_with_output(&increment, item));
+            flow.output_with(out_refs);
         },
         Vec::<Item>::new(),
     ))
@@ -347,11 +359,12 @@ fn s04_item_output_is_not_consumable() {
     let runtime = Runtime::new();
     let outcome: Result<Vec<Item>, RunError> = block_on(runtime.execute(
         |flow: &mut Flow<'_>, items: Ref<Vec<Item>>| {
-            flow.each(items, |item, each| {
-                each.then(&touch, item);
+            let out_refs = flow.each(items, |item, each| {
+                each.then_with_output(&touch, item);
                 // 期望拒绝：formal item 自身出现在被收集的输出槽。
                 item
-            })
+            });
+            flow.output_with(out_refs);
         },
         vec![Item(1), Item(2)],
     ));
@@ -375,11 +388,12 @@ fn s04_ancestor_alias_output_is_not_consumable() {
     let runtime = Runtime::new();
     let outcome: Result<(Vec<Mark>, Vec<Rule>), RunError> = block_on(runtime.execute(
         |flow: &mut Flow<'_>, (items, rules): (Ref<Vec<Item>>, Ref<Rule>)| {
-            flow.each(items, |item, each| {
-                let mark = each.then(&touch_with_rule, (item, rules));
+            let out_refs = flow.each(items, |item, each| {
+                let mark = each.then_with_output(&touch_with_rule, (item, rules));
                 // 期望拒绝：ancestor Data（Root 输入 rules）出现在被收集的输出槽。
                 (mark, rules)
-            })
+            });
+            flow.output_with(out_refs);
         },
         (vec![Item(1), Item(2)], Rule(7)),
     ));
@@ -398,11 +412,12 @@ fn s04_duplicate_owned_alias_is_not_consumable() {
     let runtime = Runtime::new();
     let outcome: Result<(Vec<Mark>, Vec<Mark>), RunError> = block_on(runtime.execute(
         |flow: &mut Flow<'_>, items: Ref<Vec<Item>>| {
-            flow.each(items, |item, each| {
-                let mark = each.then(&touch, item);
+            let out_refs = flow.each(items, |item, each| {
+                let mark = each.then_with_output(&touch, item);
                 // 期望拒绝：同一个 owned Ref 出现在两个输出槽（Ref 是 Copy，形态合法）。
                 (mark, mark)
-            })
+            });
+            flow.output_with(out_refs);
         },
         vec![Item(1), Item(2)],
     ));
@@ -511,28 +526,29 @@ fn s05_one_branch_runs_and_slots_stay_consistent() {
     ] {
         reset();
         let runtime = Runtime::new();
-        let output = block_on(runtime.execute(
+        let output = block_on(runtime.execute::<_, Sum, _>(
             |flow: &mut Flow<'_>, seed: Ref<Seed>| {
-                let selector = flow.then(&route_of, seed);
+                let selector = flow.then_with_output(&route_of, seed);
                 // 同一入口：Choose 的两槽输出由后续 parent step 读取。
                 let (amount, detail) = flow.choose(selector, |choice| {
                     choice.case(route(1, "selector"), |branch| {
-                        let amount = branch.then(&double, seed);
-                        let detail = branch.then(&detail, amount);
+                        let amount = branch.then_with_output(&double, seed);
+                        let detail = branch.then_with_output(&detail, amount);
                         (amount, detail)
                     });
                     choice.case(route(2, "selector"), |branch| {
-                        let amount = branch.then(&triple, seed);
-                        let detail = branch.then(&detail, amount);
+                        let amount = branch.then_with_output(&triple, seed);
+                        let detail = branch.then_with_output(&detail, amount);
                         (amount, detail)
                     });
                     choice.otherwise(|branch| {
-                        let amount = branch.then(&fallback, seed);
-                        let detail = branch.then(&detail, amount);
+                        let amount = branch.then_with_output(&fallback, seed);
+                        let detail = branch.then_with_output(&detail, amount);
                         (amount, detail)
                     });
                 });
-                flow.then(&sum, (amount, detail))
+                let out_refs = flow.then_with_output(&sum, (amount, detail));
+                flow.output_with(out_refs);
             },
             Seed(value),
         ))
@@ -557,13 +573,16 @@ fn s05_key_uses_partial_eq_without_extra_bounds() {
     reset();
     let runtime = Runtime::new();
     // selector 与 case 键 code 相同、source 不同：只按 value 相等匹配 → otherwise。
-    let output = block_on(runtime.execute(
+    let output = block_on(runtime.execute::<_, Amount, _>(
         |flow: &mut Flow<'_>, seed: Ref<Seed>| {
-            let selector = flow.then(&route_of, seed);
-            flow.choose(selector, |choice| {
-                choice.case(route(1, "different"), |branch| branch.then(&double, seed));
-                choice.otherwise(|branch| branch.then(&fallback, seed))
-            })
+            let selector = flow.then_with_output(&route_of, seed);
+            let out_refs = flow.choose(selector, |choice| {
+                choice.case(route(1, "different"), |branch| {
+                    branch.then_with_output(&double, seed)
+                });
+                choice.otherwise(|branch| branch.then_with_output(&fallback, seed))
+            });
+            flow.output_with(out_refs);
         },
         Seed(1),
     ))
@@ -579,27 +598,28 @@ fn s05_unselected_branch_illegal_source_is_rejected_at_definition() {
     reset();
     let leaked: RefCell<Option<Ref<Amount>>> = RefCell::new(None);
     let runtime = Runtime::new();
-    let error = block_on(runtime.execute(
+    let error = block_on(runtime.execute::<_, (), _>(
         |flow: &mut Flow<'_>, seed: Ref<Seed>| {
-            let selector = flow.then(&route_of, seed);
+            let selector = flow.then_with_output(&route_of, seed);
             let leaked = &leaked;
-            flow.choose(selector, |choice| {
+            let () = flow.choose(selector, |choice| {
                 choice.case(route(1, "selector"), |branch| {
-                    let produced = branch.then(&double, seed);
+                    let produced = branch.then_with_output(&double, seed);
                     *leaked.borrow_mut() = Some(produced);
                 });
                 choice.case(route(2, "selector"), |branch| {
                     // 未选分支使用 sibling 分支内部的位置：Definition 静态验证必须拒绝。
                     match *leaked.borrow() {
                         Some(position) => {
-                            branch.then(&detail, position);
+                            branch.then_with_output(&detail, position);
                         }
                         None => {
-                            branch.then(&double, seed);
+                            branch.then_with_output(&double, seed);
                         }
                     };
                 });
-            })
+            });
+            flow.output_with(());
         },
         Seed(1),
     ))
@@ -621,17 +641,18 @@ fn s05_duplicate_configs_and_empty_config_are_rejected() {
     let runtime = Runtime::new();
 
     // (a) 重复 case 值。
-    let error = block_on(runtime.execute(
+    let error = block_on(runtime.execute::<_, (), _>(
         |flow: &mut Flow<'_>, seed: Ref<Seed>| {
-            let selector = flow.then(&route_of, seed);
-            flow.choose(selector, |choice| {
+            let selector = flow.then_with_output(&route_of, seed);
+            let () = flow.choose(selector, |choice| {
                 choice.case(route(1, "selector"), |branch| {
-                    branch.then(&double, seed);
+                    branch.then_with_output(&double, seed);
                 });
                 choice.case(route(1, "selector"), |branch| {
-                    branch.then(&triple, seed);
+                    branch.then_with_output(&triple, seed);
                 });
-            })
+            });
+            flow.output_with(());
         },
         Seed(1),
     ))
@@ -643,20 +664,21 @@ fn s05_duplicate_configs_and_empty_config_are_rejected() {
     );
 
     // (b) 重复 otherwise。
-    let error = block_on(runtime.execute(
+    let error = block_on(runtime.execute::<_, (), _>(
         |flow: &mut Flow<'_>, seed: Ref<Seed>| {
-            let selector = flow.then(&route_of, seed);
-            flow.choose(selector, |choice| {
+            let selector = flow.then_with_output(&route_of, seed);
+            let () = flow.choose(selector, |choice| {
                 choice.case(route(1, "selector"), |branch| {
-                    branch.then(&double, seed);
+                    branch.then_with_output(&double, seed);
                 });
                 choice.otherwise(|branch| {
-                    branch.then(&fallback, seed);
+                    branch.then_with_output(&fallback, seed);
                 });
                 choice.otherwise(|branch| {
-                    branch.then(&fallback, seed);
+                    branch.then_with_output(&fallback, seed);
                 });
-            })
+            });
+            flow.output_with(());
         },
         Seed(1),
     ))
@@ -668,10 +690,12 @@ fn s05_duplicate_configs_and_empty_config_are_rejected() {
     );
 
     // (c) 无任何分支的配置。
-    let error = block_on(runtime.execute(
+    let error = block_on(runtime.execute::<_, (), _>(
         |flow: &mut Flow<'_>, seed: Ref<Seed>| {
-            let selector = flow.then(&route_of, seed);
+            let selector = flow.then_with_output(&route_of, seed);
             let _: () = flow.choose(selector, |_choice| {});
+
+            flow.output_with(());
         },
         Seed(1),
     ))
@@ -697,13 +721,16 @@ fn s05_no_match_otherwise_and_failure_never_fall_back() {
     let runtime = Runtime::new();
 
     // (a) otherwise 覆盖无匹配值。
-    let covered = block_on(runtime.execute(
+    let covered = block_on(runtime.execute::<_, Amount, _>(
         |flow: &mut Flow<'_>, seed: Ref<Seed>| {
-            let selector = flow.then(&route_of, seed);
-            flow.choose(selector, |choice| {
-                choice.case(route(1, "selector"), |branch| branch.then(&double, seed));
-                choice.otherwise(|branch| branch.then(&fallback, seed))
-            })
+            let selector = flow.then_with_output(&route_of, seed);
+            let out_refs = flow.choose(selector, |choice| {
+                choice.case(route(1, "selector"), |branch| {
+                    branch.then_with_output(&double, seed)
+                });
+                choice.otherwise(|branch| branch.then_with_output(&fallback, seed))
+            });
+            flow.output_with(out_refs);
         },
         Seed(9),
     ))
@@ -714,14 +741,15 @@ fn s05_no_match_otherwise_and_failure_never_fall_back() {
 
     // (b) 无匹配且无 otherwise → NoMatchingCase，且无分支业务。
     reset();
-    let error = block_on(runtime.execute(
+    let error = block_on(runtime.execute::<_, (), _>(
         |flow: &mut Flow<'_>, seed: Ref<Seed>| {
-            let selector = flow.then(&route_of, seed);
-            flow.choose(selector, |choice| {
+            let selector = flow.then_with_output(&route_of, seed);
+            let () = flow.choose(selector, |choice| {
                 choice.case(route(1, "selector"), |branch| {
-                    branch.then(&double, seed);
+                    branch.then_with_output(&double, seed);
                 });
-            })
+            });
+            flow.output_with(());
         },
         Seed(9),
     ))
@@ -735,14 +763,17 @@ fn s05_no_match_otherwise_and_failure_never_fall_back() {
 
     // (c) 选中分支失败不改走 otherwise，后续业务不执行。
     reset();
-    let error = block_on(runtime.execute(
+    let error = block_on(runtime.execute::<_, Amount, _>(
         |flow: &mut Flow<'_>, seed: Ref<Seed>| {
-            let selector = flow.then(&route_of, seed);
+            let selector = flow.then_with_output(&route_of, seed);
             let picked = flow.choose(selector, |choice| {
-                choice.case(route(1, "selector"), |branch| branch.then(&failing, seed));
-                choice.otherwise(|branch| branch.then(&fallback, seed))
+                choice.case(route(1, "selector"), |branch| {
+                    branch.then_with_output(&failing, seed)
+                });
+                choice.otherwise(|branch| branch.then_with_output(&fallback, seed))
             });
-            flow.then(&detail, picked)
+            let out_refs = flow.then_with_output(&detail, picked);
+            flow.output_with(out_refs);
         },
         Seed(1),
     ))
@@ -770,12 +801,14 @@ fn s05_no_match_otherwise_and_failure_never_fall_back() {
     reset();
     let unit: Result<(), RunError> = block_on(runtime.execute(
         |flow: &mut Flow<'_>, seed: Ref<Seed>| {
-            let selector = flow.then(&route_of, seed);
+            let selector = flow.then_with_output(&route_of, seed);
             let _: () = flow.choose(selector, |choice| {
                 choice.case(route(1, "selector"), |branch| {
-                    branch.then(&double, seed);
+                    branch.then_with_output(&double, seed);
                 });
             });
+
+            flow.output_with(());
         },
         Seed(1),
     ));
@@ -896,14 +929,15 @@ fn s06_retry_restarts_full_attempt_and_cleans_before_the_next() {
     reset();
     ATTEMPT.with(|counter| counter.set(0));
     let runtime = Runtime::new();
-    let (verdict, tracked) = block_on(runtime.execute(
+    let (verdict, tracked) = block_on(runtime.execute::<_, (Verdict, Tracked), _>(
         |flow: &mut Flow<'_>, prompt: Ref<Prompt>| {
-            flow.retry(3, |attempt| {
-                let tracked = attempt.then(&track, prompt);
-                let candidate = attempt.then(&generate, prompt);
-                let verdict = attempt.then(&judge_retrying, candidate);
+            let out_refs = flow.retry(3, |attempt| {
+                let tracked = attempt.then_with_output(&track, prompt);
+                let candidate = attempt.then_with_output(&generate, prompt);
+                let verdict = attempt.then_with_output(&judge_retrying, candidate);
                 (verdict, tracked)
-            })
+            });
+            flow.output_with(out_refs);
         },
         Prompt(41),
     ))
@@ -956,12 +990,13 @@ fn s06_budget_boundaries_zero_n_and_max() {
     // (a) N = 0：仍执行首次 attempt；耗尽时 attempts 为 1。
     reset();
     ATTEMPT.with(|counter| counter.set(0));
-    let error = block_on(runtime.execute(
+    let error = block_on(runtime.execute::<_, Verdict, _>(
         |flow: &mut Flow<'_>, prompt: Ref<Prompt>| {
-            flow.retry(0, |attempt| {
-                let candidate = attempt.then(&generate, prompt);
-                attempt.then(&judge_always_retrying, candidate)
-            })
+            let out_refs = flow.retry(0, |attempt| {
+                let candidate = attempt.then_with_output(&generate, prompt);
+                attempt.then_with_output(&judge_always_retrying, candidate)
+            });
+            flow.output_with(out_refs);
         },
         Prompt(0),
     ))
@@ -992,12 +1027,13 @@ fn s06_budget_boundaries_zero_n_and_max() {
     // (b) N = 1：最多两次尝试。
     reset();
     ATTEMPT.with(|counter| counter.set(0));
-    let error = block_on(runtime.execute(
+    let error = block_on(runtime.execute::<_, Verdict, _>(
         |flow: &mut Flow<'_>, prompt: Ref<Prompt>| {
-            flow.retry(1, |attempt| {
-                let candidate = attempt.then(&generate, prompt);
-                attempt.then(&judge_always_retrying, candidate)
-            })
+            let out_refs = flow.retry(1, |attempt| {
+                let candidate = attempt.then_with_output(&generate, prompt);
+                attempt.then_with_output(&judge_always_retrying, candidate)
+            });
+            flow.output_with(out_refs);
         },
         Prompt(0),
     ))
@@ -1016,9 +1052,12 @@ fn s06_budget_boundaries_zero_n_and_max() {
     // (c) usize::MAX 无法表达 N+1：构建期拒绝、零 Node。
     reset();
     ATTEMPT.with(|counter| counter.set(0));
-    let error = block_on(runtime.execute(
+    let error = block_on(runtime.execute::<_, Candidate, _>(
         |flow: &mut Flow<'_>, prompt: Ref<Prompt>| {
-            flow.retry(usize::MAX, |attempt| attempt.then(&generate, prompt))
+            let out_refs = flow.retry(usize::MAX, |attempt| {
+                attempt.then_with_output(&generate, prompt)
+            });
+            flow.output_with(out_refs);
         },
         Prompt(0),
     ))
@@ -1032,9 +1071,12 @@ fn s06_budget_boundaries_zero_n_and_max() {
     // (d) usize::MAX - 1 仍可表达；首次 attempt 成功时恰好一次调用。
     reset();
     ATTEMPT.with(|counter| counter.set(0));
-    let verdict = block_on(runtime.execute(
+    let verdict = block_on(runtime.execute::<_, Candidate, _>(
         |flow: &mut Flow<'_>, prompt: Ref<Prompt>| {
-            flow.retry(usize::MAX - 1, |attempt| attempt.then(&generate, prompt))
+            let out_refs = flow.retry(usize::MAX - 1, |attempt| {
+                attempt.then_with_output(&generate, prompt)
+            });
+            flow.output_with(out_refs);
         },
         Prompt(41),
     ))
@@ -1050,12 +1092,13 @@ fn s06_only_retry_is_captured_failure_and_exhaustion_are_terminal() {
     // (a) 普通 Failure 立即终止：不重试、不驱动任何其他业务。
     reset();
     ATTEMPT.with(|counter| counter.set(0));
-    let error = block_on(runtime.execute(
+    let error = block_on(runtime.execute::<_, Verdict, _>(
         |flow: &mut Flow<'_>, prompt: Ref<Prompt>| {
-            flow.retry(3, |attempt| {
-                let candidate = attempt.then(&generate, prompt);
-                attempt.then(&judge_failing, candidate)
-            })
+            let out_refs = flow.retry(3, |attempt| {
+                let candidate = attempt.then_with_output(&generate, prompt);
+                attempt.then_with_output(&judge_failing, candidate)
+            });
+            flow.output_with(out_refs);
         },
         Prompt(1),
     ))
@@ -1076,13 +1119,14 @@ fn s06_only_retry_is_captured_failure_and_exhaustion_are_terminal() {
     // (b) IterBreak 不被 Retry 捕获：到 Root 成为 UnhandledControl。
     reset();
     ATTEMPT.with(|counter| counter.set(0));
-    let error = block_on(runtime.execute(
+    let error = block_on(runtime.execute::<_, Candidate, _>(
         |flow: &mut Flow<'_>, prompt: Ref<Prompt>| {
-            flow.retry(3, |attempt| {
-                let candidate = attempt.then(&generate, prompt);
-                let _ = attempt.then(&judge_break, candidate);
+            let out_refs = flow.retry(3, |attempt| {
+                let candidate = attempt.then_with_output(&generate, prompt);
+                let _ = attempt.then_with_output(&judge_break, candidate);
                 candidate
-            })
+            });
+            flow.output_with(out_refs);
         },
         Prompt(1),
     ))
@@ -1101,12 +1145,13 @@ fn s06_only_retry_is_captured_failure_and_exhaustion_are_terminal() {
     //     且每次 attempt 的原因互不相同（末次原因确实是最后一次的）。
     reset();
     ATTEMPT.with(|counter| counter.set(0));
-    let error = block_on(runtime.execute(
+    let error = block_on(runtime.execute::<_, Verdict, _>(
         |flow: &mut Flow<'_>, prompt: Ref<Prompt>| {
-            flow.retry(2, |attempt| {
-                let candidate = attempt.then(&generate, prompt);
-                attempt.then(&judge_always_retrying, candidate)
-            })
+            let out_refs = flow.retry(2, |attempt| {
+                let candidate = attempt.then_with_output(&generate, prompt);
+                attempt.then_with_output(&judge_always_retrying, candidate)
+            });
+            flow.output_with(out_refs);
         },
         Prompt(1),
     ))
@@ -1210,18 +1255,19 @@ impl Node for Continue {
 fn s07_break_delivers_the_entry_current_of_the_round() {
     reset();
     let judge = BreakAt { threshold: 1 };
-    let (draft, context) = block_on(Runtime::new().execute(
+    let (draft, context) = block_on(Runtime::new().execute::<_, (Draft, Context), _>(
         |flow: &mut Flow<'_>, (draft, context): (Ref<Draft>, Ref<Context>)| {
-            flow.iter(
+            let out_refs = flow.iter(
                 (draft, context),
                 5,
                 |(current_draft, current_context), round| {
-                    round.then(&judge, current_context);
-                    let next_draft = round.then(&revise, current_draft);
-                    let next_context = round.then(&bump, current_context);
+                    round.then_with_output(&judge, current_context);
+                    let next_draft = round.then_with_output(&revise, current_draft);
+                    let next_context = round.then_with_output(&bump, current_context);
                     (next_draft, next_context)
                 },
-            )
+            );
+            flow.output_with(out_refs);
         },
         (Draft(String::from("s0")), Context(0)),
     ))
@@ -1245,18 +1291,19 @@ fn s07_break_delivers_the_entry_current_of_the_round() {
 fn s07_first_round_break_returns_the_original_state() {
     reset();
     let judge = BreakAt { threshold: 1 };
-    let (draft, context) = block_on(Runtime::new().execute(
+    let (draft, context) = block_on(Runtime::new().execute::<_, (Draft, Context), _>(
         |flow: &mut Flow<'_>, (draft, context): (Ref<Draft>, Ref<Context>)| {
-            flow.iter(
+            let out_refs = flow.iter(
                 (draft, context),
                 1,
                 |(current_draft, current_context), round| {
-                    round.then(&judge, current_context);
-                    let _next_draft = round.then(&revise, current_draft);
+                    round.then_with_output(&judge, current_context);
+                    let _next_draft = round.then_with_output(&revise, current_draft);
                     // same-target：两个槽都保留 current。
                     (current_draft, current_context)
                 },
-            )
+            );
+            flow.output_with(out_refs);
         },
         (Draft(String::from("keep")), Context(9)),
     ))
@@ -1279,18 +1326,19 @@ fn s07_first_round_break_returns_the_original_state() {
 fn s07_round_limit_does_not_deliver_the_next_or_judge_again() {
     reset();
     let judge = Continue;
-    let error = block_on(Runtime::new().execute(
+    let error = block_on(Runtime::new().execute::<_, (Draft, Context), _>(
         |flow: &mut Flow<'_>, (draft, context): (Ref<Draft>, Ref<Context>)| {
-            flow.iter(
+            let out_refs = flow.iter(
                 (draft, context),
                 2,
                 |(current_draft, current_context), round| {
-                    round.then(&judge, current_context);
-                    let next_draft = round.then(&revise, current_draft);
-                    let next_context = round.then(&bump, current_context);
+                    round.then_with_output(&judge, current_context);
+                    let next_draft = round.then_with_output(&revise, current_draft);
+                    let next_context = round.then_with_output(&bump, current_context);
                     (next_draft, next_context)
                 },
-            )
+            );
+            flow.output_with(out_refs);
         },
         (Draft(String::from("r")), Context(0)),
     ))
@@ -1312,25 +1360,27 @@ fn s07_round_limit_does_not_deliver_the_next_or_judge_again() {
 fn s07_multi_state_promote_keeps_imported_owner_and_same_target() {
     reset();
     let judge = BreakAt { threshold: 2 };
-    let (draft, context, original) = block_on(Runtime::new().execute(
-        |flow: &mut Flow<'_>, (draft, context): (Ref<Draft>, Ref<Context>)| {
-            // 多状态成组 Promote：槽 1 same-target（原样保留），槽 2 被推进。
-            let (kept_draft, advanced) = flow.iter(
-                (draft, context),
-                5,
-                |(current_draft, current_context), round| {
-                    round.then(&judge, current_context);
-                    let next_context = round.then(&bump, current_context);
-                    (current_draft, next_context)
-                },
-            );
-            // imported 初始状态保持原 owner：iter 之后仍可读取原始 root 输入。
-            let original = flow.then(&read_context, context);
-            (kept_draft, advanced, original)
-        },
-        (Draft(String::from("s")), Context(0)),
-    ))
-    .expect("the third round breaks");
+    let (draft, context, original) =
+        block_on(Runtime::new().execute::<_, (Draft, Context, Context), _>(
+            |flow: &mut Flow<'_>, (draft, context): (Ref<Draft>, Ref<Context>)| {
+                // 多状态成组 Promote：槽 1 same-target（原样保留），槽 2 被推进。
+                let (kept_draft, advanced) = flow.iter(
+                    (draft, context),
+                    5,
+                    |(current_draft, current_context), round| {
+                        round.then_with_output(&judge, current_context);
+                        let next_context = round.then_with_output(&bump, current_context);
+                        (current_draft, next_context)
+                    },
+                );
+                // imported 初始状态保持原 owner：iter 之后仍可读取原始 root 输入。
+                let original = flow.then_with_output(&read_context, context);
+                let out_refs = (kept_draft, advanced, original);
+                flow.output_with(out_refs);
+            },
+            (Draft(String::from("s")), Context(0)),
+        ))
+        .expect("the third round breaks");
 
     assert_eq!(
         (draft.0.as_str(), context.0, original.0),
@@ -1347,14 +1397,15 @@ fn s07_formal_current_is_round_local() {
     // (a) round-local current 作为 Root 输出：Definition 静态拒绝、零业务。
     reset();
     let mut escaped: Option<Ref<Draft>> = None;
-    let error = block_on(Runtime::new().execute(
+    let error = block_on(Runtime::new().execute::<_, Draft, _>(
         |flow: &mut Flow<'_>, initial: Ref<Draft>| {
             let _output = flow.iter(initial, 1, |current, round| {
                 escaped = Some(current);
-                round.then(&revise, current);
+                round.then_with_output(&revise, current);
                 current
             });
-            escaped.expect("captured round-local current")
+            let out_refs = escaped.expect("captured round-local current");
+            flow.output_with(out_refs);
         },
         Draft(String::from("x")),
     ))
@@ -1372,14 +1423,16 @@ fn s07_formal_current_is_round_local() {
     // (b) round-local current 被 parent Body 的 step 使用：同样在 Definition 期拒绝。
     reset();
     let mut escaped: Option<Ref<Draft>> = None;
-    let error = block_on(Runtime::new().execute(
+    let error = block_on(Runtime::new().execute::<_, Draft, _>(
         |flow: &mut Flow<'_>, initial: Ref<Draft>| {
             let _output = flow.iter(initial, 1, |current, round| {
                 escaped = Some(current);
-                round.then(&revise, current);
+                round.then_with_output(&revise, current);
                 current
             });
-            flow.then(&revise, escaped.expect("captured round-local current"))
+            let out_refs =
+                flow.then_with_output(&revise, escaped.expect("captured round-local current"));
+            flow.output_with(out_refs);
         },
         Draft(String::from("x")),
     ))
@@ -1395,13 +1448,14 @@ fn s07_formal_current_is_round_local() {
 fn s07_duplicate_initial_and_capture_overlap_are_legal() {
     // (a) iter((x, x), ..)：两个 state 槽共享同一 initial 来源，各自身份保持。
     reset();
-    let out = block_on(Runtime::new().execute(
+    let out = block_on(Runtime::new().execute::<_, Draft, _>(
         |flow: &mut Flow<'_>, initial: Ref<Draft>| {
             let both = flow.iter((initial, initial), 1, |(left, right), round| {
-                round.then(&compare_and_break, (left, right));
+                round.then_with_output(&compare_and_break, (left, right));
                 (left, right)
             });
-            both.0
+            let out_refs = both.0;
+            flow.output_with(out_refs);
         },
         Draft(String::from("dup")),
     ))
@@ -1411,12 +1465,13 @@ fn s07_duplicate_initial_and_capture_overlap_are_legal() {
 
     // (b) round 同时捕获 initial 与 current：普通词法依赖与 initial 重叠仍合法。
     reset();
-    let out = block_on(Runtime::new().execute(
+    let out = block_on(Runtime::new().execute::<_, Draft, _>(
         |flow: &mut Flow<'_>, initial: Ref<Draft>| {
-            flow.iter(initial, 1, |current, round| {
-                round.then(&compare_and_break, (current, initial));
+            let out_refs = flow.iter(initial, 1, |current, round| {
+                round.then_with_output(&compare_and_break, (current, initial));
                 current
-            })
+            });
+            flow.output_with(out_refs);
         },
         Draft(String::from("overlap")),
     ))

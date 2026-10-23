@@ -736,27 +736,32 @@ fn runtime_export_rejection(iter: bool, hop: u8) {
     );
 
     let result = if iter {
-        block_on(Runtime::new().execute(
+        block_on(Runtime::new().execute::<_, (u32, u32), _>(
             |flow, input| {
                 let output = flow.iter(input, 3, |(a, b), round| {
-                    let x = round.then(plus, a);
-                    let y = round.then(plus, b);
-                    round.then(break_now, a);
+                    let x = round.then_with_output(plus, a);
+                    let y = round.then_with_output(plus, b);
+                    round.then_with_output(break_now, a);
                     (x, y)
                 });
-                flow.then(later, output);
-                output
+                flow.then_with_output(later, output);
+                let out_refs = output;
+                flow.output_with(out_refs);
             },
             (7u32, 8u32),
         ))
     } else {
-        block_on(Runtime::new().execute(
+        block_on(Runtime::new().execute::<_, (u32, u32), _>(
             |flow, input| {
                 let output = flow.retry(0, |attempt| {
-                    (attempt.then(plus, input), attempt.then(plus, input))
+                    (
+                        attempt.then_with_output(plus, input),
+                        attempt.then_with_output(plus, input),
+                    )
                 });
-                flow.then(later, output);
-                output
+                flow.then_with_output(later, output);
+                let out_refs = output;
+                flow.output_with(out_refs);
             },
             7u32,
         ))
@@ -993,17 +998,23 @@ fn distinct_budget_diagnostics(iter: bool) {
     });
 
     let result = if iter {
-        block_on(Runtime::new().execute(
-            |flow, (_unused, seed)| flow.iter(seed, 1, |current, round| round.then(plus, current)),
+        block_on(Runtime::new().execute::<_, u32, _>(
+            |flow, (_unused, seed)| {
+                let out_refs = flow.iter(seed, 1, |current, round| {
+                    round.then_with_output(plus, current)
+                });
+                flow.output_with(out_refs);
+            },
             (0u8, 7u32),
         ))
     } else {
-        block_on(Runtime::new().execute(
+        block_on(Runtime::new().execute::<_, u32, _>(
             |flow, (_unused, seed)| {
-                flow.retry(1, |attempt| {
-                    attempt.then(retry_now, seed);
-                    attempt.then(plus, seed)
-                })
+                let out_refs = flow.retry(1, |attempt| {
+                    attempt.then_with_output(retry_now, seed);
+                    attempt.then_with_output(plus, seed)
+                });
+                flow.output_with(out_refs);
             },
             (0u8, 7u32),
         ))

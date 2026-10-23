@@ -301,12 +301,13 @@ fn p29_control_partial_success_exits_item_then_each() {
     test_support::reset_observations();
     reset_nodes();
     let runtime = Runtime::new();
-    let outcome = block_on(runtime.execute(
+    let outcome = block_on(runtime.execute::<_, Vec<Score>, _>(
         |flow, items: Ref<Vec<Item>>| {
-            flow.each(items, |item, each| {
-                let score = each.then(&score_of_item, item);
-                each.then(&break_on_thirty, score)
-            })
+            let out_refs = flow.each(items, |item, each| {
+                let score = each.then_with_output(&score_of_item, item);
+                each.then_with_output(&break_on_thirty, score)
+            });
+            flow.output_with(out_refs);
         },
         vec![Item(1), Item(2), Item(3), Item(4)],
     ));
@@ -514,19 +515,20 @@ fn p30_iter_captures_choose_break_and_delivers_current() {
     test_support::take_log_reset();
     reset_nodes();
     let runtime = Runtime::new();
-    let outcome = block_on(runtime.execute(
+    let outcome = block_on(runtime.execute::<_, Context, _>(
         |flow, (items, context): (Ref<Vec<Item>>, Ref<Context>)| {
-            flow.iter(context, 2, |current, round| {
-                let round_no = round.then(&round_number, current);
+            let out_refs = flow.iter(context, 2, |current, round| {
+                let round_no = round.then_with_output(&round_number, current);
                 let _scores = round.each(items, |item, each| {
-                    let score = each.then(&score_of_item, item);
+                    let score = each.then_with_output(&score_of_item, item);
                     each.choose(round_no, |choice| {
-                        choice.case(0u32, |branch| branch.then(&keep_score, score));
-                        choice.otherwise(|branch| branch.then(&break_now, score));
+                        choice.case(0u32, |branch| branch.then_with_output(&keep_score, score));
+                        choice.otherwise(|branch| branch.then_with_output(&break_now, score));
                     })
                 });
-                round.then(&bump_context, current)
-            })
+                round.then_with_output(&bump_context, current)
+            });
+            flow.output_with(out_refs);
         },
         (vec![Item(1), Item(2), Item(3)], Context(0)),
     ));
@@ -719,20 +721,21 @@ fn p31_retry_restarts_the_whole_each_attempt() {
     test_support::reset_observations();
     reset_nodes();
     let runtime = Runtime::new();
-    let outcome = block_on(runtime.execute(
+    let outcome = block_on(runtime.execute::<_, Context, _>(
         |flow, (items, context): (Ref<Vec<Item>>, Ref<Context>)| {
-            flow.retry(1, |attempt| {
+            let out_refs = flow.retry(1, |attempt| {
                 let current = attempt.iter(context, 2, |current, round| {
-                    round.then(&break_at_one, current)
+                    round.then_with_output(&break_at_one, current)
                 });
                 let _scores = attempt.each(items, |item, each| {
                     each.chain(|sub| {
-                        let score = sub.then(&score_of_item, item);
-                        sub.then(&retry_on_thirty, score)
+                        let score = sub.then_with_output(&score_of_item, item);
+                        sub.then_with_output(&retry_on_thirty, score)
                     })
                 });
                 current
-            })
+            });
+            flow.output_with(out_refs);
         },
         (vec![Item(1), Item(2), Item(3)], Context(0)),
     ));
@@ -863,12 +866,13 @@ fn p32a_body_failure_is_terminal_and_keeps_the_dynamic_object() {
     test_support::reset_observations();
     reset_nodes();
     let runtime = Runtime::new();
-    let outcome = block_on(runtime.execute(
+    let outcome = block_on(runtime.execute::<_, Vec<Score>, _>(
         |flow, items: Ref<Vec<Item>>| {
-            flow.each(items, |item, each| {
-                let score = each.then(&score_of_item, item);
-                each.then(&fail_on_thirty, score)
-            })
+            let out_refs = flow.each(items, |item, each| {
+                let score = each.then_with_output(&score_of_item, item);
+                each.then_with_output(&fail_on_thirty, score)
+            });
+            flow.output_with(out_refs);
         },
         vec![Item(1), Item(2), Item(3), Item(4)],
     ));
@@ -931,16 +935,17 @@ fn p32b_no_matching_case_is_terminal_and_switches_no_branch() {
     test_support::reset_observations();
     reset_nodes();
     let runtime = Runtime::new();
-    let outcome = block_on(runtime.execute(
+    let outcome = block_on(runtime.execute::<_, Vec<Score>, _>(
         |flow, items: Ref<Vec<Item>>| {
-            flow.each(items, |item, each| {
-                let score = each.then(&score_of_item, item);
-                let selector = each.then(&selector_tenth, score);
+            let out_refs = flow.each(items, |item, each| {
+                let score = each.then_with_output(&score_of_item, item);
+                let selector = each.then_with_output(&selector_tenth, score);
                 each.choose(selector, |choice| {
-                    choice.case(1u32, |branch| branch.then(&keep_score, score));
-                    choice.case(2u32, |branch| branch.then(&keep_score, score));
+                    choice.case(1u32, |branch| branch.then_with_output(&keep_score, score));
+                    choice.case(2u32, |branch| branch.then_with_output(&keep_score, score));
                 })
-            })
+            });
+            flow.output_with(out_refs);
         },
         vec![Item(1), Item(2), Item(3), Item(4)],
     ));
@@ -986,14 +991,15 @@ fn p32c_budget_exhaustion_is_terminal_inside_the_each() {
     test_support::reset_observations();
     reset_nodes();
     let runtime = Runtime::new();
-    let outcome = block_on(runtime.execute(
+    let outcome = block_on(runtime.execute::<_, Vec<Score>, _>(
         |flow, items: Ref<Vec<Item>>| {
-            flow.each(items, |item, each| {
+            let out_refs = flow.each(items, |item, each| {
                 each.retry(1, |attempt| {
-                    let candidate = attempt.then(&candidate_of_item, item);
-                    attempt.then(&always_retry, candidate)
+                    let candidate = attempt.then_with_output(&candidate_of_item, item);
+                    attempt.then_with_output(&always_retry, candidate)
                 })
-            })
+            });
+            flow.output_with(out_refs);
         },
         vec![Item(1), Item(2), Item(3)],
     ));
@@ -1054,8 +1060,13 @@ fn p33a_unhandled_control_keeps_the_original_signal() {
     test_support::reset_observations();
     reset_nodes();
     let runtime = Runtime::new();
-    let outcome = block_on(runtime.execute(
-        |flow, items: Ref<Vec<Item>>| flow.each(items, |item, each| each.then(&always_break, item)),
+    let outcome = block_on(runtime.execute::<_, Vec<Score>, _>(
+        |flow, items: Ref<Vec<Item>>| {
+            let out_refs = flow.each(items, |item, each| {
+                each.then_with_output(&always_break, item)
+            });
+            flow.output_with(out_refs);
+        },
         vec![Item(1), Item(2), Item(3)],
     ));
 
@@ -1083,9 +1094,12 @@ fn p33b_unhandled_control_with_cleanup_fault_becomes_runtime() {
     reset_nodes();
     install_root_cleanup_fault();
     let runtime = Runtime::new();
-    let outcome = block_on(runtime.execute(
+    let outcome = block_on(runtime.execute::<_, Vec<Score>, _>(
         |flow, (_filler, items): (Ref<Filler>, Ref<Vec<Item>>)| {
-            flow.each(items, |item, each| each.then(&always_break, item))
+            let out_refs = flow.each(items, |item, each| {
+                each.then_with_output(&always_break, item)
+            });
+            flow.output_with(out_refs);
         },
         (Filler(0), vec![Item(1), Item(2), Item(3)]),
     ));
@@ -1146,12 +1160,13 @@ fn p34a_item_control_exit_cleanup_fault_keeps_first_diagnostic() {
     reset_nodes();
     install_control_cleanup_fault();
     let runtime = Runtime::new();
-    let outcome = block_on(runtime.execute(
+    let outcome = block_on(runtime.execute::<_, Vec<Score>, _>(
         |flow, items: Ref<Vec<Item>>| {
-            flow.each(items, |item, each| {
-                let score = each.then(&score_of_item, item);
-                each.then(&break_on_thirty, score)
-            })
+            let out_refs = flow.each(items, |item, each| {
+                let score = each.then_with_output(&score_of_item, item);
+                each.then_with_output(&break_on_thirty, score)
+            });
+            flow.output_with(out_refs);
         },
         vec![Item(1), Item(2), Item(3), Item(4)],
     ));
@@ -1300,12 +1315,13 @@ fn p34b_each_collector_exit_cleanup_fault_keeps_first_diagnostic() {
     reset_nodes();
     install_each_control_cleanup_fault();
     let runtime = Runtime::new();
-    let outcome = block_on(runtime.execute(
+    let outcome = block_on(runtime.execute::<_, Vec<Score>, _>(
         |flow, items: Ref<Vec<Item>>| {
-            flow.each(items, |item, each| {
-                let score = each.then(&score_of_item, item);
-                each.then(&break_on_thirty, score)
-            })
+            let out_refs = flow.each(items, |item, each| {
+                let score = each.then_with_output(&score_of_item, item);
+                each.then_with_output(&break_on_thirty, score)
+            });
+            flow.output_with(out_refs);
         },
         vec![Item(1), Item(2), Item(3), Item(4)],
     ));
@@ -1540,11 +1556,12 @@ fn p35_pending_cancel_ends_the_borrow_first_and_drops_each_instance_once() {
     reset_nodes();
     let log = Rc::new(RefCell::new(Vec::new()));
     let runtime = Runtime::new();
-    let mut future = Box::pin(runtime.execute(
+    let mut future = Box::pin(runtime.execute::<_, Vec<TrackScore>, _>(
         |flow, (items, seed): (Ref<Vec<TrackItem>>, Ref<TrackSeed>)| {
-            flow.each(items, |item, each| {
-                each.then(&produce_then_pend, (item, seed))
-            })
+            let out_refs = flow.each(items, |item, each| {
+                each.then_with_output(&produce_then_pend, (item, seed))
+            });
+            flow.output_with(out_refs);
         },
         (
             vec![
@@ -1684,12 +1701,13 @@ struct FirstDomain {
 /// 真实运行一个 Each，取得其 ItemScope／collector／DataId 完整身份。
 fn run_first_domain() -> FirstDomain {
     let runtime = Runtime::new();
-    let out = block_on(runtime.execute(
+    let out = block_on(runtime.execute::<_, Vec<Score>, _>(
         |flow, items: Ref<Vec<Item>>| {
-            flow.each(items, |item, each| {
-                let score = each.then(&score_of_item, item);
-                each.then(&keep_score, score)
-            })
+            let out_refs = flow.each(items, |item, each| {
+                let score = each.then_with_output(&score_of_item, item);
+                each.then_with_output(&keep_score, score)
+            });
+            flow.output_with(out_refs);
         },
         vec![Item(1), Item(2), Item(3)],
     ))
@@ -1730,8 +1748,11 @@ fn p36a_foreign_domain_accesses_are_typed_rejections() {
     observe::reset();
     install_foreign_access_fault(first.item.clone(), first.data.clone());
     let runtime = Runtime::new();
-    let second = block_on(runtime.execute(
-        |flow, amount: Ref<Amount>| flow.chain(|sub| sub.then(&double_amount, amount)),
+    let second = block_on(runtime.execute::<_, Amount, _>(
+        |flow, amount: Ref<Amount>| {
+            let out_refs = flow.chain(|sub| sub.then_with_output(&double_amount, amount));
+            flow.output_with(out_refs);
+        },
         Amount(5),
     ))
     .expect("the second domain runs");
@@ -1828,9 +1849,12 @@ fn p36b_item_cap_identity_is_never_reused() {
     test_support::reset_observations();
     reset_nodes();
     let runtime = Runtime::new();
-    let out = block_on(runtime.execute(
+    let out = block_on(runtime.execute::<_, Vec<Score>, _>(
         |flow, items: Ref<Vec<Item>>| {
-            flow.each(items, |item, each| each.then(&score_of_item, item))
+            let out_refs = flow.each(items, |item, each| {
+                each.then_with_output(&score_of_item, item)
+            });
+            flow.output_with(out_refs);
         },
         vec![Item(1), Item(2), Item(3)],
     ))

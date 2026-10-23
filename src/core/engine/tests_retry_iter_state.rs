@@ -183,13 +183,14 @@ fn e13_produced_next_is_discarded_and_entry_current_is_delivered() {
     BREAK_WHEN.with(|slot| slot.set(1));
     let log = Rc::new(RefCell::new(Vec::new()));
     let runtime = Runtime::new();
-    let delivered = block_on(runtime.execute(
+    let delivered = block_on(runtime.execute::<_, Parcel, _>(
         |flow: &mut crate::core::engine::flow::Flow<'_>, state: Ref<Parcel>| {
-            flow.iter(state, 5, |current, round| {
-                let next = round.then(&advance, current);
-                round.then(&judge_break_at, current);
+            let out_refs = flow.iter(state, 5, |current, round| {
+                let next = round.then_with_output(&advance, current);
+                round.then_with_output(&judge_break_at, current);
                 next
-            })
+            });
+            flow.output_with(out_refs);
         },
         parcel("A", 0, &log),
     ))
@@ -306,13 +307,14 @@ fn e16_imported_initial_survives_and_loop_owned_old_value_is_recycled() {
     BREAK_WHEN.with(|slot| slot.set(2));
     let log = Rc::new(RefCell::new(Vec::new()));
     let runtime = Runtime::new();
-    let delivered = block_on(runtime.execute(
+    let delivered = block_on(runtime.execute::<_, Parcel, _>(
         |flow: &mut crate::core::engine::flow::Flow<'_>, state: Ref<Parcel>| {
-            flow.iter(state, 6, |current, round| {
-                let next = round.then(&advance, current);
-                round.then(&judge_break_at, current);
+            let out_refs = flow.iter(state, 6, |current, round| {
+                let next = round.then_with_output(&advance, current);
+                round.then_with_output(&judge_break_at, current);
                 next
-            })
+            });
+            flow.output_with(out_refs);
         },
         parcel("A", 0, &log),
     ))
@@ -393,12 +395,13 @@ fn e17_same_target_next_survives_a_normal_promote_without_copying_or_reowning() 
     reset_all();
     let log = Rc::new(RefCell::new(Vec::new()));
     let runtime = Runtime::new();
-    let delivered = block_on(runtime.execute(
+    let delivered = block_on(runtime.execute::<_, Parcel, _>(
         |flow: &mut crate::core::engine::flow::Flow<'_>, state: Ref<Parcel>| {
-            flow.iter(state, 5, |current, round| {
-                round.then(&judge_break_on_call, current);
+            let out_refs = flow.iter(state, 5, |current, round| {
+                round.then_with_output(&judge_break_on_call, current);
                 current
-            })
+            });
+            flow.output_with(out_refs);
         },
         parcel("A", 0, &log),
     ))
@@ -458,14 +461,16 @@ fn e19_shared_target_keeps_independent_states_and_single_responsibility() {
     BREAK_WHEN.with(|slot| slot.set(1));
     let log = Rc::new(RefCell::new(Vec::new()));
     let runtime = Runtime::new();
-    let delivered = block_on(runtime.execute(
+    let delivered = block_on(runtime.execute::<_, Parcel, _>(
         |flow: &mut crate::core::engine::flow::Flow<'_>, refs: (Ref<Parcel>, Ref<Parcel>)| {
-            flow.iter(refs, 5, |(left, _right), round| {
-                let shared = round.then(&produce_shared, left);
-                round.then(&judge_break_at, left);
-                (shared, shared)
-            })
-            .0
+            let out_refs = flow
+                .iter(refs, 5, |(left, _right), round| {
+                    let shared = round.then_with_output(&produce_shared, left);
+                    round.then_with_output(&judge_break_at, left);
+                    (shared, shared)
+                })
+                .0;
+            flow.output_with(out_refs);
         },
         (parcel("A0", 0, &log), parcel("A1", 0, &log)),
     ))
@@ -520,13 +525,14 @@ fn e20_cross_slot_swap_and_retention_never_recycle_shared_values() {
     BREAK_WHEN.with(|slot| slot.set(1));
     let log = Rc::new(RefCell::new(Vec::new()));
     let runtime = Runtime::new();
-    let delivered = block_on(runtime.execute(
+    let delivered = block_on(runtime.execute::<_, (Parcel, Parcel, Parcel), _>(
         |flow: &mut crate::core::engine::flow::Flow<'_>,
          refs: (Ref<Parcel>, Ref<Parcel>, Ref<Parcel>)| {
-            flow.iter(refs, 5, |(x, y, z), round| {
-                round.then(&judge_break_at, x);
+            let out_refs = flow.iter(refs, 5, |(x, y, z), round| {
+                round.then_with_output(&judge_break_at, x);
                 (y, x, z)
-            })
+            });
+            flow.output_with(out_refs);
         },
         (
             parcel("A", 0, &log),

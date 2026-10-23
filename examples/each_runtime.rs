@@ -101,13 +101,14 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     // 1) 正常多输出：逐槽 Vec，元素按输入顺序。
     reset_calls();
-    let (scores, reports) = block_on(runtime.execute(
+    let (scores, reports) = block_on(runtime.execute::<_, (Vec<Score>, Vec<Report>), _>(
         |flow: &mut Flow<'_>, items: Ref<Vec<Item>>| {
-            flow.each(items, |item, each| {
-                let score = each.then(&score, item);
-                let report = each.then(&report, (item, score));
+            let out_refs = flow.each(items, |item, each| {
+                let score = each.then_with_output(&score, item);
+                let report = each.then_with_output(&report, (item, score));
                 (score, report)
-            })
+            });
+            flow.output_with(out_refs);
         },
         vec![Item(1), Item(2), Item(3)],
     ))?;
@@ -128,11 +129,12 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     // 2) unit：空集合不调用 body（业务节点零执行），输出为 ()。
     reset_calls();
-    block_on(runtime.execute(
+    block_on(runtime.execute::<_, (), _>(
         |flow: &mut Flow<'_>, items: Ref<Vec<Item>>| {
-            flow.each(items, |item, each| {
-                each.then(&audit, item);
-            })
+            let () = flow.each(items, |item, each| {
+                each.then_with_output(&audit, item);
+            });
+            flow.output_with(());
         },
         Vec::<Item>::new(),
     ))?;
@@ -141,11 +143,12 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     // 2b) unit：非空集合每项真实执行，Each 不产生假业务槽。
     reset_calls();
-    block_on(runtime.execute(
+    block_on(runtime.execute::<_, (), _>(
         |flow: &mut Flow<'_>, items: Ref<Vec<Item>>| {
-            flow.each(items, |item, each| {
-                each.then(&audit, item);
-            })
+            let () = flow.each(items, |item, each| {
+                each.then_with_output(&audit, item);
+            });
+            flow.output_with(());
         },
         vec![Item(1), Item(2)],
     ))?;
@@ -154,9 +157,12 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     // 3) 业务 Failure：第二项失败后不再执行第三项，Root 返回 RunError::Body。
     reset_calls();
-    let error = match block_on(runtime.execute(
+    let error = match block_on(runtime.execute::<_, Vec<Score>, _>(
         |flow: &mut Flow<'_>, items: Ref<Vec<Item>>| {
-            flow.each(items, |item, each| each.then(&score_checked, item))
+            let out_refs = flow.each(items, |item, each| {
+                each.then_with_output(&score_checked, item)
+            });
+            flow.output_with(out_refs);
         },
         vec![Item(2), Item(1), Item(3)],
     )) {
@@ -181,9 +187,12 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     // 4) Control：无匹配边界的 IterBreak 停止剩余 item，且不产生部分正常集合。
     reset_calls();
-    let error = match block_on(runtime.execute(
+    let error = match block_on(runtime.execute::<_, Vec<Score>, _>(
         |flow: &mut Flow<'_>, items: Ref<Vec<Item>>| {
-            flow.each(items, |item, each| each.then(&score_until_control, item))
+            let out_refs = flow.each(items, |item, each| {
+                each.then_with_output(&score_until_control, item)
+            });
+            flow.output_with(out_refs);
         },
         vec![Item(1), Item(2), Item(3)],
     )) {

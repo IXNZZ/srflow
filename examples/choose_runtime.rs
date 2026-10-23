@@ -80,15 +80,16 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
 
     // 情形一：case 命中（value=1 → code=1 → double）。
     let matched = runtime
-        .execute(
+        .execute::<_, Report, _>(
             |flow, seed| {
-                let selector = flow.then(route_of, seed);
+                let selector = flow.then_with_output(route_of, seed);
                 let picked = flow.choose(selector, |choice| {
-                    choice.case(route(1), |branch| branch.then(double, seed));
-                    choice.case(route(2), |branch| branch.then(triple, seed));
-                    choice.otherwise(|branch| branch.then(fallback, seed));
+                    choice.case(route(1), |branch| branch.then_with_output(double, seed));
+                    choice.case(route(2), |branch| branch.then_with_output(triple, seed));
+                    choice.otherwise(|branch| branch.then_with_output(fallback, seed));
                 });
-                flow.then(report, picked)
+                let out_refs = flow.then_with_output(report, picked);
+                flow.output_with(out_refs);
             },
             Seed { value: 1 },
         )
@@ -97,15 +98,16 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
 
     // 情形二：无 case 命中，otherwise 回退（value=7 → code=7）。
     let fallback = runtime
-        .execute(
+        .execute::<_, Report, _>(
             |flow, seed| {
-                let selector = flow.then(route_of, seed);
+                let selector = flow.then_with_output(route_of, seed);
                 let picked = flow.choose(selector, |choice| {
-                    choice.case(route(1), |branch| branch.then(double, seed));
-                    choice.case(route(2), |branch| branch.then(triple, seed));
-                    choice.otherwise(|branch| branch.then(fallback, seed));
+                    choice.case(route(1), |branch| branch.then_with_output(double, seed));
+                    choice.case(route(2), |branch| branch.then_with_output(triple, seed));
+                    choice.otherwise(|branch| branch.then_with_output(fallback, seed));
                 });
-                flow.then(report, picked)
+                let out_refs = flow.then_with_output(report, picked);
+                flow.output_with(out_refs);
             },
             Seed { value: 7 },
         )
@@ -114,14 +116,15 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
 
     // 情形三：只有 case 且不匹配 → RunError::NoMatchingCase。
     let no_match = runtime
-        .execute(
+        .execute::<_, Report, _>(
             |flow, seed| {
-                let selector = flow.then(route_of, seed);
+                let selector = flow.then_with_output(route_of, seed);
                 let picked = flow.choose(selector, |choice| {
-                    choice.case(route(1), |branch| branch.then(double, seed));
-                    choice.case(route(2), |branch| branch.then(triple, seed));
+                    choice.case(route(1), |branch| branch.then_with_output(double, seed));
+                    choice.case(route(2), |branch| branch.then_with_output(triple, seed));
                 });
-                flow.then(report, picked)
+                let out_refs = flow.then_with_output(report, picked);
+                flow.output_with(out_refs);
             },
             Seed { value: 7 },
         )

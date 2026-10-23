@@ -112,17 +112,23 @@ where
 
 /// 自动推导桥的函数形式 marker：把具体 Query 借用形状与输出类型编码进类型参数，
 /// 使 per-arity impl 之间不重叠，并让调用侧的输入 Shape 由 impl 唯一确定。
-#[derive(Debug)]
-pub(crate) struct AutoFunction<I, O>(PhantomData<fn(I) -> O>);
-
-/// 内部自动推导桥：由具体 callable 签名在编译期确定输入 RefShape、输出与登记 marker。
 ///
-/// 只在 [`Flow`] 的内部自动入口使用；业务不实现、不命名它，也不手填 marker 或输入泛型。
+/// 隐藏支持项：业务**不构造、不指定**它；它只作为 [`AutoCallable`] 的 marker 参与
+/// [`Flow::then`]／[`Flow::then_output`] 的公共推导。构造器与字段保持私有，无法从外部伪造。
+#[derive(Debug)]
+#[doc(hidden)]
+pub struct AutoFunction<I, O>(PhantomData<fn(I) -> O>);
+
+/// 自动推导桥：由具体 callable 签名在编译期确定输入 RefShape、输出与登记 marker。
+///
+/// 隐藏支持协议：业务**不实现、不命名**它，也不手填 marker 或输入泛型；它只出现在
+/// [`Flow::then`]／[`Flow::then_output`] 的 bound 中，由函数/结构体签名自然推导。
 /// 函数形式按具体 `Query<...>` 借用形状逐个 arity 匹配，不依赖
 /// `<A::Spec as InputSpec>::Borrowed` 投影反推。`register` 把已解析的显式 RefShape 交给
 /// 唯一登记实现 [`Flow::then_with_output`]。
-#[allow(dead_code)] // T03 公开前由内部测试/后续任务使用
-pub(crate) trait AutoCallable<K: 'static> {
+#[doc(hidden)]
+#[allow(private_bounds)]
+pub trait AutoCallable<K: 'static> {
     /// 推导出的输入 RefShape；槽类型与顺序来自具体签名。
     type Input: RefShape + ShapeOps;
     /// Node 输出声明。

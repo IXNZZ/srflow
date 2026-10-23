@@ -386,7 +386,7 @@ fn step_fragment<'n>(
     node: &'n CountingStep,
     input: Ref<Amount>,
 ) -> impl FnOnce(&mut Flow<'n>) -> Ref<Amount> + 'n {
-    move |sub| sub.then(node, input)
+    move |sub| sub.then_with_output(node, input)
 }
 
 /// Fragment：child 内同时产生一个非声明输出的 owned 值（由 child 边界清理）。
@@ -395,9 +395,9 @@ fn temp_step_fragment<'n>(
     seed: Ref<Seed>,
 ) -> impl FnOnce(&mut Flow<'n>) -> Ref<Amount> + 'n {
     move |sub| {
-        let _temp = sub.then(track_temp, seed);
-        let produced = sub.then(seed_reader, seed);
-        sub.then(node, produced)
+        let _temp = sub.then_with_output(track_temp, seed);
+        let produced = sub.then_with_output(seed_reader, seed);
+        sub.then_with_output(node, produced)
     }
 }
 
@@ -407,7 +407,7 @@ fn call_in_body<'n>(
     node: &'n CountingStep,
     input: Ref<Amount>,
 ) -> Ref<Amount> {
-    flow.then(node, input)
+    flow.then_with_output(node, input)
 }
 
 // ================================================================ S01
@@ -418,10 +418,11 @@ fn s01_root_linear_owned_flow_shapes_and_values() {
     let runtime = Runtime::new();
 
     // 单输入：每一步都读取上一步的产物。
-    let single = block_on(runtime.execute(
+    let single = block_on(runtime.execute::<_, Amount, _>(
         |flow, amount| {
-            let doubled = flow.then(double, amount);
-            flow.then(plus_one, doubled)
+            let doubled = flow.then_with_output(double, amount);
+            let out_refs = flow.then_with_output(plus_one, doubled);
+            flow.output_with(out_refs);
         },
         Amount(20),
     ))
@@ -429,10 +430,11 @@ fn s01_root_linear_owned_flow_shapes_and_values() {
     assert_eq!(single.0, 41, "20 * 2 + 1");
 
     // 多输入：同一 Node 读取两个 Root 位置，再交给后续步骤。
-    let summed = block_on(runtime.execute(
+    let summed = block_on(runtime.execute::<_, Amount, _>(
         |flow, (left, right)| {
-            let total = flow.then(pair_sum, (left, right));
-            flow.then(plus_one, total)
+            let total = flow.then_with_output(pair_sum, (left, right));
+            let out_refs = flow.then_with_output(plus_one, total);
+            flow.output_with(out_refs);
         },
         (Amount(2), Amount(5)),
     ))
@@ -440,11 +442,12 @@ fn s01_root_linear_owned_flow_shapes_and_values() {
     assert_eq!(summed.0, 8, "(2 + 5) + 1");
 
     // tuple 输出：Root 一次交付两个 owned 值。
-    let (amount, report) = block_on(runtime.execute(
+    let (amount, report) = block_on(runtime.execute::<_, (Amount, Report), _>(
         |flow, amount| {
-            let stepped = flow.then(plus_one, amount);
-            let report = flow.then(to_report, stepped);
-            (stepped, report)
+            let stepped = flow.then_with_output(plus_one, amount);
+            let report = flow.then_with_output(to_report, stepped);
+            let out_refs = (stepped, report);
+            flow.output_with(out_refs);
         },
         Amount(1),
     ))
@@ -454,8 +457,9 @@ fn s01_root_linear_owned_flow_shapes_and_values() {
     // unit 输出：零输入 Root 的第二参数与 closure 输入均为 `()`。
     let unit: () = block_on(runtime.execute(
         |flow, ()| {
-            let _: () = flow.then(note, ());
-            ()
+            let _: () = flow.then_with_output(note, ());
+            let () = ();
+            flow.output_with(());
         },
         (),
     ))
@@ -490,15 +494,16 @@ fn s01_definition_order_is_strict_including_unit_steps() {
     }
 
     let runtime = Runtime::new();
-    let output = block_on(runtime.execute(
+    let output = block_on(runtime.execute::<_, Report, _>(
         |flow, amount| {
-            let stepped = flow.then(first, amount);
+            let stepped = flow.then_with_output(first, amount);
             // 无数据依赖的 unit Step：位于两个有依赖的步骤之间，仍必须按序执行。
-            let _: () = flow.then(stamp, ());
-            let report = flow.then(second, stepped);
+            let _: () = flow.then_with_output(stamp, ());
+            let report = flow.then_with_output(second, stepped);
             // 输出未被任何后续步骤使用：仍必须执行一次。
-            let _unused = flow.then(first, amount);
-            report
+            let _unused = flow.then_with_output(first, amount);
+            let out_refs = report;
+            flow.output_with(out_refs);
         },
         Amount(1),
     ))
@@ -539,28 +544,30 @@ fn s01_two_executions_build_independent_definitions_and_reject_an_old_ref() {
 
     /// 同一个 Definition 逻辑，被两次 execute 复用。
     fn definition<'n>(flow: &mut Flow<'n>, amount: Ref<Amount>) -> Ref<Amount> {
-        let doubled = flow.then(counted_double, amount);
-        flow.then(counted_plus_one, doubled)
+        let doubled = flow.then_with_output(counted_double, amount);
+        flow.then_with_output(counted_plus_one, doubled)
     }
 
     let runtime = Runtime::new();
     let mut first_ref: Option<Ref<Amount>> = None;
     let mut second_ref: Option<Ref<Amount>> = None;
 
-    let first = block_on(runtime.execute(
+    let first = block_on(runtime.execute::<_, Amount, _>(
         |flow, amount| {
             first_ref = Some(amount);
-            definition(flow, amount)
+            let out_refs = definition(flow, amount);
+            flow.output_with(out_refs);
         },
         Amount(1),
     ))
     .expect("first execution");
     assert_eq!(first.0, 3);
 
-    let second = block_on(runtime.execute(
+    let second = block_on(runtime.execute::<_, Amount, _>(
         |flow, amount| {
             second_ref = Some(amount);
-            definition(flow, amount)
+            let out_refs = definition(flow, amount);
+            flow.output_with(out_refs);
         },
         Amount(10),
     ))
@@ -585,11 +592,12 @@ fn s01_two_executions_build_independent_definitions_and_reject_an_old_ref() {
 
     // 旧 Ref 在后续执行的 Definition 中被拒绝，且该次执行零业务调用。
     let stale = first_ref;
-    let error = block_on(runtime.execute(
+    let error = block_on(runtime.execute::<_, Amount, _>(
         move |flow, amount| {
-            let fresh = flow.then(counted_plus_one, amount);
-            let _stale_use = flow.then(counted_plus_one, stale);
-            fresh
+            let fresh = flow.then_with_output(counted_plus_one, amount);
+            let _stale_use = flow.then_with_output(counted_plus_one, stale);
+            let out_refs = fresh;
+            flow.output_with(out_refs);
         },
         Amount(7),
     ))
@@ -655,19 +663,20 @@ fn s02_node_forms_query_shapes_and_call_counts() {
     };
 
     let runtime = Runtime::new();
-    let output = block_on(runtime.execute(
+    let output = block_on(runtime.execute::<_, Report, _>(
         |flow, amount| {
-            let a = flow.then(double, amount); // 函数 item
-            let b = flow.then(function_ref, a); // 函数引用
-            let c = flow.then(bump, b); // async closure
-            let d = flow.then(&configured, c); // 借用 + 非 static 配置
-            let e = flow.then(owned_step, d); // owned 具体 Struct Node
-            let f = flow.then(Arc::clone(&arc_step), e); // Arc<具体 Struct Node>
-            let _: () = flow.then(&unit_note, ()); // unit 输入的结构体 Node
-            let g = flow.then(&pair, (f, a)); // 多输入结构体 Node
-            let h = flow.then(pair_closure, (g, f)); // 多输入 async closure
-            let r = flow.then(to_report, h);
-            flow.then(&combo, (h, r)) // 异构多输入结构体 Node
+            let a = flow.then_with_output(double, amount); // 函数 item
+            let b = flow.then_with_output(function_ref, a); // 函数引用
+            let c = flow.then_with_output(bump, b); // async closure
+            let d = flow.then_with_output(&configured, c); // 借用 + 非 static 配置
+            let e = flow.then_with_output(owned_step, d); // owned 具体 Struct Node
+            let f = flow.then_with_output(Arc::clone(&arc_step), e); // Arc<具体 Struct Node>
+            let _: () = flow.then_with_output(&unit_note, ()); // unit 输入的结构体 Node
+            let g = flow.then_with_output(&pair, (f, a)); // 多输入结构体 Node
+            let h = flow.then_with_output(pair_closure, (g, f)); // 多输入 async closure
+            let r = flow.then_with_output(to_report, h);
+            let out_refs = flow.then_with_output(&combo, (h, r));
+            flow.output_with(out_refs); // 异构多输入结构体 Node
         },
         Amount(1),
     ))
@@ -719,10 +728,11 @@ fn s02_non_send_data_and_borrow_held_across_a_real_await() {
         polls: Arc::clone(&polls),
     };
     let runtime = Runtime::new();
-    let output = block_on(runtime.execute(
+    let output = block_on(runtime.execute::<_, NonSendSum, _>(
         |flow, input| {
-            let summed = flow.then(&node, input);
-            flow.then(duplicate_sum, summed)
+            let summed = flow.then_with_output(&node, input);
+            let out_refs = flow.then_with_output(duplicate_sum, summed);
+            flow.output_with(out_refs);
         },
         NonSendInput {
             value: 20,
@@ -764,11 +774,12 @@ fn s02_dynamic_failure_preserves_its_source_and_stops_the_path() {
     };
 
     let runtime = Runtime::new();
-    let error = block_on(runtime.execute(
+    let error = block_on(runtime.execute::<_, Report, _>(
         |flow, amount| {
-            let doubled = flow.then(double, amount);
-            let rejected = flow.then(reject, doubled);
-            flow.then(after, rejected)
+            let doubled = flow.then_with_output(double, amount);
+            let rejected = flow.then_with_output(reject, doubled);
+            let out_refs = flow.then_with_output(after, rejected);
+            flow.output_with(out_refs);
         },
         Amount(21),
     ))
@@ -812,12 +823,13 @@ fn s03_fragment_factory_and_flow_receiving_function() {
         steps: steps.clone(),
     };
     let runtime = Runtime::new();
-    let (first, second) = block_on(runtime.execute(
+    let (first, second) = block_on(runtime.execute::<_, (Amount, Amount), _>(
         |flow, amount| {
-            let doubled = flow.then(double, amount);
+            let doubled = flow.then_with_output(double, amount);
             let first = flow.chain(step_fragment(&node, doubled));
             let second = flow.chain(|sub| call_in_body(sub, &node, first));
-            (first, second)
+            let out_refs = (first, second);
+            flow.output_with(out_refs);
         },
         Amount(20),
     ))
@@ -835,17 +847,18 @@ fn s03_fragment_factory_and_flow_receiving_function() {
 fn s03_deep_capture_imports_ancestor_and_cleans_non_output_owned() {
     let journal = Journal::new();
     let runtime = Runtime::new();
-    let output = block_on(runtime.execute(
+    let output = block_on(runtime.execute::<_, Amount, _>(
         |flow, seed| {
             let exported = flow.chain(|outer| {
                 outer.chain(|inner| {
                     // 深层 capture：inner 直接引用 Root 的 seed（跨两层边界真实 Import）。
-                    let _temp = inner.then(track_temp, seed);
-                    inner.then(seed_reader, seed) // 声明输出：真实 Export 给 parent
+                    let _temp = inner.then_with_output(track_temp, seed);
+                    inner.then_with_output(seed_reader, seed) // 声明输出：真实 Export 给 parent
                 })
             });
-            let _: () = flow.then(journal_note, seed);
-            exported
+            let _: () = flow.then_with_output(journal_note, seed);
+            let out_refs = exported;
+            flow.output_with(out_refs);
         },
         Seed {
             value: 20,
@@ -872,15 +885,16 @@ fn s03_child_local_ref_is_not_visible_in_the_parent() {
     // 正例：chain 的声明输出在 parent 中得到一个新位置，父层可继续读取。
     let mut child_local: Option<Ref<Amount>> = None;
     let mut exported: Option<Ref<Amount>> = None;
-    let output = block_on(runtime.execute(
+    let output = block_on(runtime.execute::<_, Amount, _>(
         |flow, amount| {
             let out = flow.chain(|sub| {
-                let produced = sub.then(plus_one, amount);
+                let produced = sub.then_with_output(plus_one, amount);
                 child_local = Some(produced);
                 produced
             });
             exported = Some(out);
-            flow.then(plus_one, out)
+            let out_refs = flow.then_with_output(plus_one, out);
+            flow.output_with(out_refs);
         },
         Amount(1),
     ))
@@ -905,16 +919,17 @@ fn s03_child_local_ref_is_not_visible_in_the_parent() {
     }
 
     let mut leaked: Option<Ref<Amount>> = None;
-    let error = block_on(runtime.execute(
+    let error = block_on(runtime.execute::<_, (), _>(
         |flow, amount| {
             let _kept = flow.chain(|sub| {
-                let produced = sub.then(counted_parent, amount);
+                let produced = sub.then_with_output(counted_parent, amount);
                 leaked = Some(produced);
                 produced
             });
             let child_local = leaked.expect("leaked child ref");
-            let _leak_use = flow.then(counted_parent, child_local);
-            ()
+            let _leak_use = flow.then_with_output(counted_parent, child_local);
+            let () = ();
+            flow.output_with(());
         },
         Amount(1),
     ))
@@ -941,11 +956,12 @@ fn s03_fragment_reuse_builds_a_fresh_child_boundary_per_use() {
     };
     let journal = Journal::new();
     let runtime = Runtime::new();
-    let (left, right) = block_on(runtime.execute(
+    let (left, right) = block_on(runtime.execute::<_, (Amount, Amount), _>(
         |flow, seed| {
             let left = flow.chain(temp_step_fragment(&node, seed));
             let right = flow.chain(temp_step_fragment(&node, seed));
-            (left, right)
+            let out_refs = (left, right);
+            flow.output_with(out_refs);
         },
         Seed {
             value: 5,
@@ -971,38 +987,44 @@ fn s03_fragment_reuse_builds_a_fresh_child_boundary_per_use() {
 fn s03_chain_body_maps_all_six_operations() {
     ATTEMPT.with(|counter| counter.set(0));
     let runtime = Runtime::new();
-    let (scores, picked, nested, report, state) = block_on(runtime.execute(
-        |flow, seed| {
-            flow.chain(|sub| {
-                let items = sub.then(items_of, seed);
-                let scores = sub.each(items, |item, each| each.then(score_of, item));
-                let amount = sub.then(amount_of, seed);
-                let nested = sub.chain(|inner| inner.then(double_amount, amount));
-                let route = sub.then(route_of, seed);
-                let picked = sub.choose(route, |choice| {
-                    choice.case(Route { code: 1 }, |branch| {
-                        branch.then(double_amount, amount)
+    let (scores, picked, nested, report, state) =
+        block_on(
+            runtime.execute::<_, (Vec<Score>, Amount, Amount, Report, Amount), _>(
+                |flow, seed| {
+                    let out_refs = flow.chain(|sub| {
+                        let items = sub.then_with_output(items_of, seed);
+                        let scores =
+                            sub.each(items, |item, each| each.then_with_output(score_of, item));
+                        let amount = sub.then_with_output(amount_of, seed);
+                        let nested =
+                            sub.chain(|inner| inner.then_with_output(double_amount, amount));
+                        let route = sub.then_with_output(route_of, seed);
+                        let picked = sub.choose(route, |choice| {
+                            choice.case(Route { code: 1 }, |branch| {
+                                branch.then_with_output(double_amount, amount)
+                            });
+                            choice.otherwise(|branch| branch.then_with_output(identity, amount));
+                        });
+                        let report = sub.retry(1, |attempt| {
+                            let candidate = attempt.then_with_output(amount_of, seed);
+                            attempt.then_with_output(judge_retry_once, candidate)
+                        });
+                        let zero = sub.then_with_output(zero_amount, seed);
+                        let state = sub.iter(zero, 4, |current, round| {
+                            let _judged = round.then_with_output(judge_break, current);
+                            round.then_with_output(bump_amount, current)
+                        });
+                        (scores, picked, nested, report, state)
                     });
-                    choice.otherwise(|branch| branch.then(identity, amount));
-                });
-                let report = sub.retry(1, |attempt| {
-                    let candidate = attempt.then(amount_of, seed);
-                    attempt.then(judge_retry_once, candidate)
-                });
-                let zero = sub.then(zero_amount, seed);
-                let state = sub.iter(zero, 4, |current, round| {
-                    let _judged = round.then(judge_break, current);
-                    round.then(bump_amount, current)
-                });
-                (scores, picked, nested, report, state)
-            })
-        },
-        Seed {
-            value: 3,
-            journal: Journal::new(),
-        },
-    ))
-    .expect("a chain body mapping all six operations runs");
+                    flow.output_with(out_refs);
+                },
+                Seed {
+                    value: 3,
+                    journal: Journal::new(),
+                },
+            ),
+        )
+        .expect("a chain body mapping all six operations runs");
 
     assert_eq!(
         scores.iter().map(|score| score.0).collect::<Vec<_>>(),

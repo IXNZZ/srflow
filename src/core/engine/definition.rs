@@ -1024,7 +1024,7 @@ pub(crate) struct Builder<'n> {
     bodies: Vec<Body<'n>>,
     positions: Vec<PositionRecord>,
     errors: Vec<BuildErrorDetail>,
-    /// 测试/后续 Root 接入使用的期望输出 Shape；`None` 表示本次构建不核对。
+    /// Root 期望输出 Shape；`None` 表示本次构建不核对（仅内部测试直接构造 Builder 时）。
     root_expectation: Option<Vec<TypeDesc>>,
     /// Choose 分支契约的轻量视图；由 finish 统一比较。
     choose_contracts: Vec<ChooseContract>,
@@ -1081,8 +1081,7 @@ impl<'n> Builder<'n> {
         self.bodies[round.index()].round_initial = Some(types);
     }
 
-    /// 设置 Root 期望输出 Shape；由后续 Root 接入或定向测试使用。
-    #[allow(dead_code)] // T03 Root 接入前由内部测试使用
+    /// 设置 Root 期望输出 Shape；由 Root 构建前端（`build_definition`）与定向测试使用。
     pub(crate) fn set_root_expectation(&mut self, expected: Vec<TypeDesc>) {
         self.root_expectation = Some(expected);
     }
@@ -2565,27 +2564,32 @@ impl<'n> Builder<'n> {
     }
 }
 
-/// 唯一 Definition 构建出口。
+/// 唯一 Definition 构建出口（T03 Root 前端）。
 ///
 /// 语义：
 /// - `In` 确定 Root 输入的类型 Shape，并按声明顺序登记初始逻辑 Ref（不接收或保存
 ///   本次 owned 输入）；
-/// - 同步执行定义闭包，登记 Root 与全部 Chain 的 Body／Step；
-/// - 收集 Root 与各 child Body 的声明输出，规范化 Chain 输出映射；
-/// - 对整棵 Definition 验证来源、可见性、顺序与类型，最后返回验证完成的结构。
+/// - 用 `Out` 对应 Shape 设置 Root 期望输出（`set_root_expectation`），这是该能力首次
+///   接入生产构建路径：调用方期望的 owned Out 在闭包执行前就固定下来；
+/// - 同步执行双参数 unit 闭包，登记 Root 与全部 Chain 的 Body／Step；
+/// - Root 业务输出**只**来自 Body 内 `output`／`output_with` 声明，不再从闭包返回值补声明
+///   （unit 闭包无声明即“未声明”，不会被包装成显式 unit）；
+/// - 对整棵 Definition 验证来源、可见性、顺序与类型（含 `validate_root_output` 对声明与
+///   期望的核对），最后返回验证完成的结构。
 ///
 /// 失败返回 [`BuildErrorDetail`]，不返回可供执行消费的半成品；任何验证路径都不调用
 /// 业务 Node。根闭包同步消费，不要求 `+ 'n`：被登记句柄的寿命由各 Step 的
 /// `N: 'n` 约束保证。
 #[allow(private_bounds)]
-pub(crate) fn build_definition<'n, In, F, Out>(
+pub(crate) fn build_definition<'n, In, Out, F>(
     definition: F,
 ) -> Result<Definition<'n>, BuildErrorDetail>
 where
     In: RootInput + InputOps,
-    In::Refs: ShapeOps + RefShape,
-    Out: RefShape + ShapeOps,
-    F: FnOnce(&mut Flow<'n>, In::Refs) -> Out,
+    In::Refs: ShapeOps,
+    Out: RootInput<Owned = Out>,
+    Out::Refs: ShapeOps + RefShape<Owned = Out>,
+    F: FnOnce(&mut Flow<'n>, In::Refs),
 {
     let builder = Rc::new(RefCell::new(Builder::<'n>::new()));
     let root = builder.borrow_mut().new_body(None, BodyRole::Ordinary);
@@ -2600,16 +2604,13 @@ where
                 type_desc,
             ));
         }
+        state.set_root_expectation(<Out::Refs as ShapeOps>::type_descs());
     }
     let refs = <In::Refs as ShapeOps>::from_positions(&mut handles.into_iter());
-    let out = {
-        let mut flow = Flow::open(Rc::clone(&builder), root);
-        definition(&mut flow, refs)
-    };
     {
-        let mut state = builder.borrow_mut();
-        let output_order = state.next_order();
-        let _ = state.declare_output(root, ShapeOps::positions(out), output_order);
+        // 双参数 unit 闭包：业务输出由 Body 内的 output／output_with 声明。
+        let mut flow = Flow::open(Rc::clone(&builder), root);
+        definition(&mut flow, refs);
     }
     let state = Rc::try_unwrap(builder)
         .ok()
@@ -2646,14 +2647,16 @@ mod each_static_tests {
 
     #[test]
     fn t03_each_is_a_unified_ordered_step_with_declared_slots() {
-        let definition = build_definition::<Vec<Item>, _, _>(|flow, items| {
-            flow.each(items, |item, each| {
-                let score = each.then(score_of, item);
-                let doubled = each.then(double_score, score);
-                (score, doubled)
+        let definition =
+            build_definition::<Vec<Item>, (Vec<Score>, Vec<Score>), _>(|flow, items| {
+                let out_refs = flow.each(items, |item, each| {
+                    let score = each.then_with_output(score_of, item);
+                    let doubled = each.then_with_output(double_score, score);
+                    (score, doubled)
+                });
+                flow.output_with(out_refs);
             })
-        })
-        .expect("each with a flat tuple body should build");
+            .expect("each with a flat tuple body should build");
 
         let root = definition.root();
         assert_eq!(root.steps().len(), 1);
@@ -2708,10 +2711,11 @@ mod each_static_tests {
 
     #[test]
     fn t11_unit_each_registers_no_collector_slots() {
-        let definition = build_definition::<Vec<Item>, _, _>(|flow, items| {
-            flow.each(items, |item, each| {
-                let _score = each.then(score_of, item);
-            })
+        let definition = build_definition::<Vec<Item>, (), _>(|flow, items| {
+            let () = flow.each(items, |item, each| {
+                let _score = each.then_with_output(score_of, item);
+            });
+            flow.output_with(());
         })
         .expect("unit each should build");
 
@@ -2742,7 +2746,7 @@ mod each_static_tests {
         {
             let mut flow = Flow::open(Rc::clone(&builder), root);
             let leaked = Ref::<Item>::from_handle(item_handle);
-            let _ = flow.then(score_of, leaked);
+            let _ = flow.then_with_output(score_of, leaked);
         }
         let state = Rc::try_unwrap(builder)
             .ok()

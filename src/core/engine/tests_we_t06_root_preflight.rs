@@ -204,12 +204,13 @@ async fn increment(q: Query<&u32>) -> Result<u32, BodyError> {
 /// 正式 `Runtime::execute`：Chain 的两个声明出口是不同逻辑位置、合法地指向同一实际 DataId；
 /// 第一个未使用的 Root 输入被既有 cleanup fault 销毁，形成真实剩余 owned 清理故障。
 fn run_root_late_duplicate() -> RunError {
-    block_on(Runtime::new().execute(
+    block_on(Runtime::new().execute::<_, (u32, u32), _>(
         |flow, (_unused, live)| {
-            flow.chain(|sub| {
-                let produced = sub.then(increment, live);
+            let out_refs = flow.chain(|sub| {
+                let produced = sub.then_with_output(increment, live);
                 (produced, produced)
-            })
+            });
+            flow.output_with(out_refs);
         },
         (42u32, 3u32),
     ))
@@ -640,12 +641,13 @@ fn r01_chain_export_group_rejects_alias_plus_new_owned_without_partial_binding()
     observe::reset();
     install_export_occupy_fault(1);
 
-    let error = block_on(Runtime::new().execute(
+    let error = block_on(Runtime::new().execute::<_, (u32, u32), _>(
         |flow, seed| {
-            flow.chain(|sub| {
-                let produced = sub.then(bump, seed);
+            let out_refs = flow.chain(|sub| {
+                let produced = sub.then_with_output(bump, seed);
                 (seed, produced)
-            })
+            });
+            flow.output_with(out_refs);
         },
         3u32,
     ))
@@ -733,8 +735,11 @@ fn r02_root_second_input_registration_failure_runs_no_body_and_no_take() {
     let right_drops = Rc::new(Cell::new(0));
     install_root_input_prebind_fault(1);
 
-    let error = block_on(Runtime::new().execute(
-        |flow, (left, _right)| flow.then(read_first, left),
+    let error = block_on(Runtime::new().execute::<_, u32, _>(
+        |flow, (left, _right)| {
+            let out_refs = flow.then_with_output(read_first, left);
+            flow.output_with(out_refs);
+        },
         (
             CountedInput {
                 value: 6,

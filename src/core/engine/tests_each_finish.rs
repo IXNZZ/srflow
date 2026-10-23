@@ -92,8 +92,8 @@ async fn tagger(query: Query<&Item>) -> Result<Tag, BodyError> {
 /// 两槽 item Body：集合逐项产生 `(Out, Tag)`，每个槽聚合成 Each-owned `Vec`。
 fn two_slots<'n>(flow: &mut Flow<'n>, items: Ref<Vec<Item>>) -> (Ref<Vec<Out>>, Ref<Vec<Tag>>) {
     flow.each(items, |item, each| {
-        let doubled = each.then(&score, item);
-        let labelled = each.then(&tagger, item);
+        let doubled = each.then_with_output(&score, item);
+        let labelled = each.then_with_output(&tagger, item);
         (doubled, labelled)
     })
 }
@@ -107,7 +107,10 @@ fn x17_baseline_two_slot_each_exports_without_fault() {
     reset();
     let runtime = Runtime::new();
     let outcome: Result<(Vec<Out>, Vec<Tag>), RunError> = block_on(runtime.execute(
-        |flow: &mut Flow<'_>, items: Ref<Vec<Item>>| two_slots(flow, items),
+        |flow: &mut Flow<'_>, items: Ref<Vec<Item>>| {
+            let out_refs = two_slots(flow, items);
+            flow.output_with(out_refs);
+        },
         vec![Item(1), Item(2), Item(3)],
     ));
     let (doubled, labelled) = outcome.expect("the two-slot each exports without a fault");
@@ -153,7 +156,10 @@ fn x17_second_slot_finish_reject_closes_the_engine_path() {
 
     let runtime = Runtime::new();
     let outcome: Result<(Vec<Out>, Vec<Tag>), RunError> = block_on(runtime.execute(
-        |flow: &mut Flow<'_>, items: Ref<Vec<Item>>| two_slots(flow, items),
+        |flow: &mut Flow<'_>, items: Ref<Vec<Item>>| {
+            let out_refs = two_slots(flow, items);
+            flow.output_with(out_refs);
+        },
         vec![Item(1), Item(2), Item(3)],
     ));
 

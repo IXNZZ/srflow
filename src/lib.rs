@@ -1,7 +1,8 @@
 //! SRFlow：以顺序 Flow 为核心的强类型执行与编排框架。
 //!
 //! 本 crate 提供新契约的公开使用入口：声明业务 [`Data`]、接入函数／结构体 [`Node`]、
-//! 用 [`Flow::then`]／[`Flow::chain`]／[`Flow::choose`]／[`Flow::retry`]／[`Flow::iter`]
+//! 用 [`Flow::then`]／[`Flow::then_with_output`]／[`Flow::chain`]／[`Flow::choose`]／
+//! [`Flow::retry`]／[`Flow::iter`]
 //! 组合 Definition，并以
 //! [`Runtime::execute`] 启动一次 Root Execution，取得 owned 输出或 [`RunError`]。
 //!
@@ -37,17 +38,20 @@
 //! let output = block_on(async {
 //!     let runtime = Runtime::new();
 //!     let add = AddOne;
-//!     runtime
+//!     // Root 闭包固定返回 `()`：业务输出由 `output_with` 显式声明。
+//!     let output: Amount = runtime
 //!         .execute(
 //!             |flow, amount| {
-//!                 let doubled = flow.then(double, amount);
-//!                 flow.chain(|sub| sub.then(&add, doubled))
+//!                 let doubled = flow.then_with_output(double, amount);
+//!                 let refs = flow.chain(|sub| sub.then_with_output(&add, doubled));
+//!                 flow.output_with(refs);
 //!             },
 //!             Amount(21),
 //!         )
 //!         .await
-//! })
-//! .unwrap();
+//!         .unwrap();
+//!     output
+//! });
 //! assert_eq!(output.0, 43);
 //! ```
 
@@ -71,7 +75,9 @@ pub use crate::core::engine::error::{
 pub use crate::core::engine::flow::Flow;
 pub use crate::core::engine::node::Node;
 #[doc(hidden)]
-pub use crate::core::engine::node::{Callable, FunctionCall, StructCall};
+pub use crate::core::engine::node::{
+    AutoCallable, AutoFunction, Callable, FunctionCall, StructCall,
+};
 pub use crate::core::engine::runtime::Runtime;
 pub use crate::core::engine::shape::{
     EachShape, InputSpec, NodeOutput, Query, QueryType, Ref, RefShape, RootInput,

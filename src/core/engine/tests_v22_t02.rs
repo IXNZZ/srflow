@@ -175,16 +175,17 @@ fn b01_function_item_reference_and_async_closure() {
     let closure = async |query: Query<&Amount>| -> Result<Doubled, BodyError> {
         Ok(Doubled(query.get().0 * 3))
     };
-    let (item, reference, closed) = block_on(runtime.execute(
+    let (item, reference, closed) = block_on(runtime.execute::<_, (Doubled, Doubled, Doubled), _>(
         |flow, _input| {
             // 零槽函数：普通形式仍执行（unit Step 不省略）。
-            flow.then_auto(load_amount);
-            let _unit: () = flow.then_auto_output(record_unit_b01);
+            flow.then(load_amount);
+            let _unit: () = flow.then_output(record_unit_b01);
             // 单槽函数：item、引用、async closure 三种形态自然推导同一 Shape。
-            let by_item = flow.then_auto_output(&double);
-            let by_reference: Ref<Doubled> = flow.then_auto_output(double);
-            let by_closure = flow.then_auto_output(closure);
-            (by_item, by_reference, by_closure)
+            let by_item = flow.then_output(&double);
+            let by_reference: Ref<Doubled> = flow.then_output(double);
+            let by_closure = flow.then_output(closure);
+            let out_refs = (by_item, by_reference, by_closure);
+            flow.output_with(out_refs);
         },
         (),
     ))
@@ -199,12 +200,13 @@ fn b01_function_item_reference_and_async_closure() {
 #[allow(clippy::needless_borrows_for_generic_args)] // 刻意覆盖 &Node／Arc<Node> 形态
 fn b01_struct_owned_reference_and_arc() {
     let runtime = Runtime;
-    let (owned, borrowed, shared) = block_on(runtime.execute(
+    let (owned, borrowed, shared) = block_on(runtime.execute::<_, (Key, Key, Key), _>(
         |flow, _input| {
-            let owned: Ref<Key> = flow.then_auto_output(UnitSource);
-            let borrowed = flow.then_auto_output(&UnitSource);
-            let shared = flow.then_auto_output(Arc::new(UnitSource));
-            (owned, borrowed, shared)
+            let owned: Ref<Key> = flow.then_output(UnitSource);
+            let borrowed = flow.then_output(&UnitSource);
+            let shared = flow.then_output(Arc::new(UnitSource));
+            let out_refs = (owned, borrowed, shared);
+            flow.output_with(out_refs);
         },
         (),
     ))
@@ -217,11 +219,12 @@ fn b01_struct_owned_reference_and_arc() {
 #[test]
 fn b01_two_slot_function_and_struct() {
     let runtime = Runtime;
-    let (by_function, by_struct) = block_on(runtime.execute(
+    let (by_function, by_struct) = block_on(runtime.execute::<_, (Key, Key), _>(
         |flow, _input| {
-            let combined = flow.then_auto_output(combine);
-            let paired = flow.then_auto_output(PairSink);
-            (combined, paired)
+            let combined = flow.then_output(combine);
+            let paired = flow.then_output(PairSink);
+            let out_refs = (combined, paired);
+            flow.output_with(out_refs);
         },
         (Amount(2), Doubled(5)),
     ))
@@ -233,11 +236,12 @@ fn b01_two_slot_function_and_struct() {
 #[test]
 fn b01_single_slot_struct_receives_nearest_source() {
     let runtime = Runtime;
-    let out = block_on(runtime.execute(
+    let out = block_on(runtime.execute::<_, (Doubled, Key), _>(
         |flow, _input| {
-            let bumped: Ref<Doubled> = flow.then_auto_output(Bump);
+            let bumped: Ref<Doubled> = flow.then_output(Bump);
             let key = flow.then_with_output(key_from_amount, flow.ref_of::<Amount>());
-            (bumped, key)
+            let out_refs = (bumped, key);
+            flow.output_with(out_refs);
         },
         Amount(3),
     ))
@@ -375,11 +379,12 @@ impl Node for SixteenSink {
 #[test]
 fn b01_sixteen_slot_function_and_struct() {
     let runtime = Runtime;
-    let (by_function, by_struct) = block_on(runtime.execute(
+    let (by_function, by_struct) = block_on(runtime.execute::<_, (Sum, Sum), _>(
         |flow, _input| {
-            let function = flow.then_auto_output(sixteen_slot_sum);
-            let structural = flow.then_auto_output(SixteenSink);
-            (function, structural)
+            let function = flow.then_output(sixteen_slot_sum);
+            let structural = flow.then_output(SixteenSink);
+            let out_refs = (function, structural);
+            flow.output_with(out_refs);
         },
         (
             Slot01(1),
@@ -419,19 +424,20 @@ async fn counting_combine(query: Query<(&Amount, &Doubled)>) -> Result<Key, Body
 fn b02_four_forms_register_and_execute_equivalently() {
     COMBINE_RUNS.store(0, Ordering::SeqCst);
     let runtime = Runtime;
-    let (auto_output, explicit_output) = block_on(runtime.execute(
+    let (auto_output, explicit_output) = block_on(runtime.execute::<_, (Key, Key), _>(
         |flow, _input| {
             let amount = flow.ref_of::<Amount>();
             let doubled = flow.ref_of::<Doubled>();
             // 自动普通：丢弃句柄但登记并执行同一步骤。
-            flow.then_auto(counting_combine);
+            flow.then(counting_combine);
             // 自动取输出。
-            let auto_out = flow.then_auto_output(&counting_combine);
+            let auto_out = flow.then_output(&counting_combine);
             // 显式普通。
             flow.then_with(counting_combine, (amount, doubled));
             // 显式取输出。
             let explicit_out = flow.then_with_output(&counting_combine, (amount, doubled));
-            (auto_out, explicit_out)
+            let out_refs = (auto_out, explicit_out);
+            flow.output_with(out_refs);
         },
         (Amount(2), Doubled(5)),
     ))
@@ -453,10 +459,10 @@ fn four_form_snapshot() -> Vec<(usize, Vec<(u32, TypeDesc)>, usize, Vec<u64>)> {
         let doubled = Ref::<Doubled>::from_handle(handles[1]);
         match form {
             0 => {
-                flow.then_auto(combine);
+                flow.then(combine);
             }
             1 => {
-                let _ = flow.then_auto_output(&combine);
+                let _ = flow.then_output(&combine);
             }
             2 => {
                 let _ = flow.then_with(combine, (amount, doubled));
@@ -513,13 +519,15 @@ fn b02_four_forms_have_identical_definition_structure() {
 }
 
 #[test]
-fn b02_legacy_public_then_matches_internal_then_with_output() {
-    // 旧公开 `then` 是内部唯一登记实现的薄委托：同一场景下两条入口的确定性结构完全一致。
+fn b02_public_auto_and_explicit_entries_share_one_registration() {
+    // 两个现行公开入口的比较：自动 `then_output`（按调用时点解析最近来源）与显式
+    // `then_with_output`（调用者直接给出 RefShape）。旧两参数 `then` 已退出，原“公开门面委托”
+    // 比较改用这两个仍不同的真实入口，仍必须落到唯一登记实现并产生完全一致的确定性结构。
     // 比较项：Body/Step 数、逐 Step order()、输入位置与类型、输出槽与类型、published/taint
     // 状态、完整 Import 集合。执行身份（DefinitionId）不参与比较。
     #[allow(clippy::type_complexity)]
     fn snapshot(
-        use_legacy: bool,
+        use_auto: bool,
     ) -> (
         usize,
         Vec<(u32, TypeDesc)>,
@@ -532,10 +540,12 @@ fn b02_legacy_public_then_matches_internal_then_with_output() {
         let amount = Ref::<Amount>::from_handle(handles[0]);
         let doubled = Ref::<Doubled>::from_handle(handles[1]);
         let mut flow = open_flow(&builder, root);
-        if use_legacy {
-            // 旧公开入口（T03 前保持原签名）。
-            let _ = flow.then(&combine, (amount, doubled));
+        if use_auto {
+            // 自动入口：`combine` 需要 `(Ref<Amount>, Ref<Doubled>)`，由两个 Root 输入位置
+            // 各自作为该类型的最近合法来源解析出来（不手填句柄）。
+            let _ = flow.then_output(&combine);
         } else {
+            // 显式入口：同一组句柄由调用者直接给出。
             let _ = flow.then_with_output(&combine, (amount, doubled));
         }
         drop(flow);
@@ -581,12 +591,12 @@ fn b02_legacy_public_then_matches_internal_then_with_output() {
         )
     }
 
-    let legacy = snapshot(true);
-    let internal = snapshot(false);
-    assert_eq!(legacy.0, 1, "one Node Step per entry");
+    let auto = snapshot(true);
+    let explicit = snapshot(false);
+    assert_eq!(auto.0, 1, "每个入口恰好登记一个 Node Step");
     assert_eq!(
-        legacy, internal,
-        "旧公开 then 与内部 then_with_output 必须共用唯一登记实现"
+        auto, explicit,
+        "自动 then_output 与显式 then_with_output 必须共用唯一登记实现"
     );
 }
 
@@ -596,9 +606,9 @@ fn b02_ordinary_form_publishes_source_and_unit_step_executes() {
     let (builder, root, _handles) = builder_with_inputs(&[TypeDesc::of::<Amount>()]);
     let mut flow = open_flow(&builder, root);
     // unit 输出：普通形式仍登记并执行一步，不产生任何输出槽。
-    flow.then_auto(record_unit);
+    flow.then(record_unit);
     // 单 Data 输出：普通形式仍发布为后续最近来源。
-    flow.then_auto(add_one);
+    flow.then(add_one);
     let produced = flow.ref_of::<Amount>();
     drop(flow);
     let definition = finish_builder(builder, root).expect("ordinary forms should build");
@@ -612,13 +622,14 @@ fn b02_ordinary_form_publishes_source_and_unit_step_executes() {
         "ordinary form still publishes its source"
     );
     let runtime = Runtime;
-    let value = block_on(runtime.execute(
+    let value = block_on(runtime.execute::<_, Amount, _>(
         |flow, _input| {
-            flow.then_auto(record_unit);
-            flow.then_auto(add_one);
+            flow.then(record_unit);
+            flow.then(add_one);
             // 普通形式登记的步骤同样发布来源：下一次自动解析取到它的输出。
 
-            flow.then_auto_output(&add_one)
+            let out_refs = flow.then_output(&add_one);
+            flow.output_with(out_refs);
         },
         Amount(1),
     ))
@@ -638,13 +649,13 @@ fn b02_chain_and_sequence_stay_in_the_same_body() {
     let amount = Ref::<Amount>::from_handle(handles[0]);
     let mut flow = open_flow(&builder, root);
     // 链式与逐句登记产生相同 Body/Step 结构：链式不创建 child。
-    flow.then_auto(record_unit).then_with(add_one, amount);
+    flow.then(record_unit).then_with(add_one, amount);
     assert_eq!(builder.borrow().body(root).steps().len(), 2);
     // chain 的 child 独立；chain 之后继续登记 parent。
     flow.chain(|sub| {
-        sub.then_auto(record_unit);
+        sub.then(record_unit);
     });
-    flow.then_auto(double);
+    flow.then(double);
     let root_steps = builder.borrow().body(root).steps().len();
     drop(flow);
     let definition = finish_builder(builder, root).expect("chain plus sequence should build");
@@ -672,11 +683,11 @@ fn b03_nearest_source_selection_and_frozen_connection() {
         builder_with_inputs(&[TypeDesc::of::<Amount>(), TypeDesc::of::<Plain>()]);
     let mut flow = open_flow(&builder, root);
     // 源 A（Root 输入）之后调用 Node1：绑定 A。
-    flow.then_auto(add_one);
+    flow.then(add_one);
     // 出现源 B（amount_from_plain 的输出，同类型 Amount）。
-    flow.then_auto(amount_from_plain);
+    flow.then(amount_from_plain);
     // Node2 在 B 之后调用：绑定 B。
-    flow.then_auto(add_one);
+    flow.then(add_one);
     drop(flow);
     let definition = finish_builder(builder, root).expect("nearest-source scenario should build");
     let steps = definition.root().steps();
@@ -705,12 +716,13 @@ fn b03_nearest_source_selection_and_frozen_connection() {
 
     // 运行读取也对应：Node1 读 A(=1) → 2；B = Plain(4)+100 = 104；Node2 读 B → 105。
     let runtime = Runtime;
-    let read = block_on(runtime.execute(
+    let read = block_on(runtime.execute::<_, (Amount, Amount, Amount), _>(
         |flow, _input| {
-            let first = flow.then_auto_output(&add_one);
-            let second_source = flow.then_auto_output(&amount_from_plain);
-            let third = flow.then_auto_output(&add_one);
-            (first, second_source, third)
+            let first = flow.then_output(&add_one);
+            let second_source = flow.then_output(&amount_from_plain);
+            let third = flow.then_output(&add_one);
+            let out_refs = (first, second_source, third);
+            flow.output_with(out_refs);
         },
         (Amount(1), Plain(4)),
     ))
@@ -730,8 +742,8 @@ fn b04_multi_level_auto_imports_are_recorded_and_deduplicated() {
     flow.chain(|sub| {
         sub.chain(|leaf| {
             // 同一祖先来源在 leaf 中使用两次：每层只保留去重后的 Import。
-            leaf.then_auto(add_one);
-            leaf.then_auto(add_one);
+            leaf.then(add_one);
+            leaf.then(add_one);
             ()
         });
         ()
@@ -800,10 +812,10 @@ fn b04_unexported_child_and_tainted_sources_are_not_candidates() {
     let (builder, root, handles) = builder_with_inputs(&[TypeDesc::of::<Plain>()]);
     let mut flow = open_flow(&builder, root);
     flow.chain(|sub| {
-        sub.then_auto(amount_from_plain);
+        sub.then(amount_from_plain);
         ()
     });
-    flow.then_auto(add_one);
+    flow.then(add_one);
     drop(flow);
     let errors = builder.borrow().errors().to_vec();
     let _ = handles;
@@ -833,7 +845,7 @@ fn b04_unexported_child_and_tainted_sources_are_not_candidates() {
         "failed explicit input is recorded"
     );
     // 自动查询必须跳过 tainted 来源：Root 的合法 Amount 仍是最近可用来源。
-    flow.then_auto(add_one);
+    flow.then(add_one);
     let errors = builder.borrow().errors().to_vec();
     assert!(
         !errors
@@ -918,29 +930,25 @@ fn b05_duplicate_auto_query_is_rejected_by_every_auto_entry() {
             let mut flow = open_flow(&builder, root);
             let returned = match (entry, shape) {
                 ("ordinary", "function_adjacent") => {
-                    flow.then_auto(same_pair);
+                    flow.then(same_pair);
                     None
                 }
                 ("ordinary", "function_spread") => {
-                    flow.then_auto(spread_duplicate);
+                    flow.then(spread_duplicate);
                     None
                 }
                 ("ordinary", "struct_adjacent") => {
-                    flow.then_auto(DuplicatePair);
+                    flow.then(DuplicatePair);
                     None
                 }
                 ("ordinary", "struct_spread") => {
-                    flow.then_auto(SpreadDuplicate);
+                    flow.then(SpreadDuplicate);
                     None
                 }
-                ("output", "function_adjacent") => Some(flow.then_auto_output(&same_pair).handle()),
-                ("output", "function_spread") => {
-                    Some(flow.then_auto_output(&spread_duplicate).handle())
-                }
-                ("output", "struct_adjacent") => {
-                    Some(flow.then_auto_output(DuplicatePair).handle())
-                }
-                _ => Some(flow.then_auto_output(SpreadDuplicate).handle()),
+                ("output", "function_adjacent") => Some(flow.then_output(&same_pair).handle()),
+                ("output", "function_spread") => Some(flow.then_output(&spread_duplicate).handle()),
+                ("output", "struct_adjacent") => Some(flow.then_output(DuplicatePair).handle()),
+                _ => Some(flow.then_output(SpreadDuplicate).handle()),
             };
             let after = builder.borrow().next_position_id();
             let steps = builder.borrow().body(root).steps().len();
@@ -984,7 +992,7 @@ fn b05_duplicate_auto_query_is_rejected_by_every_auto_entry() {
 fn b05_duplicate_query_without_sources_still_reports_duplicate_first() {
     let (builder, root, _handles) = builder_with_inputs(&[]);
     let mut flow = open_flow(&builder, root);
-    flow.then_auto(same_pair);
+    flow.then(same_pair);
     drop(flow);
     let errors = builder.borrow().errors().to_vec();
     assert!(
@@ -1006,8 +1014,11 @@ fn b05_duplicate_query_without_sources_still_reports_duplicate_first() {
 fn b05_duplicate_query_rejects_before_any_business_execution() {
     DUP_RUNTIME_RUNS.store(0, Ordering::SeqCst);
     let runtime = Runtime;
-    let error = block_on(runtime.execute(
-        |flow, _input| flow.then_auto_output(&counting_same_pair),
+    let error = block_on(runtime.execute::<_, Key, _>(
+        |flow, _input| {
+            let out_refs = flow.then_output(&counting_same_pair);
+            flow.output_with(out_refs);
+        },
         (Amount(1), Amount(2)),
     ))
     .expect_err("duplicate automatic query must fail the Definition");
@@ -1055,12 +1066,13 @@ fn b06_explicit_same_type_inputs_stay_legal() {
 
     // 普通形式与取输出形式都运行；两份不同来源取自 Root 双参数（同一 Ref 重复只读借用）。
     let runtime = Runtime;
-    let (pair_ab, pair_aa) = block_on(runtime.execute(
+    let (pair_ab, pair_aa) = block_on(runtime.execute::<_, (Key, Key), _>(
         |flow, (first, second)| {
             let distinct = flow.then_with_output(&same_pair, (first, second));
             let repeated = flow.then_with_output(&same_pair, (first, first));
             flow.then_with(same_pair, (second, first));
-            (distinct, repeated)
+            let out_refs = (distinct, repeated);
+            flow.output_with(out_refs);
         },
         (Amount(1), Amount(2)),
     ))
@@ -1078,7 +1090,7 @@ fn b07_duplicate_failure_is_isolated_and_not_repaired_later() {
     let definition_id = builder.borrow().definition_id();
     let before = builder.borrow().next_position_id();
     let mut flow = open_flow(&builder, root);
-    let failed = flow.then_auto_output(&same_pair);
+    let failed = flow.then_output(&same_pair);
     let failed_handle = failed.handle();
     assert_eq!(
         builder.borrow().next_position_id(),
@@ -1115,7 +1127,7 @@ fn b07_partial_missing_source_publishes_no_half_result() {
     let before = builder.borrow().next_position_id();
     let mut flow = open_flow(&builder, root);
     // 双槽函数：Amount 槽可解析、Doubled 槽无来源。
-    let failed = flow.then_auto_output(&combine);
+    let failed = flow.then_output(&combine);
     let failed_handle = failed.handle();
     assert!(builder.borrow().body(root).steps().is_empty());
     assert_eq!(
@@ -1141,10 +1153,11 @@ fn b07_partial_missing_source_publishes_no_half_result() {
 #[test]
 fn b07_old_root_finish_stays_panic_free_on_failed_output() {
     let runtime = Runtime;
-    let error = block_on(runtime.execute(
+    let error = block_on(runtime.execute::<_, Key, _>(
         |flow, _input| {
             // 旧收尾：失败句柄仍作为 Root 闭包返回值声明输出。
-            flow.then_auto_output(&counting_same_pair)
+            let out_refs = flow.then_output(&counting_same_pair);
+            flow.output_with(out_refs);
         },
         (Amount(1), Amount(1)),
     ))
@@ -1211,13 +1224,14 @@ fn b08_short_borrow_non_send_and_await_borrow_stay_usable() {
     let local = std::cell::Cell::new(0u32);
     let shared = Rc::new(std::cell::Cell::new(0u32));
     let runtime = Runtime;
-    let value = block_on(runtime.execute(
+    let value = block_on(runtime.execute::<_, Counted, _>(
         |flow, _input| {
             let node = BorrowingNode {
                 counter: &local,
                 shared: Rc::clone(&shared),
             };
-            flow.then_auto_output(node)
+            let out_refs = flow.then_output(node);
+            flow.output_with(out_refs);
         },
         Amount(5),
     ))
@@ -1248,12 +1262,13 @@ async fn read_rc_cell(query: Query<&RcCell>) -> Result<Key, BodyError> {
 fn b08_non_send_data_runs_through_auto_entries() {
     let cell = Rc::new(std::cell::Cell::new(1u32));
     let runtime = Runtime;
-    let (bumped, read) = block_on(runtime.execute(
+    let (bumped, read) = block_on(runtime.execute::<_, (RcCell, Key), _>(
         |flow, _input| {
             // 非 Send Data（含 Rc）作为自动输入与输出；后一步按最近来源读同一份数据。
-            let bumped = flow.then_auto_output(&bump_rc_cell);
-            let read = flow.then_auto_output(&read_rc_cell);
-            (bumped, read)
+            let bumped = flow.then_output(&bump_rc_cell);
+            let read = flow.then_output(&read_rc_cell);
+            let out_refs = (bumped, read);
+            flow.output_with(out_refs);
         },
         RcCell(Rc::clone(&cell)),
     ))
@@ -1277,8 +1292,11 @@ async fn read_after_pending(query: Query<&Counted>) -> Result<Key, BodyError> {
 #[test]
 fn b08_input_borrow_survives_real_pending_and_is_used_after_resume() {
     let runtime = Runtime;
-    let value = block_on(runtime.execute(
-        |flow, _input| flow.then_auto_output(&read_after_pending),
+    let value = block_on(runtime.execute::<_, Key, _>(
+        |flow, _input| {
+            let out_refs = flow.then_output(&read_after_pending);
+            flow.output_with(out_refs);
+        },
         Counted(41),
     ))
     .expect("borrow across a real Pending should be resumed and used");
@@ -1294,8 +1312,14 @@ fn b08_capturing_async_closure_derives_and_runs() {
         Ok(Key(query.get().0 + captured.get()))
     };
     let runtime = Runtime;
-    let keyed = block_on(runtime.execute(|flow, _input| flow.then_auto_output(node), Amount(5)))
-        .expect("capturing async closure should derive and run");
+    let keyed = block_on(runtime.execute::<_, Key, _>(
+        |flow, _input| {
+            let out_refs = flow.then_output(node);
+            flow.output_with(out_refs);
+        },
+        Amount(5),
+    ))
+    .expect("capturing async closure should derive and run");
     assert_eq!(keyed, Key(12));
     assert_eq!(offset.get(), 7, "capture is read, not consumed");
 }
@@ -1321,12 +1345,13 @@ fn b09_factory_is_not_called_by_building_or_by_unpolled_execute() {
 
     // 未 poll 时既不构建也不调用。
     let runtime = Runtime;
-    let future = runtime.execute(
+    let future = runtime.execute::<_, Counted, _>(
         |flow, _input| {
             BUILD_CALLS.fetch_add(1, Ordering::SeqCst);
             flow.provide(counting_factory);
 
-            flow.provide_output(counting_factory)
+            let out_refs = flow.provide_output(counting_factory);
+            flow.output_with(out_refs);
         },
         (),
     );
@@ -1356,12 +1381,13 @@ fn b09_factory_runs_at_its_step_only_and_returns_fresh_owned_data() {
     DROP_LOG.with(|log| log.borrow_mut().clear());
     FACTORY_CALLS.store(0, Ordering::SeqCst);
     let runtime = Runtime;
-    block_on(runtime.execute(
+    block_on(runtime.execute::<_, (), _>(
         |flow, _input| {
             // 普通形式与取 Ref 形式各执行一步，各自创建新的 owned Data。
             flow.provide(counting_factory);
             let _ = flow.provide_output(counting_factory);
-            ()
+            let () = ();
+            flow.output_with(());
         },
         (),
     ))
@@ -1436,11 +1462,12 @@ fn b09_factory_order_is_before_and_after_other_steps() {
         Ok(())
     };
     let runtime = Runtime;
-    let _ = block_on(runtime.execute(
+    let _ = block_on(runtime.execute::<_, (), _>(
         |flow, _input| {
-            let _ = flow.then_auto_output(before);
+            let _ = flow.then_output(before);
             let _ = flow.provide_output(factory);
-            ()
+            let () = ();
+            flow.output_with(());
         },
         (),
     ))
@@ -1467,13 +1494,14 @@ fn b13_legal_fn_forms_capture_and_repeat() {
         Counted(cloned.get())
     };
     let runtime = Runtime;
-    block_on(runtime.execute(
+    block_on(runtime.execute::<_, (), _>(
         |flow, _input| {
             // 借用捕获、Rc/Cell 非 Send 依赖与显式构造新值的合法业务代码。
             flow.provide(borrowed);
             flow.provide(borrowed);
             flow.provide(shared_factory);
-            ()
+            let () = ();
+            flow.output_with(());
         },
         (),
     ))
@@ -1498,11 +1526,12 @@ fn b13_capture_and_returned_data_lifetimes_are_separate() {
             let _ = &capture;
             Counted(7)
         };
-        block_on(runtime.execute(
+        block_on(runtime.execute::<_, (), _>(
             |flow, _input| {
                 flow.provide(&factory);
                 flow.provide(&factory);
-                ()
+                let () = ();
+                flow.output_with(());
             },
             (),
         ))
@@ -1537,19 +1566,21 @@ static CAPTURE_DROPS: AtomicUsize = AtomicUsize::new(0);
 #[test]
 fn b14_chained_auto_provide_and_explicit_steps_run_in_order() {
     let runtime = Runtime;
-    let (chained, from_factory, explicit_again) = block_on(runtime.execute(
-        |flow, (amount, _plain)| {
-            // 连续链式登记：自动（普通形式）→ 显式；两步各自按自身 Query 选择输入。
-            let chained = flow
-                .then_auto(add_one)
-                .then_with_output(&key_from_amount, amount);
-            let chained_again = flow.provide_output(|| Key(1));
-            let explicit = flow.then_with_output(&key_from_amount, amount);
-            (chained, chained_again, explicit)
-        },
-        (Amount(1), Plain(2)),
-    ))
-    .expect("chained auto/provide/explicit steps should run");
+    let (chained, from_factory, explicit_again) =
+        block_on(runtime.execute::<_, (Key, Key, Key), _>(
+            |flow, (amount, _plain)| {
+                // 连续链式登记：自动（普通形式）→ 显式；两步各自按自身 Query 选择输入。
+                let chained = flow
+                    .then(add_one)
+                    .then_with_output(&key_from_amount, amount);
+                let chained_again = flow.provide_output(|| Key(1));
+                let explicit = flow.then_with_output(&key_from_amount, amount);
+                let out_refs = (chained, chained_again, explicit);
+                flow.output_with(out_refs);
+            },
+            (Amount(1), Plain(2)),
+        ))
+        .expect("chained auto/provide/explicit steps should run");
     assert_eq!(chained, Key(1), "explicit step reads the connected source");
     assert_eq!(from_factory, Key(1));
     assert_eq!(explicit_again, Key(1));
@@ -1559,7 +1590,7 @@ fn b14_chained_auto_provide_and_explicit_steps_run_in_order() {
         builder_with_inputs(&[TypeDesc::of::<Amount>(), TypeDesc::of::<Plain>()]);
     let amount = Ref::<Amount>::from_handle(handles[0]);
     let mut flow = open_flow(&builder, root);
-    let _ = flow.then_auto_output(&add_one);
+    let _ = flow.then_output(&add_one);
     let _ = flow.provide_output(|| Key(1));
     let _ = flow.then_with_output(&key_from_amount, amount);
     drop(flow);

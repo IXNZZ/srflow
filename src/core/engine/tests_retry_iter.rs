@@ -148,12 +148,13 @@ fn reset_observations() {
 fn e10_retry_exhausted_keeps_fields_and_last_dynamic_reason() {
     reset_observations();
     let runtime = Runtime::new();
-    let outcome = block_on(runtime.execute(
+    let outcome = block_on(runtime.execute::<_, Report, _>(
         |flow: &mut crate::core::engine::flow::Flow<'_>, prompt: Ref<Prompt>| {
-            flow.retry(1, |attempt| {
-                let candidate = attempt.then(&generate, prompt);
-                attempt.then(&judge_always_retrying, candidate)
-            })
+            let out_refs = flow.retry(1, |attempt| {
+                let candidate = attempt.then_with_output(&generate, prompt);
+                attempt.then_with_output(&judge_always_retrying, candidate)
+            });
+            flow.output_with(out_refs);
         },
         Prompt(0),
     ));
@@ -182,15 +183,16 @@ fn e07_e09_attempts_reuse_original_dependency_and_clean_the_previous_one() {
     let seed = Seed {
         log: Rc::clone(&log),
     };
-    let report = block_on(runtime.execute(
+    let report = block_on(runtime.execute::<_, (Report, Tracked), _>(
         |flow: &mut crate::core::engine::flow::Flow<'_>,
          (seed, prompt, attempts): (Ref<Seed>, Ref<Prompt>, Ref<Attempts>)| {
-            flow.retry(3, |attempt| {
-                let tracked = attempt.then(&track, seed);
-                let candidate = attempt.then(&generate_counted, (prompt, attempts));
-                let report = attempt.then(&judge_retrying, candidate);
+            let out_refs = flow.retry(3, |attempt| {
+                let tracked = attempt.then_with_output(&track, seed);
+                let candidate = attempt.then_with_output(&generate_counted, (prompt, attempts));
+                let report = attempt.then_with_output(&judge_retrying, candidate);
                 (report, tracked)
-            })
+            });
+            flow.output_with(out_refs);
         },
         (seed, Prompt(0), Attempts(Rc::new(std::cell::Cell::new(0)))),
     ));
@@ -222,18 +224,19 @@ fn e07_e09_attempts_reuse_original_dependency_and_clean_the_previous_one() {
 fn e13_iter_break_delivers_the_entry_current_of_that_round() {
     reset_observations();
     let runtime = Runtime::new();
-    let outcome = block_on(runtime.execute(
+    let outcome = block_on(runtime.execute::<_, (Draft, Context), _>(
         |flow: &mut crate::core::engine::flow::Flow<'_>, (draft, context)| {
-            flow.iter(
+            let out_refs = flow.iter(
                 (draft, context),
                 5,
                 |(current_draft, current_context), round| {
-                    round.then(&judge_until_break, current_context);
-                    let next_draft = round.then(&revise, current_draft);
-                    let next_context = round.then(&bump, current_context);
+                    round.then_with_output(&judge_until_break, current_context);
+                    let next_draft = round.then_with_output(&revise, current_draft);
+                    let next_context = round.then_with_output(&bump, current_context);
                     (next_draft, next_context)
                 },
-            )
+            );
+            flow.output_with(out_refs);
         },
         (Draft(String::from("s0")), Context(0)),
     ));
@@ -247,18 +250,19 @@ fn e13_iter_break_delivers_the_entry_current_of_that_round() {
 fn e14_e17_first_round_break_returns_the_original_state_unchanged() {
     reset_observations();
     let runtime = Runtime::new();
-    let outcome = block_on(runtime.execute(
+    let outcome = block_on(runtime.execute::<_, (Draft, Context), _>(
         |flow: &mut crate::core::engine::flow::Flow<'_>, (draft, context)| {
-            flow.iter(
+            let out_refs = flow.iter(
                 (draft, context),
                 1,
                 |(current_draft, current_context), round| {
-                    round.then(&judge_until_break, current_context);
+                    round.then_with_output(&judge_until_break, current_context);
                     // same-target：一个槽保持 current 不变，另一个槽推进。
-                    let _next_draft = round.then(&revise, current_draft);
+                    let _next_draft = round.then_with_output(&revise, current_draft);
                     (current_draft, current_context)
                 },
-            )
+            );
+            flow.output_with(out_refs);
         },
         (Draft(String::from("keep")), Context(9)),
     ));
@@ -272,18 +276,19 @@ fn e14_e17_first_round_break_returns_the_original_state_unchanged() {
 fn e15_round_limit_promotes_the_last_round_then_reports_completed_iterations() {
     reset_observations();
     let runtime = Runtime::new();
-    let outcome = block_on(runtime.execute(
+    let outcome = block_on(runtime.execute::<_, (Draft, Context), _>(
         |flow: &mut crate::core::engine::flow::Flow<'_>, (draft, context)| {
-            flow.iter(
+            let out_refs = flow.iter(
                 (draft, context),
                 2,
                 |(current_draft, current_context), round| {
-                    round.then(&judge_continue, current_context);
-                    let next_draft = round.then(&revise, current_draft);
-                    let next_context = round.then(&bump, current_context);
+                    round.then_with_output(&judge_continue, current_context);
+                    let next_draft = round.then_with_output(&revise, current_draft);
+                    let next_context = round.then_with_output(&bump, current_context);
                     (next_draft, next_context)
                 },
-            )
+            );
+            flow.output_with(out_refs);
         },
         (Draft(String::from("r")), Context(0)),
     ));
@@ -314,13 +319,14 @@ fn e15_round_limit_promotes_the_last_round_then_reports_completed_iterations() {
 fn e12_retry_does_not_capture_iter_break() {
     reset_observations();
     let runtime = Runtime::new();
-    let outcome = block_on(runtime.execute(
+    let outcome = block_on(runtime.execute::<_, Candidate, _>(
         |flow: &mut crate::core::engine::flow::Flow<'_>, prompt: Ref<Prompt>| {
-            flow.retry(3, |attempt| {
-                let candidate = attempt.then(&generate, prompt);
-                let _ = attempt.then(&judge_break, candidate);
+            let out_refs = flow.retry(3, |attempt| {
+                let candidate = attempt.then_with_output(&generate, prompt);
+                let _ = attempt.then_with_output(&judge_break, candidate);
                 candidate
-            })
+            });
+            flow.output_with(out_refs);
         },
         Prompt(0),
     ));
@@ -336,9 +342,12 @@ fn e12_retry_does_not_capture_iter_break() {
 #[test]
 fn e02_retry_budget_max_is_rejected_at_build_time() {
     let runtime = Runtime::new();
-    let outcome = block_on(runtime.execute(
+    let outcome = block_on(runtime.execute::<_, Candidate, _>(
         |flow: &mut crate::core::engine::flow::Flow<'_>, prompt: Ref<Prompt>| {
-            flow.retry(usize::MAX, |attempt| attempt.then(&generate, prompt))
+            let out_refs = flow.retry(usize::MAX, |attempt| {
+                attempt.then_with_output(&generate, prompt)
+            });
+            flow.output_with(out_refs);
         },
         Prompt(0),
     ));
@@ -349,12 +358,13 @@ fn e02_retry_budget_max_is_rejected_at_build_time() {
 #[test]
 fn e02_iter_zero_rounds_is_rejected_at_build_time() {
     let runtime = Runtime::new();
-    let outcome = block_on(runtime.execute(
+    let outcome = block_on(runtime.execute::<_, Context, _>(
         |flow: &mut crate::core::engine::flow::Flow<'_>, context: Ref<Context>| {
-            flow.iter(context, 0, |current, round| {
-                let _ = round.then(&judge_continue, current);
+            let out_refs = flow.iter(context, 0, |current, round| {
+                let _ = round.then_with_output(&judge_continue, current);
                 current
-            })
+            });
+            flow.output_with(out_refs);
         },
         Context(0),
     ));
@@ -423,15 +433,16 @@ fn r01_iter_formal_current_root_output_leak_is_rejected() {
     reset_observations();
     reset_escape_calls();
     let runtime = Runtime::new();
-    let outcome = block_on(runtime.execute(
+    let outcome = block_on(runtime.execute::<_, u32, _>(
         |flow: &mut Flow<'_>, initial: Ref<u32>| {
             let mut escaped: Option<Ref<u32>> = None;
             let _output = flow.iter(initial, 1, |current, round| {
                 escaped = Some(current);
-                round.then(&count_and_break, current);
+                round.then_with_output(&count_and_break, current);
                 current
             });
-            escaped.expect("captured formal current")
+            let out_refs = escaped.expect("captured formal current");
+            flow.output_with(out_refs);
         },
         11u32,
     ));
@@ -463,17 +474,18 @@ fn r01_iter_formal_current_parent_step_use_is_rejected() {
     reset_observations();
     reset_escape_calls();
     let runtime = Runtime::new();
-    let outcome = block_on(runtime.execute(
+    let outcome = block_on(runtime.execute::<_, u32, _>(
         |flow: &mut Flow<'_>, initial: Ref<u32>| {
-            flow.chain(|sub| {
+            let out_refs = flow.chain(|sub| {
                 let mut escaped: Option<Ref<u32>> = None;
                 let _output = sub.iter(initial, 1, |current, round| {
                     escaped = Some(current);
-                    round.then(&count_and_break, current);
+                    round.then_with_output(&count_and_break, current);
                     current
                 });
-                sub.then(&consume_u32, escaped.expect("captured formal current"))
-            })
+                sub.then_with_output(&consume_u32, escaped.expect("captured formal current"))
+            });
+            flow.output_with(out_refs);
         },
         11u32,
     ));
@@ -505,18 +517,19 @@ fn r01_iter_formal_current_sibling_use_is_rejected() {
     reset_observations();
     reset_escape_calls();
     let runtime = Runtime::new();
-    let outcome = block_on(runtime.execute(
+    let outcome = block_on(runtime.execute::<_, u32, _>(
         |flow: &mut Flow<'_>, initial: Ref<u32>| {
             let mut escaped: Option<Ref<u32>> = None;
             let _first = flow.chain(|sub| {
                 sub.iter(initial, 1, |current, round| {
                     escaped = Some(current);
-                    round.then(&count_and_break, current);
+                    round.then_with_output(&count_and_break, current);
                     current
                 })
             });
             let sibling_local = escaped.expect("captured formal current");
-            flow.chain(move |sub| sub.then(&consume_u32, sibling_local))
+            let out_refs = flow.chain(move |sub| sub.then_with_output(&consume_u32, sibling_local));
+            flow.output_with(out_refs);
         },
         11u32,
     ));
@@ -548,13 +561,14 @@ fn r01_iter_round_captures_ancestor_ref_legally() {
     reset_observations();
     reset_escape_calls();
     let runtime = Runtime::new();
-    let outcome = block_on(runtime.execute(
+    let outcome = block_on(runtime.execute::<_, u32, _>(
         |flow: &mut Flow<'_>, (initial, external): (Ref<u32>, Ref<u32>)| {
-            flow.iter(initial, 2, |current, round| {
-                round.then(&read_pair, (current, external));
-                round.then(&count_and_break, current);
+            let out_refs = flow.iter(initial, 2, |current, round| {
+                round.then_with_output(&read_pair, (current, external));
+                round.then_with_output(&count_and_break, current);
                 current
-            })
+            });
+            flow.output_with(out_refs);
         },
         (11u32, 7u32),
     ));
@@ -573,13 +587,14 @@ fn r01_iter_round_captures_ancestor_ref_legally() {
 fn r02_iter_duplicate_initial_is_deduplicated_but_slots_stay_distinct() {
     reset_observations();
     let runtime = Runtime::new();
-    let outcome = block_on(runtime.execute(
+    let outcome = block_on(runtime.execute::<_, u32, _>(
         |flow: &mut Flow<'_>, initial: Ref<u32>| {
             let output = flow.iter((initial, initial), 1, |(left, right), round| {
-                round.then(&break_pair, (left, right));
+                round.then_with_output(&break_pair, (left, right));
                 (left, right)
             });
-            output.0
+            let out_refs = output.0;
+            flow.output_with(out_refs);
         },
         11u32,
     ));
@@ -589,12 +604,13 @@ fn r02_iter_duplicate_initial_is_deduplicated_but_slots_stay_distinct() {
     );
 
     // 逐槽身份：Definition 为两个 state 槽各登记一个 IterCurrent，同属一个 round Body。
-    let definition = build_definition::<u32, _, _>(|flow: &mut Flow<'_>, initial: Ref<u32>| {
+    let definition = build_definition::<u32, u32, _>(|flow: &mut Flow<'_>, initial: Ref<u32>| {
         let output = flow.iter((initial, initial), 1, |(left, right), round| {
-            round.then(&break_pair, (left, right));
+            round.then_with_output(&break_pair, (left, right));
             (left, right)
         });
-        output.0
+        let out_refs = output.0;
+        flow.output_with(out_refs);
     })
     .expect("legal shared-initial definition builds");
     let currents: Vec<_> = definition
@@ -625,13 +641,14 @@ fn r02_iter_duplicate_initial_is_deduplicated_but_slots_stay_distinct() {
 fn r02_iter_round_may_capture_initial_alongside_current() {
     reset_observations();
     let runtime = Runtime::new();
-    let outcome = block_on(runtime.execute(
+    let outcome = block_on(runtime.execute::<_, u32, _>(
         |flow: &mut Flow<'_>, initial: Ref<u32>| {
-            flow.iter(initial, 1, |current, round| {
-                round.then(&assert_same, (current, initial));
-                round.then(&count_and_break, current);
+            let out_refs = flow.iter(initial, 1, |current, round| {
+                round.then_with_output(&assert_same, (current, initial));
+                round.then_with_output(&count_and_break, current);
                 current
-            })
+            });
+            flow.output_with(out_refs);
         },
         11u32,
     ));
@@ -647,12 +664,13 @@ fn r02_iter_round_may_capture_initial_alongside_current() {
 fn r02_iter_distinct_same_type_initial_slots_are_not_merged() {
     reset_observations();
     let runtime = Runtime::new();
-    let outcome = block_on(runtime.execute(
+    let outcome = block_on(runtime.execute::<_, (u32, u32), _>(
         |flow: &mut Flow<'_>, (left, right): (Ref<u32>, Ref<u32>)| {
-            flow.iter((left, right), 1, |(current_left, current_right), round| {
-                round.then(&break_two, (current_left, current_right));
+            let out_refs = flow.iter((left, right), 1, |(current_left, current_right), round| {
+                round.then_with_output(&break_two, (current_left, current_right));
                 (current_left, current_right)
-            })
+            });
+            flow.output_with(out_refs);
         },
         (3u32, 5u32),
     ));
@@ -701,12 +719,13 @@ fn e27a_retry_round_cleanup_fault_is_runtime_and_stops_attempts() {
     E27A_ATTEMPTS.store(0, Ordering::SeqCst);
     install_retry_round_cleanup_fault();
     let runtime = Runtime::new();
-    let outcome = block_on(runtime.execute(
+    let outcome = block_on(runtime.execute::<_, Report, _>(
         |flow: &mut Flow<'_>, prompt: Ref<Prompt>| {
-            flow.retry(3, |attempt| {
-                let candidate = attempt.then(&counted_generate, prompt);
-                attempt.then(&judge_always_retrying, candidate)
-            })
+            let out_refs = flow.retry(3, |attempt| {
+                let candidate = attempt.then_with_output(&counted_generate, prompt);
+                attempt.then_with_output(&judge_always_retrying, candidate)
+            });
+            flow.output_with(out_refs);
         },
         Prompt(0),
     ));
@@ -876,19 +895,20 @@ fn e27b_iter_break_delivery_cleanup_fault_does_not_deliver_current() {
     E27B_BUSINESS.store(0, Ordering::SeqCst);
     install_iter_delivery_cleanup_fault();
     let runtime = Runtime::new();
-    let outcome = block_on(runtime.execute(
+    let outcome = block_on(runtime.execute::<_, (Draft, Context), _>(
         |flow: &mut Flow<'_>, (draft, context): (Ref<Draft>, Ref<Context>)| {
-            flow.iter(
+            let out_refs = flow.iter(
                 (draft, context),
                 3,
                 |(current_draft, current_context), round| {
                     // 先产生本轮 next（未接受），再发出 IterBreak。
-                    let next_draft = round.then(&counted_revise, current_draft);
-                    let next_context = round.then(&bump, current_context);
-                    round.then(&judge_break_ctx, current_context);
+                    let next_draft = round.then_with_output(&counted_revise, current_draft);
+                    let next_context = round.then_with_output(&bump, current_context);
+                    round.then_with_output(&judge_break_ctx, current_context);
                     (next_draft, next_context)
                 },
-            )
+            );
+            flow.output_with(out_refs);
         },
         (Draft(String::from("s0")), Context(0)),
     ));

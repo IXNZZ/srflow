@@ -73,10 +73,11 @@ async fn consume_sixteen(
 #[test]
 fn tuple_root_inputs_support_three_positions() {
     let runtime = Runtime::new();
-    let (first, second, third) = block_on(runtime.execute::<(u8, u16, u32), _, _>(
+    let (first, second, third) = block_on(runtime.execute::<(u8, u16, u32), (u8, u16, u32), _>(
         |flow, refs| {
-            let _: () = flow.then(consume_three, refs);
-            refs
+            let _: () = flow.then_with_output(consume_three, refs);
+            let out_refs = refs;
+            flow.output_with(out_refs);
         },
         (1u8, 2u16, 3u32),
     ))
@@ -105,10 +106,28 @@ fn tuple_root_inputs_support_sixteen_positions() {
         char,
         f32,
         f64,
-    ), _, _>(
+    ), (
+        u8,
+        u16,
+        u32,
+        u64,
+        u128,
+        usize,
+        i8,
+        i16,
+        i32,
+        i64,
+        i128,
+        isize,
+        bool,
+        char,
+        f32,
+        f64,
+    ), _>(
         |flow, refs| {
-            let _: () = flow.then(consume_sixteen, refs);
-            refs
+            let _: () = flow.then_with_output(consume_sixteen, refs);
+            let out_refs = refs;
+            flow.output_with(out_refs);
         },
         (
             1u8, 2u16, 3u32, 4u64, 5u128, 6usize, 7i8, 8i16, 9i32, 10i64, 11i128, 12isize, true,

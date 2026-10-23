@@ -78,23 +78,25 @@ impl Runtime {
 
     /// 执行一次 Definition：构建 → 验证 → 运行 Node／Chain／Choose／Retry／Iter → 整组提取 owned 输出。
     ///
+    /// `Out` 是调用方期望的 **owned** 根输出类型（`Out: RootInput<Owned = Out>`）；业务输出
+    /// 由定义闭包内 [`Flow::output`]／[`Flow::output_with`] 声明，闭包固定返回 `()`，其两参数
+    /// 为 [`Flow`] 与 owned 输入对应的 RefShape。无现成类型上下文时可写
+    /// `execute::<_, Report, _>(…)`。
+    ///
     /// 顺序为“Definition 构建与验证 → Root 输入登记 → Root frame 内顺序执行 → 冻结／
     /// 整组预检 → 同步 take 并解除 Root 责任 → 关闭 Root”。任何一步失败都不返回部分
     /// owned 输出；构建失败不建立 RootExecution，也不执行任何业务 Node。
     #[allow(private_bounds)]
-    pub async fn execute<'n, In, F, Out>(
-        &self,
-        definition: F,
-        input: In,
-    ) -> Result<Out::Owned, RunError>
+    pub async fn execute<'n, In, Out, F>(&self, definition: F, input: In) -> Result<Out, RunError>
     where
         In: RootInput + RootInputOps + InputOps,
-        In::Refs: ShapeOps + RefShape,
-        Out: RefShape + ShapeOps,
-        F: FnOnce(&mut Flow<'n>, In::Refs) -> Out,
+        In::Refs: ShapeOps,
+        Out: RootInput<Owned = Out>,
+        Out::Refs: ShapeOps + RefShape<Owned = Out>,
+        F: FnOnce(&mut Flow<'n>, In::Refs),
     {
         // 1) Definition：本次 Future 第一次被驱动时同步构建并验证。
-        let built = build_definition::<In, F, Out>(definition)
+        let built = build_definition::<In, Out, F>(definition)
             .map_err(|detail| RunError::Definition(BuildError::new(detail)))?;
 
         // 2) 新 Execution 与 owned Root 输入登记：只走正式 register_owned_erased；
@@ -208,7 +210,8 @@ impl Runtime {
 
         // 4) 收口：首错与首清理诊断分别保留，互不覆盖。
         match failure {
-            None => Ok(<Out as ShapeOps>::from_owned(&mut values.into_iter())),
+            // 由期望的 owned Out 对应的 RefShape 复用既有 typed 提取：整组预检 → take → 组装。
+            None => Ok(<Out::Refs as ShapeOps>::from_owned(&mut values.into_iter())),
             Some(failure) => Err(into_run_error(
                 failure,
                 execution.context().cleanup_report(),

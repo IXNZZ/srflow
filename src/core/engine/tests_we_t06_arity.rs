@@ -111,20 +111,30 @@ fn reset() {
 fn each_eight_slot_body_output_runs_with_distinct_collector_identities() {
     reset();
     let runtime = Runtime::new();
-    let outcome = block_on(runtime.execute(
+    let outcome = block_on(runtime.execute::<_, (
+        Vec<Out>,
+        Vec<Out>,
+        Vec<Out>,
+        Vec<Out>,
+        Vec<Out>,
+        Vec<Out>,
+        Vec<Out>,
+        Vec<Out>,
+    ), _>(
         |flow: &mut Flow<'_>, items: Ref<Vec<Item>>| {
-            flow.each(items, |item, sub| {
+            let out_refs = flow.each(items, |item, sub| {
                 (
-                    sub.then(slot1, item),
-                    sub.then(slot2, item),
-                    sub.then(slot3, item),
-                    sub.then(slot4, item),
-                    sub.then(slot5, item),
-                    sub.then(slot6, item),
-                    sub.then(slot7, item),
-                    sub.then(slot8, item),
+                    sub.then_with_output(slot1, item),
+                    sub.then_with_output(slot2, item),
+                    sub.then_with_output(slot3, item),
+                    sub.then_with_output(slot4, item),
+                    sub.then_with_output(slot5, item),
+                    sub.then_with_output(slot6, item),
+                    sub.then_with_output(slot7, item),
+                    sub.then_with_output(slot8, item),
                 )
-            })
+            });
+            flow.output_with(out_refs);
         },
         vec![Item(3), Item(5), Item(7)],
     ));
@@ -179,7 +189,10 @@ fn generic_derive_data_wrapper_is_a_real_leaf_from_root_input_to_root_output() {
     let dropped = Rc::new(Cell::new(0usize));
     let runtime = Runtime::new();
     let outcome: Result<Wrapper<Payload>, RunError> = block_on(runtime.execute(
-        |flow, input: Ref<Wrapper<Payload>>| flow.then(bump_wrapper, input),
+        |flow, input: Ref<Wrapper<Payload>>| {
+            let out_refs = flow.then_with_output(bump_wrapper, input);
+            flow.output_with(out_refs);
+        },
         Wrapper(Payload::new(41, &created, &dropped)),
     ));
     let output = outcome.expect("generic derive(Data) wrapper runs as a real data leaf");
@@ -210,9 +223,12 @@ fn generic_derive_data_wrapper_is_a_real_leaf_from_root_input_to_root_output() {
 fn generic_derive_data_wrapper_aggregates_as_each_collection_elements() {
     reset();
     let runtime = Runtime::new();
-    let outcome = block_on(runtime.execute(
+    let outcome = block_on(runtime.execute::<_, Vec<Wrapper<u32>>, _>(
         |flow: &mut Flow<'_>, items: Ref<Vec<Wrapper<u32>>>| {
-            flow.each(items, |item, sub| sub.then(double_wrapper, item))
+            let out_refs = flow.each(items, |item, sub| {
+                sub.then_with_output(double_wrapper, item)
+            });
+            flow.output_with(out_refs);
         },
         vec![Wrapper(3u32), Wrapper(5u32), Wrapper(7u32)],
     ));

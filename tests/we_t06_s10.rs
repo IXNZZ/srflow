@@ -353,13 +353,15 @@ async fn scheme_a(runtime: &Runtime, nodes: &Nodes, input: SesInput) -> Result<P
     runtime
         .execute(
             |flow: &mut Flow<'_>, (characters, facts, task, boundary)| {
-                let basis = flow.then(&nodes.basis, (characters, facts, task, boundary));
+                let basis =
+                    flow.then_with_output(&nodes.basis, (characters, facts, task, boundary));
                 let draft = flow.chain(|writing| {
-                    let plan = writing.then(make_plan, (characters, facts, task));
-                    writing.then(&nodes.write, (plan, characters, facts, boundary))
+                    let plan = writing.then_with_output(make_plan, (characters, facts, task));
+                    writing.then_with_output(&nodes.write, (plan, characters, facts, boundary))
                 });
-                let diagnosis = flow.then(&nodes.diagnose, (draft, basis));
-                flow.then(&nodes.revise, (draft, diagnosis, boundary))
+                let diagnosis = flow.then_with_output(&nodes.diagnose, (draft, basis));
+                let out_refs = flow.then_with_output(&nodes.revise, (draft, diagnosis, boundary));
+                flow.output_with(out_refs);
             },
             input,
         )
@@ -378,27 +380,35 @@ async fn scheme_b(
     runtime
         .execute(
             |flow: &mut Flow<'_>, (characters, facts, task, boundary)| {
-                let basis = flow.then(&nodes.basis, (characters, facts, task, boundary));
+                let basis =
+                    flow.then_with_output(&nodes.basis, (characters, facts, task, boundary));
                 let draft = flow.chain(|writing| {
-                    let plan = writing.then(make_plan, (characters, facts, task));
-                    writing.then(&nodes.write, (plan, characters, facts, boundary))
+                    let plan = writing.then_with_output(make_plan, (characters, facts, task));
+                    writing.then_with_output(&nodes.write, (plan, characters, facts, boundary))
                 });
-                flow.iter(draft, limit, |current, round| {
-                    let diagnosis = round.then(&nodes.diagnose, (current, basis));
-                    round.then(&nodes.stop, diagnosis);
-                    let action = round.then(&nodes.choose, diagnosis);
+                let out_refs = flow.iter(draft, limit, |current, round| {
+                    let diagnosis = round.then_with_output(&nodes.diagnose, (current, basis));
+                    round.then_with_output(&nodes.stop, diagnosis);
+                    let action = round.then_with_output(&nodes.choose, diagnosis);
                     round.choose(action, |choice| {
                         choice.case(RevisionAction::Reduce, |branch| {
-                            branch.then(&nodes.reduce, (current, diagnosis, boundary))
+                            branch.then_with_output(&nodes.reduce, (current, diagnosis, boundary))
                         });
                         choice.case(RevisionAction::Supplement, |branch| {
-                            branch.then(&nodes.supplement, (current, diagnosis, task, boundary))
+                            branch.then_with_output(
+                                &nodes.supplement,
+                                (current, diagnosis, task, boundary),
+                            )
                         });
                         choice.case(RevisionAction::Rewrite, |branch| {
-                            branch.then(&nodes.rewrite, (current, diagnosis, characters, facts))
+                            branch.then_with_output(
+                                &nodes.rewrite,
+                                (current, diagnosis, characters, facts),
+                            )
                         });
                     })
-                })
+                });
+                flow.output_with(out_refs);
             },
             input,
         )

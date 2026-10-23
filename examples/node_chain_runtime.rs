@@ -74,9 +74,10 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let report: Report = runtime
         .execute(
             |flow, prompt| {
-                let checked = flow.then(require_prompt, prompt);
-                let draft = flow.then(generate, checked);
-                flow.chain(|sub| sub.then(&review, draft))
+                let checked = flow.then_with_output(require_prompt, prompt);
+                let draft = flow.then_with_output(generate, checked);
+                let out_refs = flow.chain(|sub| sub.then_with_output(&review, draft));
+                flow.output_with(out_refs);
             },
             Prompt(20),
         )
@@ -87,11 +88,12 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     // 失败不返回部分输出：动态业务错误对象经 RunError::Body 保留。
     let runtime = Runtime::new();
     match runtime
-        .execute(
+        .execute::<_, Report, _>(
             |flow, prompt| {
-                let checked = flow.then(require_prompt, prompt);
-                let draft = flow.then(generate, checked);
-                flow.chain(|sub| sub.then(&review, draft))
+                let checked = flow.then_with_output(require_prompt, prompt);
+                let draft = flow.then_with_output(generate, checked);
+                let out_refs = flow.chain(|sub| sub.then_with_output(&review, draft));
+                flow.output_with(out_refs);
             },
             Prompt(0),
         )
@@ -110,13 +112,14 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     // 零输入 Root 保留 `()` 第二参数；unit Chain 同样建立并清理 child 边界。
     let runtime = Runtime::new();
     let () = runtime
-        .execute(
+        .execute::<_, (), _>(
             |flow, ()| {
                 flow.chain(|sub| {
-                    let _: () = sub.then(stamp, ());
+                    let _: () = sub.then_with_output(stamp, ());
                     ()
                 });
-                ()
+                let () = ();
+                flow.output_with(());
             },
             (),
         )

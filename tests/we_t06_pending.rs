@@ -195,15 +195,13 @@ async fn report_of(query: Query<(&Item, &Score)>) -> Result<Report, BodyError> {
 }
 
 /// Each 多输出 Definition：逐项形成 `Ref<Vec<Score>>`／`Ref<Vec<Report>>`。
-fn score_and_report<'n>(
-    flow: &mut Flow<'n>,
-    items: Ref<Vec<Item>>,
-) -> (Ref<Vec<Score>>, Ref<Vec<Report>>) {
-    flow.each(items, |item, each| {
-        let score = each.then(&score_of, item);
-        let report = each.then(&report_of, (item, score));
+fn score_and_report<'n>(flow: &mut Flow<'n>, items: Ref<Vec<Item>>) {
+    let out_refs = flow.each(items, |item, each| {
+        let score = each.then_with_output(&score_of, item);
+        let report = each.then_with_output(&report_of, (item, score));
         (score, report)
-    })
+    });
+    flow.output_with(out_refs);
 }
 
 // ---------------------------------------------------------------- Retry 样本的业务类型
@@ -314,14 +312,12 @@ async fn judge(query: Query<&Candidate>) -> Result<Verdict, BodyError> {
 }
 
 /// Retry Definition：预算 4 次机会，第三个 attempt 成功交付 `(Verdict, Candidate)`。
-fn retry_definition<'n>(
-    flow: &mut Flow<'n>,
-    prompt: Ref<Prompt>,
-) -> (Ref<Verdict>, Ref<Candidate>) {
-    flow.retry(4, |attempt| {
-        let candidate = attempt.then(&generate, prompt);
-        (attempt.then(&judge, candidate), candidate)
-    })
+fn retry_definition<'n>(flow: &mut Flow<'n>, prompt: Ref<Prompt>) {
+    let out_refs = flow.retry(4, |attempt| {
+        let candidate = attempt.then_with_output(&generate, prompt);
+        (attempt.then_with_output(&judge, candidate), candidate)
+    });
+    flow.output_with(out_refs);
 }
 
 // ---------------------------------------------------------------- 样本
@@ -334,7 +330,7 @@ fn x23a_unpolled_execute_future_drops_owned_inputs_exactly_once() {
     let log = log_new();
     reset_body_calls();
 
-    let future = runtime.execute(
+    let future = runtime.execute::<_, (Vec<Score>, Vec<Report>), _>(
         score_and_report,
         vec![Item::new(1, &log), Item::new(2, &log)],
     );
@@ -381,7 +377,7 @@ fn x23b_cancel_at_a_real_pending_point_ends_the_borrow_first_and_drops_each_inst
     let log = log_new();
     reset_body_calls();
 
-    let mut future = Box::pin(runtime.execute(
+    let mut future = Box::pin(runtime.execute::<_, (Vec<Score>, Vec<Report>), _>(
         score_and_report,
         vec![Item::new(1, &log), Item::new(2, &log), Item::new(3, &log)],
     ));
@@ -465,7 +461,7 @@ fn x23b_cancel_at_a_real_pending_point_ends_the_borrow_first_and_drops_each_inst
 
     // 再跑一个无关的完整执行：被取消样本的日志保持冻结。
     let other = log_new();
-    let (scores, reports) = block_on(runtime.execute(
+    let (scores, reports) = block_on(runtime.execute::<_, (Vec<Score>, Vec<Report>), _>(
         score_and_report,
         vec![Item::new(7, &other), Item::new(8, &other)],
     ))
@@ -499,7 +495,9 @@ fn x23c_cancel_inside_a_retry_attempt_ends_the_borrow_first_and_stops_detached_w
     GEN_CALLS.with(|calls| calls.set(0));
     JUDGE_CALLS.with(|calls| calls.set(0));
 
-    let mut future = Box::pin(runtime.execute(retry_definition, Prompt::new(5, &log)));
+    let mut future = Box::pin(
+        runtime.execute::<_, (Verdict, Candidate), _>(retry_definition, Prompt::new(5, &log)),
+    );
     let waker = Waker::noop();
     let mut cx = TaskContext::from_waker(waker);
     assert!(
@@ -584,7 +582,7 @@ fn x23d_a_cancelled_execute_does_not_pollute_the_next_execute() {
 
     // 第一次：在真实 Pending 处取消。
     let log_a = log_new();
-    let mut future = Box::pin(runtime.execute(
+    let mut future = Box::pin(runtime.execute::<_, (Vec<Score>, Vec<Report>), _>(
         score_and_report,
         vec![
             Item::new(1, &log_a),
@@ -608,7 +606,7 @@ fn x23d_a_cancelled_execute_does_not_pollute_the_next_execute() {
 
     // 第二次：同一 Definition 闭包完整执行，第三个项的自唤醒 Pending 正常恢复。
     let log_b = log_new();
-    let (scores, reports) = block_on(runtime.execute(
+    let (scores, reports) = block_on(runtime.execute::<_, (Vec<Score>, Vec<Report>), _>(
         score_and_report,
         vec![
             Item::new(1, &log_b),
@@ -697,7 +695,9 @@ fn x23e_a_retry_definition_completes_after_a_cancelled_attempt() {
     // 取消一次：停在第二个 attempt 的真实 Pending。
     let log_a = log_new();
     ATTEMPT.with(|counter| counter.set(0));
-    let mut future = Box::pin(runtime.execute(retry_definition, Prompt::new(11, &log_a)));
+    let mut future = Box::pin(
+        runtime.execute::<_, (Verdict, Candidate), _>(retry_definition, Prompt::new(11, &log_a)),
+    );
     let waker = Waker::noop();
     let mut cx = TaskContext::from_waker(waker);
     assert!(
@@ -711,8 +711,10 @@ fn x23e_a_retry_definition_completes_after_a_cancelled_attempt() {
     ATTEMPT.with(|counter| counter.set(0));
     GEN_CALLS.with(|calls| calls.set(0));
     JUDGE_CALLS.with(|calls| calls.set(0));
-    let (verdict, candidate) = block_on(runtime.execute(retry_definition, Prompt::new(11, &log_b)))
-        .expect("the retry definition completes after cancellation");
+    let (verdict, candidate) = block_on(
+        runtime.execute::<_, (Verdict, Candidate), _>(retry_definition, Prompt::new(11, &log_b)),
+    )
+    .expect("the retry definition completes after cancellation");
 
     assert_eq!(
         (verdict.attempt, candidate.attempt),

@@ -132,7 +132,7 @@ fn b10_each_runs_one_factory_per_item_with_independent_identity() {
     let collected: Vec<Item> = block_on(runtime.execute(
         |flow, items: Ref<Vec<u32>>| {
             *root_counter.borrow_mut() += 1;
-            flow.each(items, move |item, sub| {
+            let out_refs = flow.each(items, move |item, sub| {
                 *body_counter.borrow_mut() += 1;
                 // item 由旧签名给出；Factory 每项独立构造新的 owned Data。
                 let _ = item;
@@ -141,7 +141,8 @@ fn b10_each_runs_one_factory_per_item_with_independent_identity() {
                     calls.set(calls.get() + 1);
                     Item(calls.get())
                 })
-            })
+            });
+            flow.output_with(out_refs);
         },
         vec![1u32, 2, 3],
     ))
@@ -294,14 +295,15 @@ fn b10_empty_collection_still_builds_the_body_without_factory_calls() {
     let runtime = Runtime;
     let collected: Vec<Item> = block_on(runtime.execute(
         |flow, items: Ref<Vec<u32>>| {
-            flow.each(items, move |_item, sub| {
+            let out_refs = flow.each(items, move |_item, sub| {
                 *body_counter.borrow_mut() += 1;
                 let calls = Rc::clone(&calls);
                 sub.provide_output(move || {
                     calls.set(calls.get() + 1);
                     Item(0)
                 })
-            })
+            });
+            flow.output_with(out_refs);
         },
         Vec::<u32>::new(),
     ))
@@ -329,7 +331,7 @@ fn b11_retry_rebuilds_factory_per_attempt_and_cleans_before_next() {
     let runtime = Runtime;
     let delivered: Item = block_on(runtime.execute(
         |flow, _input| {
-            flow.retry(3, |attempt| {
+            let out_refs = flow.retry(3, |attempt| {
                 let closed_capture = Rc::clone(&closed_capture);
                 let produced = attempt.provide_output(move || {
                     let call = attempt_factory_calls.fetch_add(1, Ordering::SeqCst) + 1;
@@ -342,7 +344,8 @@ fn b11_retry_rebuilds_factory_per_attempt_and_cleans_before_next() {
                 });
                 attempt.then_with_output(&retry_until, produced);
                 produced
-            })
+            });
+            flow.output_with(out_refs);
         },
         (),
     ))
@@ -574,16 +577,17 @@ fn b11_plain_failure_is_never_retried() {
     take_events();
     let factory_calls = AtomicUsize::new(0);
     let runtime = Runtime;
-    let error = block_on(runtime.execute(
+    let error = block_on(runtime.execute::<_, (), _>(
         |flow, _input| {
-            flow.retry(3, |attempt| {
+            let () = flow.retry(3, |attempt| {
                 let produced = attempt.provide_output(|| {
                     factory_calls.fetch_add(1, Ordering::SeqCst);
                     push_event("factory");
                     Item(1)
                 });
                 attempt.then_with_output(&always_fail, produced);
-            })
+            });
+            flow.output_with(());
         },
         (),
     ))
@@ -611,7 +615,8 @@ fn b12_child_factory_registers_in_current_scope_and_exports_owned() {
         |flow, _input| {
             // chain child 内的 Factory：输出经 Export 交给 parent，再作为 Root owned 交付。
             let exported: Ref<Item> = flow.chain(|sub| sub.provide_output(|| Item(9)));
-            exported
+            let out_refs = exported;
+            flow.output_with(out_refs);
         },
         (),
     ))
@@ -707,7 +712,7 @@ fn b12_unselected_branch_never_runs_its_factory() {
     let runtime = Runtime;
     let selected: Item = block_on(runtime.execute(
         |flow, selector: Ref<Route>| {
-            flow.choose(selector, |choice| {
+            let out_refs = flow.choose(selector, |choice| {
                 choice.case(Route(true), |sub| {
                     sub.provide_output(|| {
                         selected_calls.fetch_add(1, Ordering::SeqCst);
@@ -721,7 +726,8 @@ fn b12_unselected_branch_never_runs_its_factory() {
                         Item(2)
                     })
                 })
-            })
+            });
+            flow.output_with(out_refs);
         },
         Route(true),
     ))
@@ -744,14 +750,16 @@ fn b12_step_before_the_factory_failure_skips_it() {
     take_events();
     let factory_calls = AtomicUsize::new(0);
     let runtime = Runtime;
-    let error = block_on(runtime.execute(
+    let error = block_on(runtime.execute::<_, (), _>(
         |flow, _input| {
             // 顺序在前的一个零输入 Node 直接 Failure：其后的 Factory 步不执行。
-            let _: () = flow.then_auto_output(&always_fail_zero);
+            let _: () = flow.then_output(&always_fail_zero);
             flow.provide(|| {
                 factory_calls.fetch_add(1, Ordering::SeqCst);
                 Item(6)
             });
+
+            flow.output_with(());
         },
         (),
     ))
@@ -772,13 +780,15 @@ fn b12_step_before_the_factory_failure_skips_it() {
 fn b12_factory_value_is_cleaned_after_a_failure() {
     take_events();
     let runtime = Runtime;
-    let error = block_on(runtime.execute(
+    let error = block_on(runtime.execute::<_, (), _>(
         |flow, _input| {
             let produced = flow.provide_output(|| {
                 push_event("factory");
                 Item(5)
             });
             flow.then_with_output(&always_fail, produced);
+
+            flow.output_with(());
         },
         (),
     ))
@@ -811,13 +821,15 @@ fn b12_pending_cancel_drops_the_borrowing_future_before_its_data() {
     test_support::reset_observations();
     take_events();
     let runtime = Runtime;
-    let mut future = Box::pin(runtime.execute(
+    let mut future = Box::pin(runtime.execute::<_, (), _>(
         |flow, _input| {
             let produced = flow.provide_output(|| {
                 push_event("factory");
                 Item(4)
             });
             flow.then_with_output(&pending_borrow, produced);
+
+            flow.output_with(());
         },
         (),
     ));

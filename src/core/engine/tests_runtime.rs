@@ -207,10 +207,11 @@ impl Node for Configured<'_> {
 fn b01_spec_minimal_example_returns_43() {
     let runtime = Runtime::new();
     let add = AddOne;
-    let output = block_on(runtime.execute(
+    let output = block_on(runtime.execute::<_, Amount, _>(
         |flow, amount| {
-            let doubled = flow.then(double, amount);
-            flow.chain(|sub| sub.then(&add, doubled))
+            let doubled = flow.then_with_output(double, amount);
+            let out_refs = flow.chain(|sub| sub.then_with_output(&add, doubled));
+            flow.output_with(out_refs);
         },
         Amount(21),
     ))
@@ -234,10 +235,11 @@ fn b02_derive_variants_and_manual_marker_execute() {
 
     // 派生类型可以真实进入数据流（非 Data 字段合法、无 Clone 要求）。
     let runtime = Runtime::new();
-    let output = block_on(runtime.execute(
+    let output = block_on(runtime.execute::<_, Amount, _>(
         |flow, seed| {
-            let doubled = flow.then(double, seed);
-            flow.then(add_one, doubled)
+            let doubled = flow.then_with_output(double, seed);
+            let out_refs = flow.then_with_output(add_one, doubled);
+            flow.output_with(out_refs);
         },
         Amount(1),
     ))
@@ -251,7 +253,7 @@ fn b03_fragment_forms_execute_with_non_static_nodes() {
         node: &'n AddOne,
         input: Ref<Doubled>,
     ) -> impl FnOnce(&mut crate::Flow<'n>) -> Ref<Amount> + 'n {
-        move |sub| sub.then(node, input)
+        move |sub| sub.then_with_output(node, input)
     }
 
     fn call_in_closure<'n>(
@@ -259,17 +261,18 @@ fn b03_fragment_forms_execute_with_non_static_nodes() {
         node: &'n AmountStep,
         input: Ref<Amount>,
     ) -> Ref<Amount> {
-        flow.then(node, input)
+        flow.then_with_output(node, input)
     }
 
     let first_node = AddOne;
     let second_node = AmountStep;
     let runtime = Runtime::new();
-    let output = block_on(runtime.execute(
+    let output = block_on(runtime.execute::<_, Amount, _>(
         |flow, amount| {
-            let doubled = flow.then(double, amount);
+            let doubled = flow.then_with_output(double, amount);
             let first = flow.chain(fragment(&first_node, doubled));
-            flow.chain(|sub| call_in_closure(sub, &second_node, first))
+            let out_refs = flow.chain(|sub| call_in_closure(sub, &second_node, first));
+            flow.output_with(out_refs);
         },
         Amount(20),
     ))
@@ -307,10 +310,10 @@ fn b04_unpolled_future_does_not_build_or_call() {
 
     let runtime = Runtime::new();
     let counter = Arc::clone(&definitions);
-    let future = runtime.execute(
+    let future = runtime.execute::<_, (), _>(
         move |flow, input| {
             counter.fetch_add(1, Ordering::SeqCst);
-            let _: () = flow.then(Counting, input);
+            let _: () = flow.then_with_output(Counting, input);
             ()
         },
         Dropper {
@@ -361,10 +364,11 @@ fn b04_build_failure_yields_definition_error_without_root() {
     // 第一次执行捕获一个外部 Ref，用于在第二次执行的 Definition 中触发拒绝。
     let runtime = Runtime::new();
     let mut leaked: Option<Ref<Dropper>> = None;
-    let _ = block_on(runtime.execute(
+    let _ = block_on(runtime.execute::<_, Dropper, _>(
         |_flow, input| {
             leaked = Some(input);
-            input
+            let out_refs = input;
+            _flow.output_with(out_refs);
         },
         Dropper {
             drops: Arc::clone(&drops),
@@ -378,10 +382,11 @@ fn b04_build_failure_yields_definition_error_without_root() {
     );
 
     let foreign = leaked.expect("captured root ref");
-    let error = block_on(runtime.execute(
+    let error = block_on(runtime.execute::<_, Dropper, _>(
         move |flow, input| {
-            let _ = flow.then(Counting, foreign);
-            input
+            let _ = flow.then_with_output(Counting, foreign);
+            let out_refs = input;
+            flow.output_with(out_refs);
         },
         Dropper {
             drops: Arc::clone(&drops),
@@ -416,10 +421,11 @@ macro_rules! arity_run {
             }
             let input = ($($v,)+);
             let runtime = Runtime::new();
-            let output = block_on(runtime.execute::<($($t,)+), _, _>(
+            let output = block_on(runtime.execute::<($($t,)+), ($($t,)+), _>(
                 |flow, refs| {
-                    let _: () = flow.then(consume, refs);
-                    refs
+                    let _: () = flow.then_with_output(consume, refs);
+                    let out_refs = refs;
+                    flow.output_with(out_refs);
                 },
                 input,
             ))
@@ -451,12 +457,13 @@ fn b05_unit_root_and_unit_chain_run() {
     let runtime = Runtime::new();
     let output: () = block_on(runtime.execute(
         |flow, ()| {
-            let _: () = flow.then(unit_noop, ());
+            let _: () = flow.then_with_output(unit_noop, ());
             flow.chain(|sub| {
-                let _: () = sub.then(unit_noop, ());
+                let _: () = sub.then_with_output(unit_noop, ());
                 ()
             });
-            ()
+            let () = ();
+            flow.output_with(());
         },
         (),
     ))
@@ -484,11 +491,12 @@ fn b06_non_clone_copy_send_sync_data_and_unit_slot() {
     }
 
     let runtime = Runtime::new();
-    let output = block_on(runtime.execute(
+    let output = block_on(runtime.execute::<_, Tracked, _>(
         |flow, input| {
-            let produced = flow.then(consume_nonsend, input);
-            let _: () = flow.then(unit_noop, ());
-            produced
+            let produced = flow.then_with_output(consume_nonsend, input);
+            let _: () = flow.then_with_output(unit_noop, ());
+            let out_refs = produced;
+            flow.output_with(out_refs);
         },
         NonSend {
             value: 5,
@@ -510,12 +518,13 @@ fn b07_heterogeneous_forms_execute_in_one_body() {
     let function_ref = &double;
 
     let runtime = Runtime::new();
-    let output = block_on(runtime.execute(
+    let output = block_on(runtime.execute::<_, Amount, _>(
         |flow, amount| {
-            let a = flow.then(&configured, amount); // 借用 + 非 static 配置
-            let b = flow.then(function_ref, a); // 函数引用
-            let c = flow.then(Arc::clone(&shared), b); // Arc<Node>
-            flow.then(closure, c) // async closure
+            let a = flow.then_with_output(&configured, amount); // 借用 + 非 static 配置
+            let b = flow.then_with_output(function_ref, a); // 函数引用
+            let c = flow.then_with_output(Arc::clone(&shared), b); // Arc<Node>
+            let out_refs = flow.then_with_output(closure, c);
+            flow.output_with(out_refs); // async closure
         },
         Amount(1),
     ))
@@ -548,10 +557,11 @@ fn b08_query_borrow_survives_real_pending() {
     }
 
     let runtime = Runtime::new();
-    let output = block_on(runtime.execute(
+    let output = block_on(runtime.execute::<_, Amount, _>(
         |flow, amount| {
-            let doubled = flow.then(pending_node, amount);
-            flow.then(add_one, doubled)
+            let doubled = flow.then_with_output(pending_node, amount);
+            let out_refs = flow.then_with_output(add_one, doubled);
+            flow.output_with(out_refs);
         },
         Amount(41),
     ))
@@ -586,12 +596,13 @@ fn b09_steps_run_strictly_in_order() {
     }
 
     let runtime = Runtime::new();
-    let output = block_on(runtime.execute(
+    let output = block_on(runtime.execute::<_, (), _>(
         |flow, amount| {
-            let stepped = flow.then(first, amount);
-            let _: () = flow.then(second, stepped);
-            let _unused = flow.then(first, amount);
-            ()
+            let stepped = flow.then_with_output(first, amount);
+            let _: () = flow.then_with_output(second, stepped);
+            let _unused = flow.then_with_output(first, amount);
+            let () = ();
+            flow.output_with(());
         },
         Amount(1),
     ))
@@ -616,8 +627,12 @@ fn b09_steps_run_strictly_in_order() {
 fn b10_single_context_coordinator_and_container_per_execution() {
     let before = creation_counts::snapshot();
     let runtime = Runtime::new();
-    let output = block_on(runtime.execute(
-        |flow, seed| flow.chain(|sub| sub.chain(|inner| inner.then(seed_reader, seed))),
+    let output = block_on(runtime.execute::<_, Amount, _>(
+        |flow, seed| {
+            let out_refs =
+                flow.chain(|sub| sub.chain(|inner| inner.then_with_output(seed_reader, seed)));
+            flow.output_with(out_refs);
+        },
         Seed {
             value: 41,
             log: Log::new(),
@@ -645,8 +660,12 @@ fn b10_single_context_coordinator_and_container_per_execution() {
 fn b11_deep_capture_reads_the_real_value() {
     let log = Log::new();
     let runtime = Runtime::new();
-    let output = block_on(runtime.execute(
-        |flow, seed| flow.chain(|outer| outer.chain(|inner| inner.then(seed_reader, seed))),
+    let output = block_on(runtime.execute::<_, Amount, _>(
+        |flow, seed| {
+            let out_refs =
+                flow.chain(|outer| outer.chain(|inner| inner.then_with_output(seed_reader, seed)));
+            flow.output_with(out_refs);
+        },
         Seed {
             value: 41,
             log: log.clone(),
@@ -665,14 +684,15 @@ fn b11_deep_capture_reads_the_real_value() {
 fn b12_chain_temporaries_drop_before_the_next_parent_step() {
     let log = Log::new();
     let runtime = Runtime::new();
-    let output = block_on(runtime.execute(
+    let output = block_on(runtime.execute::<_, (), _>(
         |flow, seed| {
             flow.chain(|sub| {
-                let temp = sub.then(track_temp, seed);
+                let temp = sub.then_with_output(track_temp, seed);
                 let _ = temp;
                 ()
             });
-            flow.then(seed_observer, seed)
+            let () = flow.then_with_output(seed_observer, seed);
+            flow.output_with(());
         },
         Seed {
             value: 1,
@@ -697,13 +717,14 @@ fn b13_duplicate_and_alias_sources_export_through_child_exits() {
     let runtime = Runtime::new();
     // Chain 返回 (r, r)：两个槽各自通过唯一 child 出口与整组 Export 交给 parent；
     // Root 只取其中一个输出（两个都取属于重复 DataId，见 b14）。
-    let output = block_on(runtime.execute(
+    let output = block_on(runtime.execute::<_, Amount, _>(
         |flow, seed| {
             let pair = flow.chain(|sub| {
                 let value = inner_amount(sub, seed);
                 (value, value)
             });
-            pair.0
+            let out_refs = pair.0;
+            flow.output_with(out_refs);
         },
         Seed {
             value: 20,
@@ -718,15 +739,18 @@ fn b13_duplicate_and_alias_sources_export_through_child_exits() {
 
 /// 在 child 内产生一个新的 Amount（供重复来源样本使用）。
 fn inner_amount(sub: &mut crate::Flow<'_>, seed: Ref<Seed>) -> Ref<Amount> {
-    sub.then(seed_reader, seed)
+    sub.then_with_output(seed_reader, seed)
 }
 
 #[test]
 fn b13_alias_output_keeps_ancestor_owner() {
     let log = Log::new();
     let runtime = Runtime::new();
-    let output = block_on(runtime.execute(
-        |flow, seed| flow.chain(|_sub| seed),
+    let output = block_on(runtime.execute::<_, Seed, _>(
+        |flow, seed| {
+            let out_refs = flow.chain(|_sub| seed);
+            flow.output_with(out_refs);
+        },
         Seed {
             value: 7,
             log: log.clone(),
@@ -742,12 +766,13 @@ fn b13_mixed_child_and_ancestor_sources_export_in_one_group() {
     let log = Log::new();
     let runtime = Runtime::new();
     // 同一组声明输出同时含 child 产出与祖先 alias：两条路径都经唯一出口正常 Export。
-    let output = block_on(runtime.execute(
+    let output = block_on(runtime.execute::<_, (Amount, Seed), _>(
         |flow, seed| {
-            flow.chain(|sub| {
+            let out_refs = flow.chain(|sub| {
                 let produced = inner_amount(sub, seed);
                 (produced, seed)
-            })
+            });
+            flow.output_with(out_refs);
         },
         Seed {
             value: 30,
@@ -767,12 +792,13 @@ fn b13_mixed_child_and_ancestor_sources_export_in_one_group() {
 fn b14_root_duplicate_data_id_is_rejected_before_any_take() {
     let log = Log::new();
     let runtime = Runtime::new();
-    let error = block_on(runtime.execute(
+    let error = block_on(runtime.execute::<_, (Amount, Amount), _>(
         |flow, seed| {
-            flow.chain(|sub| {
+            let out_refs = flow.chain(|sub| {
                 let value = inner_amount(sub, seed);
                 (value, value)
-            })
+            });
+            flow.output_with(out_refs);
         },
         Seed {
             value: 3,
@@ -788,8 +814,11 @@ fn b14_root_duplicate_data_id_is_rejected_before_any_take() {
 fn b15_owned_output_leaves_the_runtime_alive() {
     let log = Log::new();
     let runtime = Runtime::new();
-    let output = block_on(runtime.execute(
-        |flow, seed| inner_amount(flow, seed),
+    let output = block_on(runtime.execute::<_, Amount, _>(
+        |flow, seed| {
+            let out_refs = inner_amount(flow, seed);
+            flow.output_with(out_refs);
+        },
         Seed {
             value: 9,
             log: log.clone(),
@@ -813,8 +842,11 @@ fn b16_export_preflight_rejects_the_whole_group() {
     let log = Log::new();
     let runtime = Runtime::new();
     install_export_occupy_fault(0);
-    let error = block_on(runtime.execute(
-        |flow, seed| flow.chain(|sub| sub.then(seed_reader, seed)),
+    let error = block_on(runtime.execute::<_, Amount, _>(
+        |flow, seed| {
+            let out_refs = flow.chain(|sub| sub.then_with_output(seed_reader, seed));
+            flow.output_with(out_refs);
+        },
         Seed {
             value: 11,
             log: log.clone(),
@@ -859,10 +891,11 @@ fn b17_dynamic_failure_and_source_chain_are_preserved() {
     }
 
     let runtime = Runtime::new();
-    let error = block_on(runtime.execute(
+    let error = block_on(runtime.execute::<_, Amount, _>(
         |flow, amount| {
-            let failed = flow.then(failing, amount);
-            flow.then(never, failed)
+            let failed = flow.then_with_output(failing, amount);
+            let out_refs = flow.then_with_output(never, failed);
+            flow.output_with(out_refs);
         },
         Amount(1),
     ))
@@ -894,12 +927,13 @@ fn b18_node_control_becomes_unhandled_control_at_root() {
     }
 
     let runtime = Runtime::new();
-    let error = block_on(runtime.execute(
+    let error = block_on(runtime.execute::<_, Amount, _>(
         |flow, amount| {
-            flow.chain(|sub| {
-                let retried = sub.then(retrying, amount);
-                sub.then(never, retried)
-            })
+            let out_refs = flow.chain(|sub| {
+                let retried = sub.then_with_output(retrying, amount);
+                sub.then_with_output(never, retried)
+            });
+            flow.output_with(out_refs);
         },
         Amount(1),
     ))
@@ -920,8 +954,11 @@ fn b18_iter_break_is_also_unhandled_without_a_controller() {
     }
 
     let runtime = Runtime::new();
-    let error = block_on(runtime.execute(
-        |flow, amount| flow.chain(|sub| sub.then(breaking, amount)),
+    let error = block_on(runtime.execute::<_, Amount, _>(
+        |flow, amount| {
+            let out_refs = flow.chain(|sub| sub.then_with_output(breaking, amount));
+            flow.output_with(out_refs);
+        },
         Amount(1),
     ))
     .err()
@@ -940,8 +977,11 @@ fn b19_control_cleanup_failure_becomes_runtime_error() {
 
     let runtime = Runtime::new();
     install_control_cleanup_fault();
-    let error = block_on(runtime.execute(
-        |flow, amount| flow.chain(|sub| sub.then(retrying, amount)),
+    let error = block_on(runtime.execute::<_, Amount, _>(
+        |flow, amount| {
+            let out_refs = flow.chain(|sub| sub.then_with_output(retrying, amount));
+            flow.output_with(out_refs);
+        },
         Amount(1),
     ))
     .err()
@@ -982,8 +1022,11 @@ fn b20_cancel_releases_every_value_once() {
     }
 
     let runtime = Runtime::new();
-    let mut future = Box::pin(runtime.execute(
-        |flow, input| flow.then(pending, input),
+    let mut future = Box::pin(runtime.execute::<_, Amount, _>(
+        |flow, input| {
+            let out_refs = flow.then_with_output(pending, input);
+            flow.output_with(out_refs);
+        },
         Dropper {
             drops: Arc::clone(&drops),
         },
@@ -1006,8 +1049,11 @@ fn b20_cancel_releases_every_value_once() {
 
     // 从未 poll 的取消同样只释放输入一次。
     let runtime = Runtime::new();
-    let future = runtime.execute(
-        |flow, input| flow.then(pending, input),
+    let future = runtime.execute::<_, Amount, _>(
+        |flow, input| {
+            let out_refs = flow.then_with_output(pending, input);
+            flow.output_with(out_refs);
+        },
         Dropper {
             drops: Arc::clone(&drops),
         },
@@ -1021,27 +1067,41 @@ fn b20_cancel_releases_every_value_once() {
 #[test]
 fn b21_consecutive_executions_are_isolated() {
     let runtime = Runtime::new();
-    let first = block_on(runtime.execute(|flow, amount| flow.then(double, amount), Amount(1)))
-        .expect("first execution");
-    let second = block_on(runtime.execute(|flow, amount| flow.then(double, amount), Amount(10)))
-        .expect("second execution");
+    let first = block_on(runtime.execute::<_, Doubled, _>(
+        |flow, amount| {
+            let out_refs = flow.then_with_output(double, amount);
+            flow.output_with(out_refs);
+        },
+        Amount(1),
+    ))
+    .expect("first execution");
+    let second = block_on(runtime.execute::<_, Doubled, _>(
+        |flow, amount| {
+            let out_refs = flow.then_with_output(double, amount);
+            flow.output_with(out_refs);
+        },
+        Amount(10),
+    ))
+    .expect("second execution");
     assert_eq!((first.0, second.0), (2, 20));
 
     // 一次执行里捕获的 Ref 在另一次执行的 Definition 中被拒绝。
     let mut leaked: Option<Ref<Amount>> = None;
-    let _ = block_on(runtime.execute(
+    let _ = block_on(runtime.execute::<_, Amount, _>(
         |_flow, amount| {
             leaked = Some(amount);
-            amount
+            let out_refs = amount;
+            _flow.output_with(out_refs);
         },
         Amount(3),
     ))
     .expect("capture run");
     let foreign = leaked.expect("captured ref");
-    let error = block_on(runtime.execute(
+    let error = block_on(runtime.execute::<_, Doubled, _>(
         move |flow, amount| {
-            let _ = flow.then(double, amount);
-            flow.then(double, foreign)
+            let _ = flow.then_with_output(double, amount);
+            let out_refs = flow.then_with_output(double, foreign);
+            flow.output_with(out_refs);
         },
         Amount(4),
     ))
@@ -1178,9 +1238,9 @@ fn r01_business_failure_keeps_the_first_cleanup_diagnostic() {
     reset_observations();
     let runtime = Runtime::new();
     install_root_cleanup_fault();
-    let error = block_on(runtime.execute(
+    let error = block_on(runtime.execute::<_, (), _>(
         |flow, _amount| {
-            let _: () = flow.then(failing_zero_input, ());
+            let _: () = flow.then_with_output(failing_zero_input, ());
             ()
         },
         Amount(7),
@@ -1217,9 +1277,9 @@ fn r01_root_control_with_cleanup_failure_becomes_runtime() {
     reset_observations();
     let runtime = Runtime::new();
     install_root_cleanup_fault();
-    let error = block_on(runtime.execute(
+    let error = block_on(runtime.execute::<_, (), _>(
         |flow, _amount| {
-            let _: () = flow.then(breaking_zero_input, ());
+            let _: () = flow.then_with_output(breaking_zero_input, ());
             ()
         },
         Amount(3),
@@ -1346,8 +1406,9 @@ macro_rules! chain_arity_run {
         fn $name() {
             let input = ($($v,)+);
             let runtime = Runtime::new();
-            let output = block_on(runtime.execute::<($($t,)+), _, _>(
-                |flow, refs| flow.chain(|_sub| refs),
+            let output = block_on(runtime.execute::<($($t,)+), ($($t,)+), _>(
+                |flow, refs| { let out = flow.chain(|_sub| refs);
+                flow.output_with(out); },
                 input,
             ))
             .expect("chain output arity runs end to end");
@@ -1382,14 +1443,15 @@ chain_arity_run!(b05_chain_arity_16, (u8 => 1u8 => 0), (u16 => 2u16 => 1), (u32 
 #[test]
 fn b05_chain_child_produced_arity_runs() {
     let runtime = Runtime::new();
-    let output = block_on(runtime.execute(
+    let output = block_on(runtime.execute::<_, (Doubled, Amount, Doubled), _>(
         |flow, amount| {
-            flow.chain(|sub| {
-                let first = sub.then(double, amount);
-                let second = sub.then(add_one, first);
-                let third = sub.then(double, second);
+            let out_refs = flow.chain(|sub| {
+                let first = sub.then_with_output(double, amount);
+                let second = sub.then_with_output(add_one, first);
+                let third = sub.then_with_output(double, second);
                 (first, second, third)
-            })
+            });
+            flow.output_with(out_refs);
         },
         Amount(20),
     ))
@@ -1403,8 +1465,12 @@ fn b05_chain_child_produced_arity_runs() {
 fn b10_real_frames_and_single_execution_domain_are_observed() {
     reset_observations();
     let runtime = Runtime::new();
-    let output = block_on(runtime.execute(
-        |flow, amount| flow.chain(|outer| outer.chain(|inner| inner.then(double, amount))),
+    let output = block_on(runtime.execute::<_, Doubled, _>(
+        |flow, amount| {
+            let out_refs =
+                flow.chain(|outer| outer.chain(|inner| inner.then_with_output(double, amount)));
+            flow.output_with(out_refs);
+        },
         Amount(20),
     ))
     .expect("nested chain run");
@@ -1482,8 +1548,12 @@ fn b11_each_layer_imports_the_same_static_refid_once() {
     reset_observations();
     let log = Log::new();
     let runtime = Runtime::new();
-    let output = block_on(runtime.execute(
-        |flow, seed| flow.chain(|outer| outer.chain(|inner| inner.then(seed_reader, seed))),
+    let output = block_on(runtime.execute::<_, Amount, _>(
+        |flow, seed| {
+            let out_refs =
+                flow.chain(|outer| outer.chain(|inner| inner.then_with_output(seed_reader, seed)));
+            flow.output_with(out_refs);
+        },
         Seed {
             value: 41,
             log: log.clone(),
@@ -1527,8 +1597,12 @@ fn b11_each_layer_imports_the_same_static_refid_once() {
 fn b12_chain_scopes_close_and_never_recur() {
     reset_observations();
     let runtime = Runtime::new();
-    let output = block_on(runtime.execute(
-        |flow, amount| flow.chain(|outer| outer.chain(|inner| inner.then(double, amount))),
+    let output = block_on(runtime.execute::<_, Doubled, _>(
+        |flow, amount| {
+            let out_refs =
+                flow.chain(|outer| outer.chain(|inner| inner.then_with_output(double, amount)));
+            flow.output_with(out_refs);
+        },
         Amount(20),
     ))
     .expect("nested chain run");
@@ -1585,13 +1659,14 @@ fn b13_export_targets_and_single_transfer_are_observed() {
     reset_observations();
     let log = Log::new();
     let runtime = Runtime::new();
-    let output = block_on(runtime.execute(
+    let output = block_on(runtime.execute::<_, Amount, _>(
         |flow, seed| {
             let pair = flow.chain(|sub| {
                 let value = inner_amount(sub, seed);
                 (value, value)
             });
-            pair.0
+            let out_refs = pair.0;
+            flow.output_with(out_refs);
         },
         Seed {
             value: 20,
@@ -1648,8 +1723,11 @@ fn b13_ancestor_alias_is_bound_without_transfer() {
     reset_observations();
     let log = Log::new();
     let runtime = Runtime::new();
-    let output = block_on(runtime.execute(
-        |flow, seed| flow.chain(|_sub| seed),
+    let output = block_on(runtime.execute::<_, Seed, _>(
+        |flow, seed| {
+            let out_refs = flow.chain(|_sub| seed);
+            flow.output_with(out_refs);
+        },
         Seed {
             value: 7,
             log: log.clone(),
@@ -1715,12 +1793,13 @@ fn b14_rejected_root_take_keeps_values_owned_and_takes_zero() {
     reset_observations();
     let log = Log::new();
     let runtime = Runtime::new();
-    let error = block_on(runtime.execute(
+    let error = block_on(runtime.execute::<_, (Amount, Amount), _>(
         |flow, seed| {
-            flow.chain(|sub| {
+            let out_refs = flow.chain(|sub| {
                 let value = inner_amount(sub, seed);
                 (value, value)
-            })
+            });
+            flow.output_with(out_refs);
         },
         Seed {
             value: 3,
@@ -1763,8 +1842,11 @@ fn b15_owned_output_leaves_the_runtime_and_root_responsibility_is_released() {
 
     let log = Log::new();
     let runtime = Runtime::new();
-    let output = block_on(runtime.execute(
-        |flow, seed| flow.then(produce_tracked, seed),
+    let output = block_on(runtime.execute::<_, TrackedValue, _>(
+        |flow, seed| {
+            let out_refs = flow.then_with_output(produce_tracked, seed);
+            flow.output_with(out_refs);
+        },
         TrackedSeed {
             value: 5,
             log: log.clone(),
@@ -1825,13 +1907,14 @@ fn b16_export_group_rejects_whole_group_and_keeps_kinds() {
     let log = Log::new();
     let runtime = Runtime::new();
     install_export_occupy_fault(1);
-    let error = block_on(runtime.execute(
+    let error = block_on(runtime.execute::<_, (TrackedValue, TrackedValue), _>(
         |flow, seed| {
-            flow.chain(|sub| {
-                let first = sub.then(produce_child_value, seed);
-                let second = sub.then(produce_child_value, seed);
+            let out_refs = flow.chain(|sub| {
+                let first = sub.then_with_output(produce_child_value, seed);
+                let second = sub.then_with_output(produce_child_value, seed);
                 (first, second)
-            })
+            });
+            flow.output_with(out_refs);
         },
         TrackedSeed {
             value: 5,
@@ -1878,12 +1961,13 @@ fn b16_import_group_rejects_whole_group_without_partial_bindings() {
     let log = Log::new();
     let runtime = Runtime::new();
     install_import_occupy_fault(1);
-    let error = block_on(runtime.execute(
+    let error = block_on(runtime.execute::<_, (), _>(
         |flow, (seed, amount)| {
-            flow.chain(|sub| {
-                let _: () = sub.then(two_inputs_unit, (seed, amount));
+            let () = flow.chain(|sub| {
+                let _: () = sub.then_with_output(two_inputs_unit, (seed, amount));
                 ()
-            })
+            });
+            flow.output_with(());
         },
         (
             TrackedSeed {
@@ -1961,9 +2045,9 @@ fn b17_nested_source_and_non_send_object_are_preserved() {
     }
 
     let runtime = Runtime::new();
-    let error = block_on(runtime.execute(
+    let error = block_on(runtime.execute::<_, (), _>(
         |flow, _amount| {
-            let _: () = flow.then(failing, ());
+            let _: () = flow.then_with_output(failing, ());
             ()
         },
         Amount(1),
@@ -2002,15 +2086,16 @@ fn b18_nested_control_closes_every_frame_and_stops_later_business() {
     }
 
     let runtime = Runtime::new();
-    let error = block_on(runtime.execute(
+    let error = block_on(runtime.execute::<_, (), _>(
         |flow, ()| {
-            flow.chain(|outer| {
+            let () = flow.chain(|outer| {
                 outer.chain(|inner| {
-                    let _: () = inner.then(retrying, ());
-                    let _: () = inner.then(never, ());
+                    let _: () = inner.then_with_output(retrying, ());
+                    let _: () = inner.then_with_output(never, ());
                     ()
                 })
-            })
+            });
+            flow.output_with(());
         },
         (),
     ))
@@ -2074,13 +2159,14 @@ fn b19_cleanup_failure_keeps_unclosed_responsibility_and_stops_business() {
 
     let runtime = Runtime::new();
     install_control_cleanup_fault();
-    let error = block_on(runtime.execute(
+    let error = block_on(runtime.execute::<_, (), _>(
         |flow, ()| {
-            flow.chain(|sub| {
-                let _: () = sub.then(retrying, ());
-                let _: () = sub.then(never, ());
+            let () = flow.chain(|sub| {
+                let _: () = sub.then_with_output(retrying, ());
+                let _: () = sub.then_with_output(never, ());
                 ()
-            })
+            });
+            flow.output_with(());
         },
         (),
     ))
@@ -2111,14 +2197,15 @@ fn b20_deep_pending_cancel_orders_every_drop() {
     reset_observations();
     let log = Log::new();
     let runtime = Runtime::new();
-    let mut future = Box::pin(runtime.execute(
+    let mut future = Box::pin(runtime.execute::<_, (), _>(
         |flow, seed| {
-            flow.chain(|sub| {
-                let produced = sub.then(read_tracked_seed, seed);
+            let () = flow.chain(|sub| {
+                let produced = sub.then_with_output(read_tracked_seed, seed);
                 let _ = produced;
-                let _pending: Ref<Amount> = sub.then(pending_guard_node, seed);
+                let _pending: Ref<Amount> = sub.then_with_output(pending_guard_node, seed);
                 ()
-            })
+            });
+            flow.output_with(());
         },
         TrackedSeed {
             value: 5,
@@ -2148,8 +2235,11 @@ fn b20_deep_pending_cancel_orders_every_drop() {
 fn b21_executions_use_distinct_identity_domains() {
     reset_observations();
     let runtime = Runtime::new();
-    let first = block_on(runtime.execute(
-        |flow, amount| flow.chain(|sub| sub.then(double, amount)),
+    let first = block_on(runtime.execute::<_, Doubled, _>(
+        |flow, amount| {
+            let out_refs = flow.chain(|sub| sub.then_with_output(double, amount));
+            flow.output_with(out_refs);
+        },
         Amount(1),
     ))
     .expect("first execution");
@@ -2162,8 +2252,11 @@ fn b21_executions_use_distinct_identity_domains() {
     test_support::boundary_creation_reset();
     test_support::boundary_address_reset();
 
-    let second = block_on(runtime.execute(
-        |flow, amount| flow.chain(|sub| sub.then(double, amount)),
+    let second = block_on(runtime.execute::<_, Doubled, _>(
+        |flow, amount| {
+            let out_refs = flow.chain(|sub| sub.then_with_output(double, amount));
+            flow.output_with(out_refs);
+        },
         Amount(10),
     ))
     .expect("second execution");
@@ -2214,18 +2307,19 @@ fn f01_legal_control_propagation_keeps_context_valid_until_root_close() {
     let runtime = Runtime::new();
     for (round, expect_retry) in [(0usize, true), (1usize, false)] {
         reset_observations();
-        let error = block_on(runtime.execute(
+        let error = block_on(runtime.execute::<_, (), _>(
             |flow, ()| {
-                flow.chain(|outer| {
+                let () = flow.chain(|outer| {
                     outer.chain(|inner| {
                         if round == 0 {
-                            let _: () = inner.then(retrying, ());
+                            let _: () = inner.then_with_output(retrying, ());
                         } else {
-                            let _: () = inner.then(breaking, ());
+                            let _: () = inner.then_with_output(breaking, ());
                         }
                         ()
                     })
-                })
+                });
+                flow.output_with(());
             },
             (),
         ))
@@ -2297,12 +2391,13 @@ fn f02_sequential_chains_close_before_the_next_child_and_reject_old_reads() {
     reset_observations();
     let log = Log::new();
     let runtime = Runtime::new();
-    let output = block_on(runtime.execute(
+    let output = block_on(runtime.execute::<_, (), _>(
         |flow, seed| {
-            let first = flow.chain(|sub| sub.then(seed_reader, seed));
-            let second = flow.chain(|sub| sub.then(AmountStep, first));
+            let first = flow.chain(|sub| sub.then_with_output(seed_reader, seed));
+            let second = flow.chain(|sub| sub.then_with_output(AmountStep, first));
             let _ = second;
-            flow.then(seed_observer, seed)
+            let () = flow.then_with_output(seed_observer, seed);
+            flow.output_with(());
         },
         Seed {
             value: 1,
@@ -2358,8 +2453,11 @@ fn f03_cross_execution_identity_access_is_rejected() {
     let runtime = Runtime::new();
 
     // 第一次执行：取得完整 Root ScopeId 与真实 DataId（观察记录 + take 日志）。
-    let first = block_on(runtime.execute(
-        |flow, amount| flow.chain(|sub| sub.then(double, amount)),
+    let first = block_on(runtime.execute::<_, Doubled, _>(
+        |flow, amount| {
+            let out_refs = flow.chain(|sub| sub.then_with_output(double, amount));
+            flow.output_with(out_refs);
+        },
         Amount(3),
     ))
     .expect("first run");
@@ -2373,8 +2471,11 @@ fn f03_cross_execution_identity_access_is_rejected() {
     // 第二次执行：在真实 Context 的 caller frame 中尝试访问第一域身份。
     reset_observations();
     install_foreign_access_fault(first_root.clone(), first_data.clone());
-    let second = block_on(runtime.execute(
-        |flow, amount| flow.chain(|sub| sub.then(double, amount)),
+    let second = block_on(runtime.execute::<_, Doubled, _>(
+        |flow, amount| {
+            let out_refs = flow.chain(|sub| sub.then_with_output(double, amount));
+            flow.output_with(out_refs);
+        },
         Amount(5),
     ))
     .expect("second run");
@@ -2504,6 +2605,15 @@ thread_local! {
     static AMOUNT_READS: RefCell<Vec<u32>> = const { RefCell::new(Vec::new()) };
 }
 
+/// 站点 S0246 的 Out 类型辅助：`$slot:ident` 未携带类型参数，重复展开为固定 `Amount`。
+///
+/// 只在宏展开的类型位置使用；不新增 Public Trait，也不改变 `choose_arity_case` 的输入参数。
+macro_rules! amount_slot_ty {
+    ($_slot:ident) => {
+        Amount
+    };
+}
+
 /// C08：tuple 形状按现有 Shape 上限逐个 arity 生成（2～16）。
 ///
 /// 每个分支自产 N 个独立 Amount（seed_reader 之后逐个 AmountStep），全部作为共同输出。
@@ -2513,20 +2623,21 @@ macro_rules! choose_arity_case {
         fn $name() {
             reset_observations();
             let runtime = Runtime::new();
-            let output = block_on(runtime.execute(
+            let output = block_on(runtime.execute::<_, ($(amount_slot_ty!($slot),)+), _>(
                 |flow, seed| {
-                    let selector = flow.then(route_of, seed);
-                    flow.choose(selector, |choice| {
+                    let selector = flow.then_with_output(route_of, seed);
+                    let out_refs = flow.choose(selector, |choice| {
                         choice.case(route(1), |branch| {
-                            let mut previous = branch.then(seed_reader, seed);
+                            let mut previous = branch.then_with_output(seed_reader, seed);
                             $(
-                                let $slot = branch.then(AmountStep, previous);
+                                let $slot = branch.then_with_output(AmountStep, previous);
                                 previous = $slot;
                             )+
                             let _ = previous;
                             ($($slot,)+)
                         });
-                    })
+                    });
+                    flow.output_with(out_refs);
                 },
                 Seed {
                     value: 1,
@@ -2578,14 +2689,19 @@ fn c01_frozen_choose_usage_runs_case_case_and_fallback() {
         (7u32, "branch:fallback", 10u32),
     ] {
         let log = Log::new();
-        let output = block_on(runtime.execute(
+        let output = block_on(runtime.execute::<_, Amount, _>(
             |flow, seed| {
-                let selector = flow.then(route_of, seed);
-                flow.choose(selector, |choice| {
-                    choice.case(route(1), |branch| branch.then(branch_alpha, seed));
-                    choice.case(route(2), |branch| branch.then(branch_beta, seed));
-                    choice.otherwise(|branch| branch.then(branch_fallback, seed));
-                })
+                let selector = flow.then_with_output(route_of, seed);
+                let out_refs = flow.choose(selector, |choice| {
+                    choice.case(route(1), |branch| {
+                        branch.then_with_output(branch_alpha, seed)
+                    });
+                    choice.case(route(2), |branch| {
+                        branch.then_with_output(branch_beta, seed)
+                    });
+                    choice.otherwise(|branch| branch.then_with_output(branch_fallback, seed));
+                });
+                flow.output_with(out_refs);
             },
             Seed {
                 value,
@@ -2610,27 +2726,28 @@ fn c01_choose_nests_chain_choose_and_fragment_forms() {
         node: &'n AmountStep,
         input: Ref<Amount>,
     ) -> impl FnOnce(&mut crate::Flow<'n>) -> Ref<Amount> + 'n {
-        move |branch| branch.then(node, input)
+        move |branch| branch.then_with_output(node, input)
     }
 
     let log = Log::new();
     let step = AmountStep;
     let runtime = Runtime::new();
-    let output = block_on(runtime.execute(
+    let output = block_on(runtime.execute::<_, Amount, _>(
         |flow, seed| {
-            let selector = flow.then(route_of, seed);
-            flow.choose(selector, |choice| {
+            let selector = flow.then_with_output(route_of, seed);
+            let out_refs = flow.choose(selector, |choice| {
                 choice.case(route(10), |branch| {
                     // 分支内再 chain → choose；内层分支用 Fragment 形式定义。
-                    let inner = branch.chain(|sub| sub.then(seed_reader, seed));
-                    let inner_route = branch.then(route_of_amount, inner);
+                    let inner = branch.chain(|sub| sub.then_with_output(seed_reader, seed));
+                    let inner_route = branch.then_with_output(route_of_amount, inner);
                     let picked = branch.choose(inner_route, |inner_choice| {
                         inner_choice.case(route(11), fragment(&step, inner));
-                        inner_choice.otherwise(|deep| deep.then(branch_fallback, seed));
+                        inner_choice.otherwise(|deep| deep.then_with_output(branch_fallback, seed));
                     });
                     branch.chain(fragment(&step, picked))
                 });
-            })
+            });
+            flow.output_with(out_refs);
         },
         Seed {
             value: 10,
@@ -2653,15 +2770,18 @@ fn c02_minimal_key_and_borrowed_node_run() {
     let delta = 5u32;
     let configured = Configured { delta: &delta };
     let runtime = Runtime::new();
-    let output = block_on(runtime.execute(
+    let output = block_on(runtime.execute::<_, Amount, _>(
         |flow, seed| {
-            let amount = flow.then(seed_reader, seed);
-            let selector = flow.then(route_of_amount, amount);
-            flow.choose(selector, |choice| {
+            let amount = flow.then_with_output(seed_reader, seed);
+            let selector = flow.then_with_output(route_of_amount, amount);
+            let out_refs = flow.choose(selector, |choice| {
                 // 键：只实现 PartialEq 的 Route（每次构造新值，未实现 Clone／Copy）。
-                choice.case(route(2), |branch| branch.then(&configured, amount));
-                choice.otherwise(|branch| branch.then(AmountStep, amount));
-            })
+                choice.case(route(2), |branch| {
+                    branch.then_with_output(&configured, amount)
+                });
+                choice.otherwise(|branch| branch.then_with_output(AmountStep, amount));
+            });
+            flow.output_with(out_refs);
         },
         Seed {
             value: 1,
@@ -2693,23 +2813,24 @@ fn c03_all_branches_build_once_per_execute_and_rebuild_each_time() {
     let runtime = Runtime::new();
     for round in 0..2usize {
         let log = Log::new();
-        let output = block_on(runtime.execute(
+        let output = block_on(runtime.execute::<_, Amount, _>(
             |flow, seed| {
-                let selector = flow.then(route_of, seed);
-                flow.choose(selector, |choice| {
+                let selector = flow.then_with_output(route_of, seed);
+                let out_refs = flow.choose(selector, |choice| {
                     choice.case(route(1), |branch| {
                         ALPHA_BUILDS.fetch_add(1, Ordering::SeqCst);
-                        branch.then(counting, seed)
+                        branch.then_with_output(counting, seed)
                     });
                     choice.case(route(2), |branch| {
                         BETA_BUILDS.fetch_add(1, Ordering::SeqCst);
-                        branch.then(counting, seed)
+                        branch.then_with_output(counting, seed)
                     });
                     choice.otherwise(|branch| {
                         FALLBACK_BUILDS.fetch_add(1, Ordering::SeqCst);
-                        branch.then(counting, seed)
+                        branch.then_with_output(counting, seed)
                     });
-                })
+                });
+                flow.output_with(out_refs);
             },
             Seed {
                 value: 1,
@@ -2754,15 +2875,16 @@ fn c03_unpolled_choose_builds_nothing_and_releases_input_once() {
     }
 
     let runtime = Runtime::new();
-    let future = runtime.execute(
+    let future = runtime.execute::<_, (), _>(
         |flow, input| {
-            let selector = flow.then(identity, input);
-            flow.choose(selector, |choice| {
+            let selector = flow.then_with_output(identity, input);
+            let () = flow.choose(selector, |choice| {
                 choice.case(route(1), |branch| {
                     BUILDS.fetch_add(1, Ordering::SeqCst);
-                    let _: () = branch.then(unit_noop, ());
+                    let _: () = branch.then_with_output(unit_noop, ());
                 });
-            })
+            });
+            flow.output_with(());
         },
         Dropper {
             drops: Arc::clone(&drops),
@@ -2793,14 +2915,15 @@ fn c04_duplicate_case_value_is_rejected() {
 
     reset_observations();
     let before = creation_counts::snapshot();
-    let error = block_on(Runtime::new().execute(
+    let error = block_on(Runtime::new().execute::<_, Amount, _>(
         |flow, seed| {
-            let selector = flow.then(route_of, seed);
-            flow.choose(selector, |choice| {
+            let selector = flow.then_with_output(route_of, seed);
+            let out_refs = flow.choose(selector, |choice| {
                 // 两个值只实现 PartialEq：按值相等判重（tag 与 code 都相同）。
-                choice.case(route(1), |branch| branch.then(counting, seed));
-                choice.case(route(1), |branch| branch.then(counting, seed));
-            })
+                choice.case(route(1), |branch| branch.then_with_output(counting, seed));
+                choice.case(route(1), |branch| branch.then_with_output(counting, seed));
+            });
+            flow.output_with(out_refs);
         },
         Seed {
             value: 1,
@@ -2823,20 +2946,21 @@ fn c04_duplicate_case_value_is_rejected() {
 
 #[test]
 fn c04_duplicate_otherwise_and_empty_config_are_rejected() {
-    let error = block_on(Runtime::new().execute(
+    let error = block_on(Runtime::new().execute::<_, (), _>(
         |flow, seed| {
-            let selector = flow.then(route_of, seed);
-            flow.choose(selector, |choice| {
+            let selector = flow.then_with_output(route_of, seed);
+            let () = flow.choose(selector, |choice| {
                 choice.case(route(1), |branch| {
-                    let _: () = branch.then(seed_observer, seed);
+                    let _: () = branch.then_with_output(seed_observer, seed);
                 });
                 choice.otherwise(|branch| {
-                    let _: () = branch.then(seed_observer, seed);
+                    let _: () = branch.then_with_output(seed_observer, seed);
                 });
                 choice.otherwise(|branch| {
-                    let _: () = branch.then(seed_observer, seed);
+                    let _: () = branch.then_with_output(seed_observer, seed);
                 });
-            })
+            });
+            flow.output_with(());
         },
         Seed {
             value: 1,
@@ -2851,10 +2975,12 @@ fn c04_duplicate_otherwise_and_empty_config_are_rejected() {
     );
 
     // 空配置：结果类型显式约束为 `()`，确保真实到达空配置校验而不是推断失败。
-    let error = block_on(Runtime::new().execute(
+    let error = block_on(Runtime::new().execute::<_, (), _>(
         |flow, seed| {
-            let selector = flow.then(route_of, seed);
+            let selector = flow.then_with_output(route_of, seed);
             let _: () = flow.choose(selector, |_choice| {});
+
+            flow.output_with(());
         },
         Seed {
             value: 1,
@@ -2874,12 +3000,13 @@ fn c04_otherwise_only_and_case_without_otherwise_are_legal() {
     let runtime = Runtime::new();
     // otherwise-only：任何值都走 fallback。
     let log = Log::new();
-    let output = block_on(runtime.execute(
+    let output = block_on(runtime.execute::<_, Amount, _>(
         |flow, seed| {
-            let selector = flow.then(route_of, seed);
-            flow.choose(selector, |choice| {
-                choice.otherwise(|branch| branch.then(branch_fallback, seed));
-            })
+            let selector = flow.then_with_output(route_of, seed);
+            let out_refs = flow.choose(selector, |choice| {
+                choice.otherwise(|branch| branch.then_with_output(branch_fallback, seed));
+            });
+            flow.output_with(out_refs);
         },
         Seed {
             value: 4,
@@ -2893,13 +3020,18 @@ fn c04_otherwise_only_and_case_without_otherwise_are_legal() {
     // 有 case 而没有 otherwise：命中即正常执行。
     for (value, expected) in [(1u32, "branch:alpha"), (2u32, "branch:beta")] {
         let log = Log::new();
-        let output = block_on(runtime.execute(
+        let output = block_on(runtime.execute::<_, Amount, _>(
             |flow, seed| {
-                let selector = flow.then(route_of, seed);
-                flow.choose(selector, |choice| {
-                    choice.case(route(1), |branch| branch.then(branch_alpha, seed));
-                    choice.case(route(2), |branch| branch.then(branch_beta, seed));
-                })
+                let selector = flow.then_with_output(route_of, seed);
+                let out_refs = flow.choose(selector, |choice| {
+                    choice.case(route(1), |branch| {
+                        branch.then_with_output(branch_alpha, seed)
+                    });
+                    choice.case(route(2), |branch| {
+                        branch.then_with_output(branch_beta, seed)
+                    });
+                });
+                flow.output_with(out_refs);
             },
             Seed {
                 value,
@@ -2919,24 +3051,25 @@ fn c06_sibling_refs_inside_an_unselected_branch_are_rejected() {
     // 分支 A 的 Ref 被带出闭包，分支 B 直接使用它：未选分支的 sibling 内部引用同样拒绝。
     let leaked: RefCell<Option<Ref<Amount>>> = RefCell::new(None);
     let runtime = Runtime::new();
-    let error = block_on(runtime.execute(
+    let error = block_on(runtime.execute::<_, (), _>(
         |flow, seed| {
-            let selector = flow.then(route_of, seed);
+            let selector = flow.then_with_output(route_of, seed);
             let leaked = &leaked;
-            flow.choose(selector, |choice| {
+            let () = flow.choose(selector, |choice| {
                 choice.case(route(1), |branch| {
-                    let produced = branch.then(seed_reader, seed);
+                    let produced = branch.then_with_output(seed_reader, seed);
                     *leaked.borrow_mut() = Some(produced);
                 });
                 choice.case(route(2), |branch| {
                     let foreign = *leaked.borrow(); // sibling 内部位置
                     let inner = match foreign {
-                        Some(position) => branch.then(AmountStep, position),
-                        None => branch.then(seed_reader, seed),
+                        Some(position) => branch.then_with_output(AmountStep, position),
+                        None => branch.then_with_output(seed_reader, seed),
                     };
                     let _ = inner;
                 });
-            })
+            });
+            flow.output_with(());
         },
         Seed {
             value: 1,
@@ -2975,28 +3108,30 @@ fn c06_foreign_refs_inside_an_unselected_branch_are_rejected() {
     // 第一次执行捕获一个 Amount Ref；第二次执行的未选分支直接使用它。
     let runtime = Runtime::new();
     let mut leaked: Option<Ref<Amount>> = None;
-    let _ = block_on(runtime.execute(
+    let _ = block_on(runtime.execute::<_, Amount, _>(
         |_flow, amount| {
             leaked = Some(amount);
-            amount
+            let out_refs = amount;
+            _flow.output_with(out_refs);
         },
         Amount(3),
     ))
     .expect("capture execution");
     let foreign = leaked.expect("captured ref");
 
-    let error = block_on(runtime.execute(
+    let error = block_on(runtime.execute::<_, (), _>(
         move |flow, input| {
-            let selector = flow.then(dropper_route, input);
-            flow.choose(selector, |choice| {
+            let selector = flow.then_with_output(dropper_route, input);
+            let () = flow.choose(selector, |choice| {
                 choice.case(route(3), |branch| {
-                    let produced = branch.then(amount_identity, foreign); // 外来位置
+                    let produced = branch.then_with_output(amount_identity, foreign); // 外来位置
                     let _ = produced;
                 });
                 choice.case(route(1), |branch| {
-                    let _ = branch.then(dropper_observer, input);
+                    let _ = branch.then_with_output(dropper_observer, input);
                 });
-            })
+            });
+            flow.output_with(());
         },
         Dropper {
             drops: Arc::clone(&drops),
@@ -3019,19 +3154,20 @@ fn c07_deep_selector_and_branch_captures_import_once_and_keep_owner() {
     reset_observations();
     let log = Log::new();
     let runtime = Runtime::new();
-    let output = block_on(runtime.execute(
+    let output = block_on(runtime.execute::<_, (Amount, Amount), _>(
         |flow, seed| {
-            flow.chain(|sub| {
-                let selector = sub.then(route_of, seed);
+            let out_refs = flow.chain(|sub| {
+                let selector = sub.then_with_output(route_of, seed);
                 sub.choose(selector, |choice| {
                     choice.case(route(9), |branch| {
                         // 同一祖先位置被两个 Node 使用：Imports 只登记一次、owner 不变。
-                        let left = branch.then(seed_reader, seed);
-                        let right = branch.then(seed_reader, seed);
+                        let left = branch.then_with_output(seed_reader, seed);
+                        let right = branch.then_with_output(seed_reader, seed);
                         (left, right)
                     });
                 })
-            })
+            });
+            flow.output_with(out_refs);
         },
         Seed {
             value: 9,
@@ -3148,16 +3284,17 @@ fn c08_unit_choose_executes_without_a_data_placeholder() {
     let runtime = Runtime::new();
     let output: () = block_on(runtime.execute(
         |flow, seed| {
-            let selector = flow.then(route_of, seed);
+            let selector = flow.then_with_output(route_of, seed);
             // 结果未被使用：仍必须执行、收拢责任并关闭。
-            flow.choose(selector, |choice| {
+            let () = flow.choose(selector, |choice| {
                 choice.case(route(1), |branch| {
-                    let _: () = branch.then(seed_observer, seed);
+                    let _: () = branch.then_with_output(seed_observer, seed);
                 });
                 choice.otherwise(|branch| {
-                    let _: () = branch.then(seed_observer, seed);
+                    let _: () = branch.then_with_output(seed_observer, seed);
                 });
-            })
+            });
+            flow.output_with(());
         },
         Seed {
             value: 1,
@@ -3193,14 +3330,17 @@ fn c08_single_ref_choose_output_is_readable_by_the_next_parent_step() {
     reset_observations();
     let log = Log::new();
     let runtime = Runtime::new();
-    let output = block_on(runtime.execute(
+    let output = block_on(runtime.execute::<_, Amount, _>(
         |flow, seed| {
-            let selector = flow.then(route_of, seed);
+            let selector = flow.then_with_output(route_of, seed);
             let picked = flow.choose(selector, |choice| {
-                choice.case(route(1), |branch| branch.then(seed_reader, seed));
-                choice.otherwise(|branch| branch.then(branch_fallback, seed));
+                choice.case(route(1), |branch| {
+                    branch.then_with_output(seed_reader, seed)
+                });
+                choice.otherwise(|branch| branch.then_with_output(branch_fallback, seed));
             });
-            flow.then(AmountStep, picked)
+            let out_refs = flow.then_with_output(AmountStep, picked);
+            flow.output_with(out_refs);
         },
         Seed {
             value: 1,
@@ -3219,15 +3359,16 @@ fn c08_mixed_self_produced_and_ancestor_alias_group_is_handed_over_per_slot() {
     let log = Log::new();
     let runtime = Runtime::new();
     // 分支返回 (自产, 祖先 alias)：同一组里两条来源路径都要按槽位真实交付。
-    let output = block_on(runtime.execute(
+    let output = block_on(runtime.execute::<_, (Amount, Seed), _>(
         |flow, seed| {
-            let selector = flow.then(route_of, seed);
-            flow.choose(selector, |choice| {
+            let selector = flow.then_with_output(route_of, seed);
+            let out_refs = flow.choose(selector, |choice| {
                 choice.case(route(4), |branch| {
-                    let produced = branch.then(seed_reader, seed);
+                    let produced = branch.then_with_output(seed_reader, seed);
                     (produced, seed)
                 });
-            })
+            });
+            flow.output_with(out_refs);
         },
         Seed {
             value: 4,
@@ -3335,14 +3476,19 @@ fn c09_selection_runs_one_branch_and_creates_one_boundary() {
     reset_observations();
     let runtime = Runtime::new();
     let log = Log::new();
-    let output = block_on(runtime.execute(
+    let output = block_on(runtime.execute::<_, Amount, _>(
         |flow, seed| {
-            let selector = flow.then(route_of, seed);
-            flow.choose(selector, |choice| {
-                choice.case(route(2), |branch| branch.then(branch_beta, seed));
-                choice.case(route(5), |branch| branch.then(branch_alpha, seed));
-                choice.otherwise(|branch| branch.then(branch_fallback, seed));
-            })
+            let selector = flow.then_with_output(route_of, seed);
+            let out_refs = flow.choose(selector, |choice| {
+                choice.case(route(2), |branch| {
+                    branch.then_with_output(branch_beta, seed)
+                });
+                choice.case(route(5), |branch| {
+                    branch.then_with_output(branch_alpha, seed)
+                });
+                choice.otherwise(|branch| branch.then_with_output(branch_fallback, seed));
+            });
+            flow.output_with(out_refs);
         },
         Seed {
             value: 2,
@@ -3387,16 +3533,19 @@ fn c10_selector_is_borrowed_and_stays_readable() {
 
     let log = Log::new();
     let runtime = Runtime::new();
-    let output = block_on(runtime.execute(
+    let output = block_on(runtime.execute::<_, Amount, _>(
         |flow, (seed, amount)| {
-            let selector = flow.then(route_of_amount, amount);
+            let selector = flow.then_with_output(route_of_amount, amount);
             let picked = flow.choose(selector, |choice| {
-                choice.case(route(1), |branch| branch.then(branch_alpha, seed));
-                choice.otherwise(|branch| branch.then(branch_fallback, seed));
+                choice.case(route(1), |branch| {
+                    branch.then_with_output(branch_alpha, seed)
+                });
+                choice.otherwise(|branch| branch.then_with_output(branch_fallback, seed));
             });
             // Choose 之后 selector 仍可读：未被 take／复制／重新登记。
-            let _: () = flow.then(amount_logged, amount);
-            picked
+            let _: () = flow.then_with_output(amount_logged, amount);
+            let out_refs = picked;
+            flow.output_with(out_refs);
         },
         (
             Seed {
@@ -3435,12 +3584,15 @@ fn c11_single_context_and_boundary_frames_per_choose() {
     let before = creation_counts::snapshot();
     let log = Log::new();
     let runtime = Runtime::new();
-    let output = block_on(runtime.execute(
+    let output = block_on(runtime.execute::<_, Amount, _>(
         |flow, seed| {
-            let selector = flow.then(route_of, seed);
-            flow.choose(selector, |choice| {
-                choice.case(route(1), |branch| branch.then(branch_alpha, seed));
-            })
+            let selector = flow.then_with_output(route_of, seed);
+            let out_refs = flow.choose(selector, |choice| {
+                choice.case(route(1), |branch| {
+                    branch.then_with_output(branch_alpha, seed)
+                });
+            });
+            flow.output_with(out_refs);
         },
         Seed {
             value: 1,
@@ -3501,16 +3653,17 @@ fn c12_duplicate_source_exports_through_distinct_parent_slots() {
     let log = Log::new();
     let runtime = Runtime::new();
     // 分支返回 (value, value)：两个 parent 槽 alias 同一实例；Root 只取其中一个。
-    let output = block_on(runtime.execute(
+    let output = block_on(runtime.execute::<_, TrackedValue, _>(
         |flow, seed| {
-            let selector = flow.then(route_of_tracked, seed);
+            let selector = flow.then_with_output(route_of_tracked, seed);
             let pair = flow.choose(selector, |choice| {
                 choice.case(route(5), |branch| {
-                    let value = branch.then(track_branch_value, seed);
+                    let value = branch.then_with_output(track_branch_value, seed);
                     (value, value)
                 });
             });
-            pair.0
+            let out_refs = pair.0;
+            flow.output_with(out_refs);
         },
         TrackedSeed {
             value: 5,
@@ -3610,22 +3763,23 @@ fn c12_ancestor_alias_branch_keeps_the_owner() {
     reset_observations();
     let log = Log::new();
     let runtime = Runtime::new();
-    let output = block_on(runtime.execute(
+    let output = block_on(runtime.execute::<_, TrackedSeed, _>(
         |flow, seed| {
-            let selector = flow.then(route_of_tracked, seed);
-            flow.choose(selector, |choice| {
+            let selector = flow.then_with_output(route_of_tracked, seed);
+            let out_refs = flow.choose(selector, |choice| {
                 // 分支把祖先 Ref 直接作为输出：只读 alias，不转移责任。
                 choice.case(route(5), |branch| {
-                    let temp = branch.then(track_branch_value, seed);
+                    let temp = branch.then_with_output(track_branch_value, seed);
                     let _ = temp;
                     seed
                 });
                 choice.otherwise(|branch| {
-                    let temp = branch.then(track_branch_value, seed);
+                    let temp = branch.then_with_output(track_branch_value, seed);
                     let _ = temp;
                     seed
                 });
-            })
+            });
+            flow.output_with(out_refs);
         },
         TrackedSeed {
             value: 5,
@@ -3724,15 +3878,17 @@ fn c13_branch_temporaries_drop_before_the_next_parent_step() {
     let runtime = Runtime::new();
     let output: () = block_on(runtime.execute(
         |flow, seed| {
-            let selector = flow.then(route_of, seed);
+            let selector = flow.then_with_output(route_of, seed);
             flow.choose(selector, |choice| {
                 choice.case(route(1), |branch| {
-                    let temp = branch.then(track_temp, seed);
+                    let temp = branch.then_with_output(track_temp, seed);
                     let _ = temp;
-                    let _: () = branch.then(seed_observer, seed);
+                    let _: () = branch.then_with_output(seed_observer, seed);
                 });
             });
-            let _: () = flow.then(seed_observer, seed);
+            let _: () = flow.then_with_output(seed_observer, seed);
+
+            flow.output_with(());
         },
         Seed {
             value: 1,
@@ -3769,17 +3925,22 @@ fn c13_sequential_chooses_close_before_the_next_child_is_created() {
     reset_observations();
     let log = Log::new();
     let runtime = Runtime::new();
-    let output = block_on(runtime.execute(
+    let output = block_on(runtime.execute::<_, Amount, _>(
         |flow, seed| {
-            let first_selector = flow.then(route_of, seed);
+            let first_selector = flow.then_with_output(route_of, seed);
             let first = flow.choose(first_selector, |choice| {
-                choice.case(route(1), |branch| branch.then(seed_reader, seed));
+                choice.case(route(1), |branch| {
+                    branch.then_with_output(seed_reader, seed)
+                });
             });
-            let second_selector = flow.then(route_of_amount, first);
-            flow.choose(second_selector, |choice| {
-                choice.case(route(2), |branch| branch.then(AmountStep, first));
-                choice.otherwise(|branch| branch.then(AmountStep, first));
-            })
+            let second_selector = flow.then_with_output(route_of_amount, first);
+            let out_refs = flow.choose(second_selector, |choice| {
+                choice.case(route(2), |branch| {
+                    branch.then_with_output(AmountStep, first)
+                });
+                choice.otherwise(|branch| branch.then_with_output(AmountStep, first));
+            });
+            flow.output_with(out_refs);
         },
         Seed {
             value: 1,
@@ -3825,13 +3986,14 @@ fn c14_no_matching_case_stops_business_without_a_branch() {
     reset_observations();
     let log = Log::new();
     let runtime = Runtime::new();
-    let error = block_on(runtime.execute(
+    let error = block_on(runtime.execute::<_, Amount, _>(
         |flow, seed| {
-            let selector = flow.then(route_of, seed);
+            let selector = flow.then_with_output(route_of, seed);
             let picked = flow.choose(selector, |choice| {
-                choice.case(route(9), |branch| branch.then(counting, seed));
+                choice.case(route(9), |branch| branch.then_with_output(counting, seed));
             });
-            flow.then(AmountStep, picked)
+            let out_refs = flow.then_with_output(AmountStep, picked);
+            flow.output_with(out_refs);
         },
         Seed {
             value: 1,
@@ -3938,14 +4100,15 @@ fn c15_failure_from_case_and_otherwise_is_preserved_without_fallback() {
 
     // 第一次：Failure 来自 case，同时存在 otherwise 与后续业务。
     let runtime = Runtime::new();
-    let error = block_on(runtime.execute(
+    let error = block_on(runtime.execute::<_, Amount, _>(
         |flow, seed| {
-            let selector = flow.then(route_of, seed);
+            let selector = flow.then_with_output(route_of, seed);
             let picked = flow.choose(selector, |choice| {
-                choice.case(route(1), |branch| branch.then(failing, seed));
-                choice.otherwise(|branch| branch.then(fallback_observed, seed));
+                choice.case(route(1), |branch| branch.then_with_output(failing, seed));
+                choice.otherwise(|branch| branch.then_with_output(fallback_observed, seed));
             });
-            flow.then(after, picked)
+            let out_refs = flow.then_with_output(after, picked);
+            flow.output_with(out_refs);
         },
         Seed {
             value: 1,
@@ -3986,14 +4149,15 @@ fn c15_failure_from_case_and_otherwise_is_preserved_without_fallback() {
     FAIL_FROM_OTHERWISE.with(|flag| flag.set(true));
     install_root_cleanup_fault();
     let runtime = Runtime::new();
-    let error = block_on(runtime.execute(
+    let error = block_on(runtime.execute::<_, Amount, _>(
         |flow, (_unused, seed)| {
             // 清理故障注入在第一个（未被读取的）输入上，业务失败本身照常发生。
-            let selector = flow.then(route_of, seed);
-            flow.choose(selector, |choice| {
-                choice.case(route(9), |branch| branch.then(failing, seed));
-                choice.otherwise(|branch| branch.then(failing, seed));
-            })
+            let selector = flow.then_with_output(route_of, seed);
+            let out_refs = flow.choose(selector, |choice| {
+                choice.case(route(9), |branch| branch.then_with_output(failing, seed));
+                choice.otherwise(|branch| branch.then_with_output(failing, seed));
+            });
+            flow.output_with(out_refs);
         },
         (
             Amount(7),
@@ -4048,18 +4212,19 @@ fn c16_retry_crosses_choose_and_chain_then_locates_at_root() {
 
     reset_observations();
     let runtime = Runtime::new();
-    let error = block_on(runtime.execute(
+    let error = block_on(runtime.execute::<_, Amount, _>(
         |flow, amount| {
-            flow.chain(|sub| {
-                let selector = sub.then(route_of_amount, amount);
+            let out_refs = flow.chain(|sub| {
+                let selector = sub.then_with_output(route_of_amount, amount);
                 sub.choose(selector, |choice| {
                     choice.case(route(1), |branch| {
-                        let retried = branch.then(retrying, amount);
-                        branch.then(never, retried)
+                        let retried = branch.then_with_output(retrying, amount);
+                        branch.then_with_output(never, retried)
                     });
-                    choice.otherwise(|branch| branch.then(fallback_observed, amount));
+                    choice.otherwise(|branch| branch.then_with_output(fallback_observed, amount));
                 })
-            })
+            });
+            flow.output_with(out_refs);
         },
         Amount(1),
     ))
@@ -4144,19 +4309,21 @@ fn c16_iter_break_crosses_a_nested_choose() {
 
     reset_observations();
     let runtime = Runtime::new();
-    let error = block_on(runtime.execute(
+    let error = block_on(runtime.execute::<_, Amount, _>(
         |flow, amount| {
-            flow.chain(|sub| {
-                let selector = sub.then(route_of_amount, amount);
+            let out_refs = flow.chain(|sub| {
+                let selector = sub.then_with_output(route_of_amount, amount);
                 sub.choose(selector, |choice| {
                     choice.case(route(1), |branch| {
-                        let inner_selector = branch.then(route_of_amount, amount);
+                        let inner_selector = branch.then_with_output(route_of_amount, amount);
                         branch.choose(inner_selector, |inner_choice| {
-                            inner_choice.case(route(1), |deep| deep.then(breaking, amount));
+                            inner_choice
+                                .case(route(1), |deep| deep.then_with_output(breaking, amount));
                         })
                     });
                 })
-            })
+            });
+            flow.output_with(out_refs);
         },
         Amount(1),
     ))
@@ -4204,18 +4371,19 @@ fn c17_control_cleanup_failure_inside_choose_becomes_runtime() {
     let log = Log::new();
     install_control_cleanup_fault();
     let runtime = Runtime::new();
-    let error = block_on(runtime.execute(
+    let error = block_on(runtime.execute::<_, Amount, _>(
         |flow, seed| {
-            let selector = flow.then(route_of_tracked, seed);
+            let selector = flow.then_with_output(route_of_tracked, seed);
             let picked = flow.choose(selector, |choice| {
                 choice.case(route(5), |branch| {
                     // 分支先产生自己的 owned 值，再发出 Control：清理故障作用于该边界。
-                    let temp = branch.then(track_branch_value, seed);
+                    let temp = branch.then_with_output(track_branch_value, seed);
                     let _ = temp;
-                    branch.then(retrying, seed)
+                    branch.then_with_output(retrying, seed)
                 });
             });
-            flow.then(after, picked)
+            let out_refs = flow.then_with_output(after, picked);
+            flow.output_with(out_refs);
         },
         TrackedSeed {
             value: 5,
@@ -4310,12 +4478,13 @@ fn c18_no_matching_case_with_cleanup_failure_keeps_both_diagnostics() {
     // 对照组：同一无匹配路径、不注入清理故障。
     reset_observations();
     let runtime = Runtime::new();
-    let plain = block_on(runtime.execute(
+    let plain = block_on(runtime.execute::<_, Amount, _>(
         |flow, (_unused, seed)| {
-            let selector = flow.then(route_of_tracked, seed);
-            flow.choose(selector, |choice| {
-                choice.case(route(9), |branch| branch.then(counting, seed));
-            })
+            let selector = flow.then_with_output(route_of_tracked, seed);
+            let out_refs = flow.choose(selector, |choice| {
+                choice.case(route(9), |branch| branch.then_with_output(counting, seed));
+            });
+            flow.output_with(out_refs);
         },
         (
             Amount(7),
@@ -4342,12 +4511,13 @@ fn c18_no_matching_case_with_cleanup_failure_keeps_both_diagnostics() {
     reset_observations();
     install_root_cleanup_fault();
     let runtime = Runtime::new();
-    let error = block_on(runtime.execute(
+    let error = block_on(runtime.execute::<_, Amount, _>(
         |flow, (_unused, seed)| {
-            let selector = flow.then(route_of_tracked, seed);
-            flow.choose(selector, |choice| {
-                choice.case(route(9), |branch| branch.then(counting, seed));
-            })
+            let selector = flow.then_with_output(route_of_tracked, seed);
+            let out_refs = flow.choose(selector, |choice| {
+                choice.case(route(9), |branch| branch.then_with_output(counting, seed));
+            });
+            flow.output_with(out_refs);
         },
         (
             Amount(7),
@@ -4410,12 +4580,13 @@ fn c18_no_matching_case_with_cleanup_failure_keeps_both_diagnostics() {
     reset_observations();
     install_root_cleanup_faults(2);
     let runtime = Runtime::new();
-    let error = block_on(runtime.execute(
+    let error = block_on(runtime.execute::<_, Amount, _>(
         |flow, (_first, _second, seed)| {
-            let selector = flow.then(route_of_tracked, seed);
-            flow.choose(selector, |choice| {
-                choice.case(route(9), |branch| branch.then(counting, seed));
-            })
+            let selector = flow.then_with_output(route_of_tracked, seed);
+            let out_refs = flow.choose(selector, |choice| {
+                choice.case(route(9), |branch| branch.then_with_output(counting, seed));
+            });
+            flow.output_with(out_refs);
         },
         (
             Amount(7),
@@ -4465,16 +4636,17 @@ fn c19_export_preflight_rejects_the_whole_choose_group() {
     let log = Log::new();
     install_export_occupy_fault(1); // 预占第二个 parent 槽位
     let runtime = Runtime::new();
-    let error = block_on(runtime.execute(
+    let error = block_on(runtime.execute::<_, (TrackedValue, Amount), _>(
         |flow, seed| {
-            let selector = flow.then(route_of_tracked, seed);
-            flow.choose(selector, |choice| {
+            let selector = flow.then_with_output(route_of_tracked, seed);
+            let out_refs = flow.choose(selector, |choice| {
                 choice.case(route(5), |branch| {
-                    let temp = branch.then(track_branch_value, seed);
-                    let pair = branch.then(seed_reader_tracked, seed);
+                    let temp = branch.then_with_output(track_branch_value, seed);
+                    let pair = branch.then_with_output(seed_reader_tracked, seed);
                     (temp, pair)
                 });
-            })
+            });
+            flow.output_with(out_refs);
         },
         TrackedSeed {
             value: 5,
@@ -4563,12 +4735,15 @@ fn c19_import_preflight_binds_no_partial_slot() {
     reset_observations();
     install_import_occupy_fault(1); // 预占第二个 Import 目的位置
     let runtime = Runtime::new();
-    let error = block_on(runtime.execute(
+    let error = block_on(runtime.execute::<_, Amount, _>(
         |flow, (seed, amount)| {
-            let selector = flow.then(route_of_tracked, seed);
-            flow.choose(selector, |choice| {
-                choice.case(route(5), |branch| branch.then(pair_sum, (seed, amount)));
-            })
+            let selector = flow.then_with_output(route_of_tracked, seed);
+            let out_refs = flow.choose(selector, |choice| {
+                choice.case(route(5), |branch| {
+                    branch.then_with_output(pair_sum, (seed, amount))
+                });
+            });
+            flow.output_with(out_refs);
         },
         (
             TrackedSeed {
@@ -4715,21 +4890,22 @@ fn c20_choose_cancel_orders_future_branch_and_caller_drops() {
     reset_observations();
     let log = Log::new();
     let runtime = Runtime::new();
-    let mut future = Box::pin(runtime.execute(
+    let mut future = Box::pin(runtime.execute::<_, Amount, _>(
         |flow, seed| {
             // caller 侧输出：取消后按“子先于父”的次序清理。
-            let caller_value = flow.then(track_caller_value, seed);
+            let caller_value = flow.then_with_output(track_caller_value, seed);
             let _ = caller_value;
-            let selector = flow.then(route_of_tracked, seed);
-            flow.choose(selector, |choice| {
+            let selector = flow.then_with_output(route_of_tracked, seed);
+            let out_refs = flow.choose(selector, |choice| {
                 choice.case(route(5), |branch| {
                     // branch-owned 中间值，随后进入真实 Pending（借用 Future 自带 Drop 观察）。
-                    let temp = branch.then(track_branch_value, seed);
+                    let temp = branch.then_with_output(track_branch_value, seed);
                     let _ = temp;
-                    let pending = branch.then(pending_guard_node, seed);
-                    branch.then(after_choose, pending)
+                    let pending = branch.then_with_output(pending_guard_node, seed);
+                    branch.then_with_output(after_choose, pending)
                 });
-            })
+            });
+            flow.output_with(out_refs);
         },
         TrackedSeed {
             value: 5,
@@ -4785,21 +4961,22 @@ fn c20_choose_nested_pending_cancel_releases_each_level_once() {
     let log = Log::new();
     let runtime = Runtime::new();
     // Root → Chain → Choose → branch：真实 Pending 位于嵌套 Choose 的分支内。
-    let mut future = Box::pin(runtime.execute(
+    let mut future = Box::pin(runtime.execute::<_, Amount, _>(
         |flow, seed| {
-            flow.chain(|sub| {
-                let chain_temp = sub.then(track_chain_value, seed);
+            let out_refs = flow.chain(|sub| {
+                let chain_temp = sub.then_with_output(track_chain_value, seed);
                 let _ = chain_temp;
-                let selector = sub.then(route_of_tracked, seed);
+                let selector = sub.then_with_output(route_of_tracked, seed);
                 sub.choose(selector, |choice| {
                     choice.case(route(5), |branch| {
-                        let branch_temp = branch.then(track_branch_value, seed);
+                        let branch_temp = branch.then_with_output(track_branch_value, seed);
                         let _ = branch_temp;
-                        let pending = branch.then(pending_guard_node, seed);
-                        branch.then(after_choose, pending)
+                        let pending = branch.then_with_output(pending_guard_node, seed);
+                        branch.then_with_output(after_choose, pending)
                     })
                 })
-            })
+            });
+            flow.output_with(out_refs);
         },
         TrackedSeed {
             value: 5,
@@ -4846,15 +5023,16 @@ fn c20_unpolled_choose_cancel_releases_input_once_and_builds_nothing() {
     }
 
     let runtime = Runtime::new();
-    let unpolled = runtime.execute(
+    let unpolled = runtime.execute::<_, (), _>(
         |flow, (seed, _unused)| {
-            let selector = flow.then(route_of_tracked, seed);
-            flow.choose(selector, |choice| {
+            let selector = flow.then_with_output(route_of_tracked, seed);
+            let () = flow.choose(selector, |choice| {
                 choice.case(route(5), |branch| {
                     BUILDS.fetch_add(1, Ordering::SeqCst);
-                    let _: () = branch.then(tracked_observer, seed);
+                    let _: () = branch.then_with_output(tracked_observer, seed);
                 })
-            })
+            });
+            flow.output_with(());
         },
         (
             TrackedSeed {
@@ -4887,15 +5065,16 @@ fn c21_choose_duplicate_source_output_is_rejected_before_any_take() {
     let log = Log::new();
     let runtime = Runtime::new();
     // 分支返回 (value, value)：两个 parent 槽指向同一 DataId，Root 必须整组拒绝。
-    let error = block_on(runtime.execute(
+    let error = block_on(runtime.execute::<_, (Tracked, Tracked), _>(
         |flow, seed| {
-            let selector = flow.then(route_of, seed);
-            flow.choose(selector, |choice| {
+            let selector = flow.then_with_output(route_of, seed);
+            let out_refs = flow.choose(selector, |choice| {
                 choice.case(route(1), |branch| {
-                    let value = branch.then(track_temp, seed);
+                    let value = branch.then_with_output(track_temp, seed);
                     (value, value)
                 });
-            })
+            });
+            flow.output_with(out_refs);
         },
         Seed {
             value: 1,
@@ -4930,12 +5109,15 @@ fn c21_choose_identity_is_per_execution_and_foreign_selectors_are_rejected() {
     reset_observations();
     let runtime = Runtime::new();
     let run = |runtime: &Runtime| {
-        block_on(runtime.execute(
+        block_on(runtime.execute::<_, Amount, _>(
             |flow, seed| {
-                let selector = flow.then(route_of, seed);
-                flow.choose(selector, |choice| {
-                    choice.case(route(1), |branch| branch.then(seed_reader, seed));
-                })
+                let selector = flow.then_with_output(route_of, seed);
+                let out_refs = flow.choose(selector, |choice| {
+                    choice.case(route(1), |branch| {
+                        branch.then_with_output(seed_reader, seed)
+                    });
+                });
+                flow.output_with(out_refs);
             },
             Seed {
                 value: 1,
@@ -4959,11 +5141,12 @@ fn c21_choose_identity_is_per_execution_and_foreign_selectors_are_rejected() {
 
     // 上一次执行的选择器 Ref 不能在本次执行中作为 selector 使用。
     let mut leaked: Option<Ref<Route>> = None;
-    let _ = block_on(runtime.execute(
+    let _ = block_on(runtime.execute::<_, Seed, _>(
         |_flow, seed| {
-            let route_ref = _flow.then(route_of, seed);
+            let route_ref = _flow.then_with_output(route_of, seed);
             leaked = Some(route_ref);
-            seed
+            let out_refs = seed;
+            _flow.output_with(out_refs);
         },
         Seed {
             value: 1,
@@ -4972,11 +5155,14 @@ fn c21_choose_identity_is_per_execution_and_foreign_selectors_are_rejected() {
     ))
     .ok();
     let foreign = leaked.expect("captured selector ref");
-    let error = block_on(runtime.execute(
+    let error = block_on(runtime.execute::<_, Amount, _>(
         move |flow, seed| {
-            flow.choose(foreign, |choice| {
-                choice.case(route(1), |branch| branch.then(seed_reader, seed));
-            })
+            let out_refs = flow.choose(foreign, |choice| {
+                choice.case(route(1), |branch| {
+                    branch.then_with_output(seed_reader, seed)
+                });
+            });
+            flow.output_with(out_refs);
         },
         Seed {
             value: 1,

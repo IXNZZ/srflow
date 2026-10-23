@@ -125,15 +125,16 @@ fn doubled(handle: PositionHandle) -> Ref<Doubled> {
 
 #[test]
 fn a01_nearest_root_and_node_sources_are_frozen() {
-    let definition = build_definition::<(Amount, Amount), _, _>(|flow, (first, second)| {
+    let definition = build_definition::<(Amount, Amount), Amount, _>(|flow, (first, second)| {
         assert_ne!(first.handle(), second.handle());
         let nearest = flow.ref_of::<Amount>();
         assert_eq!(nearest.handle(), second.handle());
-        let produced = flow.then(add_one, first);
+        let produced = flow.then_with_output(add_one, first);
         let after = flow.ref_of::<Amount>();
         assert_eq!(after.handle(), produced.handle());
         assert_ne!(nearest.handle(), after.handle());
-        second
+        let out_refs = second;
+        flow.output_with(out_refs);
     })
     .expect("same-type root inputs and later node source should build");
     assert_eq!(definition.root().steps().len(), 1);
@@ -143,19 +144,20 @@ fn a01_nearest_root_and_node_sources_are_frozen() {
 
 #[test]
 fn a02_ancestor_shadowing_and_chain_output_visibility() {
-    let definition = build_definition::<Amount, _, _>(|flow, amount_ref| {
+    let definition = build_definition::<Amount, Amount, _>(|flow, amount_ref| {
         let root = flow.ref_of::<Amount>();
         flow.chain(|sub| {
             let ancestor = sub.ref_of::<Amount>();
             assert_eq!(ancestor.handle(), amount_ref.handle());
-            let local = sub.then(add_one, amount_ref);
+            let local = sub.then_with_output(add_one, amount_ref);
             let nearest = sub.ref_of::<Amount>();
             assert_eq!(nearest.handle(), local.handle());
             local
         });
         let after = flow.ref_of::<Amount>();
         assert_ne!(after.handle(), root.handle());
-        after
+        let out_refs = after;
+        flow.output_with(out_refs);
     })
     .expect("ancestor query, local shadowing and chain output should build");
     assert_eq!(definition.root().steps().len(), 1);
@@ -163,13 +165,14 @@ fn a02_ancestor_shadowing_and_chain_output_visibility() {
 
 #[test]
 fn a02_child_local_and_sibling_are_not_visible() {
-    let error = build_definition::<Amount, _, _>(|flow, amount_ref| {
+    let error = build_definition::<Amount, Amount, _>(|flow, amount_ref| {
         flow.chain(|sub| {
-            let _ = sub.then(double, amount_ref);
+            let _ = sub.then_with_output(double, amount_ref);
             ()
         });
         let _ = flow.ref_of::<Doubled>();
-        amount_ref
+        let out_refs = amount_ref;
+        flow.output_with(out_refs);
     })
     .err()
     .expect("unexported child-local output must not be visible to the parent");
@@ -181,16 +184,17 @@ fn a02_child_local_and_sibling_are_not_visible() {
 
 #[test]
 fn a02_sibling_child_local_is_not_visible() {
-    let error = build_definition::<Amount, _, _>(|flow, amount_ref| {
+    let error = build_definition::<Amount, Amount, _>(|flow, amount_ref| {
         flow.chain(|sub| {
-            let _ = sub.then(double, amount_ref);
+            let _ = sub.then_with_output(double, amount_ref);
             ()
         });
         flow.chain(|sub| {
             let _ = sub.ref_of::<Doubled>();
             ()
         });
-        amount_ref
+        let out_refs = amount_ref;
+        flow.output_with(out_refs);
     })
     .err()
     .expect("a sibling's unexported local must not be visible");
@@ -315,7 +319,7 @@ fn a03a_early_explicit_use_is_not_retroactively_published() {
         .new_body(Some(root), BodyRole::Ordinary);
     {
         let mut flow = Flow::open(Rc::clone(&builder), branch);
-        let _ = flow.then(add_one, amount(outputs[0]));
+        let _ = flow.then_with_output(add_one, amount(outputs[0]));
     }
     let branch = builder.borrow_mut().register_choose_branch(
         branch,
@@ -429,20 +433,24 @@ fn a03b_business_source_table_is_explicit() {
 
 #[test]
 fn a03b_newer_retry_and_iter_bridges_are_excluded_from_queries() {
-    let retry_definition = build_definition::<Amount, _, _>(|flow, amount_ref| {
-        let retried = flow.retry(1, |sub| sub.then(add_one, amount_ref));
+    let retry_definition = build_definition::<Amount, Amount, _>(|flow, amount_ref| {
+        let retried = flow.retry(1, |sub| sub.then_with_output(add_one, amount_ref));
         let found = flow.ref_of::<Amount>();
         assert_eq!(found.handle(), retried.handle());
-        retried
+        let out_refs = retried;
+        flow.output_with(out_refs);
     })
     .expect("retry bridge must not shadow the retry output");
     assert_eq!(retry_definition.root().steps().len(), 1);
 
-    let iter_definition = build_definition::<Amount, _, _>(|flow, amount_ref| {
-        let iterated = flow.iter(amount_ref, 1, |current, sub| sub.then(add_one, current));
+    let iter_definition = build_definition::<Amount, Amount, _>(|flow, amount_ref| {
+        let iterated = flow.iter(amount_ref, 1, |current, sub| {
+            sub.then_with_output(add_one, current)
+        });
         let found = flow.ref_of::<Amount>();
         assert_eq!(found.handle(), iterated.handle());
-        iterated
+        let out_refs = iterated;
+        flow.output_with(out_refs);
     })
     .expect("iter bridge must not shadow the iter output");
     assert_eq!(iter_definition.root().steps().len(), 1);
@@ -452,28 +460,30 @@ fn a03b_newer_retry_and_iter_bridges_are_excluded_from_queries() {
 
 #[test]
 fn a04_item_and_current_are_visible_and_shadowed() {
-    let _ = build_definition::<Vec<Amount>, _, _>(|flow, items| {
-        flow.each(items, |item, sub| {
+    let _ = build_definition::<Vec<Amount>, Vec<Amount>, _>(|flow, items| {
+        let out_refs = flow.each(items, |item, sub| {
             let found = sub.ref_of::<Amount>();
             assert_eq!(found.handle(), item.handle());
-            let advanced = sub.then(add_one, item);
+            let advanced = sub.then_with_output(add_one, item);
             let nearest = sub.ref_of::<Amount>();
             assert_eq!(nearest.handle(), advanced.handle());
             advanced
-        })
+        });
+        flow.output_with(out_refs);
     })
     .expect("item query, shadowing and collected output should build");
 
-    let _ = build_definition::<Amount, _, _>(|flow, amount_ref| {
-        flow.iter(amount_ref, 1, |current, round| {
+    let _ = build_definition::<Amount, Amount, _>(|flow, amount_ref| {
+        let out_refs = flow.iter(amount_ref, 1, |current, round| {
             let saved = round.ref_of::<Amount>();
             assert_eq!(saved.handle(), current.handle());
-            let advanced = round.then(add_one, current);
+            let advanced = round.then_with_output(add_one, current);
             let nearest = round.ref_of::<Amount>();
             assert_eq!(nearest.handle(), advanced.handle());
-            let _ = round.then(sink_amount, saved);
+            let _ = round.then_with_output(sink_amount, saved);
             advanced
-        })
+        });
+        flow.output_with(out_refs);
     })
     .expect("current query, saved identity and shadowing should build");
 }
@@ -488,7 +498,7 @@ fn a04_current_is_not_visible_to_the_parent() {
             .allocate_iter_current(round, 0, &[TypeDesc::of::<Doubled>()]);
     {
         let mut flow = Flow::open(Rc::clone(&builder), root);
-        let _ = flow.then(sink_doubled, doubled(current[0]));
+        let _ = flow.then_with_output(sink_doubled, doubled(current[0]));
     }
     let error = finish_builder(builder, root)
         .err()
@@ -509,9 +519,10 @@ fn a04_current_is_not_visible_to_the_parent() {
 
 #[test]
 fn a05_unused_ref_of_adds_nothing() {
-    let definition = build_definition::<Amount, _, _>(|flow, _amount_ref| {
+    let definition = build_definition::<Amount, (), _>(|flow, _amount_ref| {
         let _ = flow.ref_of::<Amount>();
-        ()
+        let () = ();
+        flow.output_with(());
     })
     .expect("unused successful query should build");
     assert_eq!(definition.root().steps().len(), 0);
@@ -531,7 +542,7 @@ fn a05_declaration_imports_are_recorded_and_deduplicated() {
         .new_body(Some(child), BodyRole::Ordinary);
     {
         let mut flow = Flow::open(Rc::clone(&builder), grandchild);
-        let _ = flow.then(add_one, amount(amount_source));
+        let _ = flow.then_with_output(add_one, amount(amount_source));
         flow.output_with(amount(amount_source));
     }
     let definition = finish_builder(builder, root).expect("grandchild output should build");
@@ -616,7 +627,7 @@ fn a05_next_use_deduplicates_with_node_input() {
         .set_round_initial(round, vec![TypeDesc::of::<Amount>()]);
     {
         let mut flow = Flow::open(Rc::clone(&builder), round);
-        let _ = flow.then(add_one, amount(amount_source));
+        let _ = flow.then_with_output(add_one, amount(amount_source));
         flow.next_with(amount(amount_source));
     }
     let definition = finish_builder(builder, root).expect("next declaration should build");
@@ -739,7 +750,7 @@ fn a07_output_is_frozen_at_declaration_and_preserves_slots() {
     {
         let mut flow = Flow::open(Rc::clone(&builder), root);
         flow.output_with(amount(amount_source));
-        let _ = flow.then(add_one, amount(amount_source));
+        let _ = flow.then_with_output(add_one, amount(amount_source));
     }
     let definition = finish_builder(builder, root).expect("frozen output");
     let declaration = definition.root().output_declaration();
@@ -1456,8 +1467,11 @@ fn a11_next_declaration_states_and_shapes() {
 
 #[test]
 fn a11_old_iter_maps_state_to_next() {
-    let definition = build_definition::<Amount, _, _>(|flow, amount_ref| {
-        flow.iter(amount_ref, 1, |current, sub| sub.then(add_one, current))
+    let definition = build_definition::<Amount, Amount, _>(|flow, amount_ref| {
+        let out_refs = flow.iter(amount_ref, 1, |current, sub| {
+            sub.then_with_output(add_one, current)
+        });
+        flow.output_with(out_refs);
     })
     .expect("old iter should build");
     let round = definition
@@ -1476,15 +1490,19 @@ fn a11_old_iter_maps_state_to_next() {
 
 #[test]
 fn a12_old_unit_and_next_mappings() {
-    let root = build_definition::<(), _, _>(|_flow, ()| ()).expect("old unit root");
+    let root = build_definition::<(), (), _>(|_flow, ()| {
+        _flow.output_with(());
+    })
+    .expect("old unit root");
     assert_eq!(
         root.root().output_declaration().state(),
         DeclarationState::Unit
     );
 
-    let chain = build_definition::<(), _, _>(|flow, ()| {
+    let chain = build_definition::<(), (), _>(|flow, ()| {
         flow.chain(|_sub| ());
-        ()
+        let () = ();
+        flow.output_with(());
     })
     .expect("old unit chain");
     let child = chain
@@ -1494,9 +1512,10 @@ fn a12_old_unit_and_next_mappings() {
         .expect("chain child");
     assert_eq!(child.output_declaration().state(), DeclarationState::Unit);
 
-    let retry = build_definition::<(), _, _>(|flow, ()| {
+    let retry = build_definition::<(), (), _>(|flow, ()| {
         flow.retry(1, |_sub| ());
-        ()
+        let () = ();
+        flow.output_with(());
     })
     .expect("old unit retry");
     let attempt = retry
@@ -1506,9 +1525,10 @@ fn a12_old_unit_and_next_mappings() {
         .expect("retry attempt");
     assert_eq!(attempt.output_declaration().state(), DeclarationState::Unit);
 
-    let each = build_definition::<Vec<Amount>, _, _>(|flow, items| {
+    let each = build_definition::<Vec<Amount>, (), _>(|flow, items| {
         flow.each(items, |_item, _sub| ());
-        ()
+        let () = ();
+        flow.output_with(());
     })
     .expect("old unit each");
     let item = each
@@ -1518,13 +1538,14 @@ fn a12_old_unit_and_next_mappings() {
         .expect("each item");
     assert_eq!(item.output_declaration().state(), DeclarationState::Unit);
 
-    let choose = build_definition::<Amount, _, _>(|flow, amount_ref| {
-        let selector = flow.then(key_from_amount, amount_ref);
+    let choose = build_definition::<Amount, (), _>(|flow, amount_ref| {
+        let selector = flow.then_with_output(key_from_amount, amount_ref);
         flow.choose(selector, |choice| {
             choice.case(Key(1), |_sub| ());
             choice.case(Key(2), |_sub| ());
         });
-        ()
+        let () = ();
+        flow.output_with(());
     })
     .expect("old unit choose");
     let branches: Vec<_> = choose
@@ -1537,8 +1558,11 @@ fn a12_old_unit_and_next_mappings() {
         assert_eq!(branch.output_declaration().state(), DeclarationState::Unit);
     }
 
-    let iter = build_definition::<Amount, _, _>(|flow, amount_ref| {
-        flow.iter(amount_ref, 1, |current, sub| sub.then(add_one, current))
+    let iter = build_definition::<Amount, Amount, _>(|flow, amount_ref| {
+        let out_refs = flow.iter(amount_ref, 1, |current, sub| {
+            sub.then_with_output(add_one, current)
+        });
+        flow.output_with(out_refs);
     })
     .expect("old iter");
     let round = iter
@@ -1762,9 +1786,10 @@ fn a12_old_adapters_reject_second_declarations() {
 
 #[test]
 fn a12_real_build_definition_rejects_internal_output_then_old_return() {
-    let error = build_definition::<(), _, _>(|flow, ()| {
+    let error = build_definition::<(), (), _>(|flow, ()| {
         flow.output::<()>();
-        ()
+        let () = ();
+        flow.output_with(());
     })
     .err()
     .expect("real root return must not silently replace the internal declaration");
@@ -2159,9 +2184,10 @@ fn a12_old_adapters_preserve_non_unit_and_first_failure() {
 
 #[test]
 fn a13a_missing_ref_of_fails_even_when_unused() {
-    let unused = build_definition::<(), _, _>(|flow, ()| {
+    let unused = build_definition::<(), (), _>(|flow, ()| {
         let _ = flow.ref_of::<Missing>();
-        ()
+        let () = ();
+        flow.output_with(());
     })
     .err()
     .expect("unused missing query must fail");
@@ -2170,10 +2196,11 @@ fn a13a_missing_ref_of_fails_even_when_unused() {
         "{unused}"
     );
 
-    let used = build_definition::<(), _, _>(|flow, ()| {
+    let used = build_definition::<(), (), _>(|flow, ()| {
         let bad = flow.ref_of::<Missing>();
-        let _ = flow.then(sink_missing, bad);
-        ()
+        let _ = flow.then_with_output(sink_missing, bad);
+        let () = ();
+        flow.output_with(());
     })
     .err()
     .expect("explicit use of a failed handle must fail");
@@ -2186,13 +2213,13 @@ fn a13a_missing_ref_of_fails_even_when_unused() {
 fn tainted_amount(builder: &Rc<RefCell<Builder<'static>>>, root: BodyId) -> PositionHandle {
     let mut flow = Flow::open(Rc::clone(builder), root);
     let bad = flow.ref_of::<Missing>();
-    flow.then(missing_to_amount, bad).handle()
+    flow.then_with_output(missing_to_amount, bad).handle()
 }
 
 fn tainted_vec(builder: &Rc<RefCell<Builder<'static>>>, root: BodyId) -> PositionHandle {
     let mut flow = Flow::open(Rc::clone(builder), root);
     let bad = flow.ref_of::<Missing>();
-    flow.then(missing_to_vec, bad).handle()
+    flow.then_with_output(missing_to_vec, bad).handle()
 }
 
 async fn missing_to_vec(query: Query<&Missing>) -> Result<Vec<Amount>, BodyError> {
@@ -2729,7 +2756,7 @@ fn a13b1_tainted_real_output_reaches_explicit_paths() {
         let tainted = tainted_amount(&builder, root);
         {
             let mut flow = Flow::open(Rc::clone(&builder), root);
-            let _ = flow.then(add_one, amount(tainted));
+            let _ = flow.then_with_output(add_one, amount(tainted));
         }
         assert!(
             builder
@@ -2811,11 +2838,12 @@ fn a14_partial_auto_declaration_and_later_sources_do_not_repair_failures() {
         Some(BuildErrorDetail::ForeignDefinition { .. })
     ));
 
-    let later_source = build_definition::<Amount, _, _>(|flow, amount_ref| {
+    let later_source = build_definition::<Amount, Amount, _>(|flow, amount_ref| {
         let bad = flow.ref_of::<Missing>();
         let _ = flow.ref_of::<Amount>();
-        let _ = flow.then(sink_missing, bad);
-        amount_ref
+        let _ = flow.then_with_output(sink_missing, bad);
+        let out_refs = amount_ref;
+        flow.output_with(out_refs);
     })
     .err()
     .expect("a later legal source must not revive the failed handle");
@@ -2827,15 +2855,16 @@ fn a14_partial_auto_declaration_and_later_sources_do_not_repair_failures() {
 
 #[test]
 fn a14_later_same_type_source_is_usable_and_old_handle_stays_invalid() {
-    let error = build_definition::<(), _, _>(|flow, ()| {
+    let error = build_definition::<(), (), _>(|flow, ()| {
         let bad = flow.ref_of::<Missing>();
-        let produced = flow.then(load_missing, ());
+        let produced = flow.then_with_output(load_missing, ());
         let found = flow.ref_of::<Missing>();
         assert_eq!(found.handle(), produced.handle());
         assert_ne!(found.handle(), bad.handle());
-        let _ = flow.then(sink_missing, found);
-        let _ = flow.then(sink_missing, bad);
-        ()
+        let _ = flow.then_with_output(sink_missing, found);
+        let _ = flow.then_with_output(sink_missing, bad);
+        let () = ();
+        flow.output_with(());
     })
     .err()
     .expect("the original failed handle must keep the build rejected");
@@ -2851,11 +2880,12 @@ fn a14_later_same_type_source_is_usable_and_old_handle_stays_invalid() {
 fn a15_runtime_rejects_missing_source_before_any_node() {
     EXECUTIONS.store(0, Ordering::SeqCst);
     let runtime = Runtime::new();
-    let error = block_on(runtime.execute::<(), _, _>(
+    let error = block_on(runtime.execute::<(), (), _>(
         |flow, ()| {
             let _ = flow.ref_of::<Missing>();
-            let _ = flow.then(counting_load, ());
-            ()
+            let _ = flow.then_with_output(counting_load, ());
+            let () = ();
+            flow.output_with(());
         },
         (),
     ))
@@ -2872,12 +2902,13 @@ fn a15_runtime_rejects_missing_source_before_any_node() {
     assert_eq!(EXECUTIONS.load(Ordering::SeqCst), 0);
 
     EXECUTIONS.store(0, Ordering::SeqCst);
-    let used = block_on(runtime.execute::<(), _, _>(
+    let used = block_on(runtime.execute::<(), (), _>(
         |flow, ()| {
             let bad = flow.ref_of::<Missing>();
-            let _ = flow.then(sink_missing, bad);
-            let _ = flow.then(counting_load, ());
-            ()
+            let _ = flow.then_with_output(sink_missing, bad);
+            let _ = flow.then_with_output(counting_load, ());
+            let () = ();
+            flow.output_with(());
         },
         (),
     ))
@@ -2898,10 +2929,11 @@ fn a15_runtime_rejects_missing_source_before_any_node() {
 
 #[test]
 fn a16_old_chain_path_still_builds() {
-    let definition = build_definition::<Amount, _, _>(|flow, amount_ref| {
-        let chained = flow.chain(|sub| sub.then(add_one, amount_ref));
-        flow.then(add_one, chained);
-        chained
+    let definition = build_definition::<Amount, Amount, _>(|flow, amount_ref| {
+        let chained = flow.chain(|sub| sub.then_with_output(add_one, amount_ref));
+        flow.then_with_output(add_one, chained);
+        let out_refs = chained;
+        flow.output_with(out_refs);
     })
     .expect("old chain path should keep working");
     assert_eq!(definition.root().steps().len(), 2);

@@ -238,7 +238,16 @@ fn s08_six_operations_compose_in_one_execution() {
     reset();
     let runtime = Runtime::new();
     let output =
-        block_on(runtime.execute(
+        block_on(runtime.execute::<_, (
+            Verdict,
+            Amount,
+            Merged,
+            Label,
+            Vec<Score>,
+            Vec<Summary>,
+            Draft,
+            Context,
+        ), _>(
             |flow: &mut Flow<'_>,
              (seed, items, draft, context): (
                 Ref<Seed>,
@@ -247,30 +256,30 @@ fn s08_six_operations_compose_in_one_execution() {
                 Ref<Context>,
             )| {
                 // 1) then：selector 键。
-                let key = flow.then(&key_of, seed);
+                let key = flow.then_with_output(&key_of, seed);
                 // 2) retry：完整 attempt 重启一次后成功。
                 let verdict = flow.retry(3, |attempt| {
-                    let candidate = attempt.then(&generate, seed);
-                    attempt.then(&judge, candidate)
+                    let candidate = attempt.then_with_output(&generate, seed);
+                    attempt.then_with_output(&judge, candidate)
                 });
                 // 3) choose：Key(2) 命中 triple，其余分支一个都不执行。
                 let amount = flow.choose(key, |choice| {
-                    choice.case(Key(1), |branch| branch.then(&double, verdict));
-                    choice.case(Key(2), |branch| branch.then(&triple, verdict));
-                    choice.otherwise(|branch| branch.then(&fallback, verdict));
+                    choice.case(Key(1), |branch| branch.then_with_output(&double, verdict));
+                    choice.case(Key(2), |branch| branch.then_with_output(&triple, verdict));
+                    choice.otherwise(|branch| branch.then_with_output(&fallback, verdict));
                 });
                 // 4) chain：child 边界 + 两槽输出。
                 let (merged, label) = flow.chain(|sub| {
-                    let label = sub.then(&label_at_root, seed);
-                    let merged = sub.then(&merge, (amount, verdict, label));
+                    let label = sub.then_with_output(&label_at_root, seed);
+                    let merged = sub.then_with_output(&merge, (amount, verdict, label));
                     (merged, label)
                 });
                 // 5) each：每项两个输出槽，item body 内再一层 chain（深层捕获 Root `Seed`）。
                 let (scores, summaries) = flow.each(items, |item, each| {
-                    let score = each.then(&score, item);
+                    let score = each.then_with_output(&score, item);
                     let summary = each.chain(|sub| {
-                        let label = sub.then(&label_in_item, seed);
-                        sub.then(&summary, (item, score, label))
+                        let label = sub.then_with_output(&label_in_item, seed);
+                        sub.then_with_output(&summary, (item, score, label))
                     });
                     (score, summary)
                 });
@@ -279,15 +288,16 @@ fn s08_six_operations_compose_in_one_execution() {
                     (draft, context),
                     3,
                     |(current_draft, current_context), round| {
-                        let next_draft = round.then(&revise, current_draft);
-                        let next_context = round.then(&bump_context, current_context);
-                        round.then(&round_judge, current_context);
+                        let next_draft = round.then_with_output(&revise, current_draft);
+                        let next_context = round.then_with_output(&bump_context, current_context);
+                        round.then_with_output(&round_judge, current_context);
                         (next_draft, next_context)
                     },
                 );
-                (
+                let out_refs = (
                     verdict, amount, merged, label, scores, summaries, draft, context,
-                )
+                );
+                flow.output_with(out_refs);
             },
             (
                 Seed(2),
@@ -395,18 +405,19 @@ async fn break_at_one(query: Query<&Context>) -> Result<Verdict, BodyError> {
 fn s09_path_a_iter_break_delivers_current_not_next() {
     reset();
     let runtime = Runtime::new();
-    let (draft, context) = block_on(runtime.execute(
+    let (draft, context) = block_on(runtime.execute::<_, (Draft, Context), _>(
         |flow, (draft, context)| {
-            flow.iter(
+            let out_refs = flow.iter(
                 (draft, context),
                 4,
                 |(current_draft, current_context), round| {
-                    let next_draft = round.then(&revise, current_draft);
-                    let next_context = round.then(&bump_context, current_context);
-                    round.then(&break_at_one, current_context);
+                    let next_draft = round.then_with_output(&revise, current_draft);
+                    let next_context = round.then_with_output(&bump_context, current_context);
+                    round.then_with_output(&break_at_one, current_context);
                     (next_draft, next_context)
                 },
-            )
+            );
+            flow.output_with(out_refs);
         },
         (Draft(String::from("a")), Context(0)),
     ))
@@ -463,23 +474,24 @@ async fn consume(query: Query<&Verdict>) -> Result<Summary, BodyError> {
 fn s09_path_b_inner_retry_restarts_complete_attempt_in_round() {
     reset();
     let runtime = Runtime::new();
-    let (draft, context) = block_on(runtime.execute(
+    let (draft, context) = block_on(runtime.execute::<_, (Draft, Context), _>(
         |flow, (draft, context)| {
-            flow.iter(
+            let out_refs = flow.iter(
                 (draft, context),
                 3,
                 |(current_draft, current_context), round| {
                     let verdict = round.retry(1, |attempt| {
-                        let candidate = attempt.then(&gen_in_round, current_context);
-                        attempt.then(&judge_in_round, candidate)
+                        let candidate = attempt.then_with_output(&gen_in_round, current_context);
+                        attempt.then_with_output(&judge_in_round, candidate)
                     });
-                    round.then(&consume, verdict);
-                    let next_draft = round.then(&revise, current_draft);
-                    let next_context = round.then(&bump_context, current_context);
-                    round.then(&break_at_one, current_context);
+                    round.then_with_output(&consume, verdict);
+                    let next_draft = round.then_with_output(&revise, current_draft);
+                    let next_context = round.then_with_output(&bump_context, current_context);
+                    round.then_with_output(&break_at_one, current_context);
                     (next_draft, next_context)
                 },
-            )
+            );
+            flow.output_with(out_refs);
         },
         (Draft(String::from("b")), Context(0)),
     ))
@@ -537,11 +549,12 @@ async fn after_failure(query: Query<&Summary>) -> Result<Amount, BodyError> {
 fn s09_path_c_failure_terminates_and_stops_followups() {
     reset();
     let runtime = Runtime::new();
-    let error = match block_on(runtime.execute(
+    let error = match block_on(runtime.execute::<_, Amount, _>(
         |flow, seed| {
-            let first = flow.then(&first_ok, seed);
-            let failed = flow.then(&fail_here, first);
-            flow.then(&after_failure, failed)
+            let first = flow.then_with_output(&first_ok, seed);
+            let failed = flow.then_with_output(&fail_here, first);
+            let out_refs = flow.then_with_output(&after_failure, failed);
+            flow.output_with(out_refs);
         },
         Seed(1),
     )) {
@@ -595,13 +608,14 @@ async fn after_retry(query: Query<&Verdict>) -> Result<Summary, BodyError> {
 fn s09_path_d_retry_exhaustion_keeps_fields_and_last_reason() {
     reset();
     let runtime = Runtime::new();
-    let error = match block_on(runtime.execute(
+    let error = match block_on(runtime.execute::<_, Summary, _>(
         |flow, seed| {
             let verdict = flow.retry(1, |attempt| {
-                let candidate = attempt.then(&always_generate, seed);
-                attempt.then(&always_retry, candidate)
+                let candidate = attempt.then_with_output(&always_generate, seed);
+                attempt.then_with_output(&always_retry, candidate)
             });
-            flow.then(&after_retry, verdict)
+            let out_refs = flow.then_with_output(&after_retry, verdict);
+            flow.output_with(out_refs);
         },
         Seed(5),
     )) {
@@ -678,14 +692,15 @@ fn s09_propagation_chain_control_and_failure_reach_root_unchanged() {
     let runtime = Runtime::new();
 
     // (a) child 内的 IterBreak：无匹配边界的 Control → UnhandledControl。
-    let error = match block_on(runtime.execute(
+    let error = match block_on(runtime.execute::<_, Summary, _>(
         |flow, seed| {
-            let _before = flow.then(&chain_probe, seed);
+            let _before = flow.then_with_output(&chain_probe, seed);
             let inside = flow.chain(|sub| {
-                let probe = sub.then(&chain_probe, seed);
-                sub.then(&chain_break, probe)
+                let probe = sub.then_with_output(&chain_probe, seed);
+                sub.then_with_output(&chain_break, probe)
             });
-            flow.then(&after_chain, inside)
+            let out_refs = flow.then_with_output(&after_chain, inside);
+            flow.output_with(out_refs);
         },
         Seed(1),
     )) {
@@ -708,13 +723,14 @@ fn s09_propagation_chain_control_and_failure_reach_root_unchanged() {
 
     // (b) child 内的 Failure：原对象跨 child 边界保留。
     reset();
-    let error = match block_on(runtime.execute(
+    let error = match block_on(runtime.execute::<_, Summary, _>(
         |flow, seed| {
             let inside = flow.chain(|sub| {
-                let probe = sub.then(&chain_probe, seed);
-                sub.then(&chain_fail, probe)
+                let probe = sub.then_with_output(&chain_probe, seed);
+                sub.then_with_output(&chain_fail, probe)
             });
-            flow.then(&after_chain, inside)
+            let out_refs = flow.then_with_output(&after_chain, inside);
+            flow.output_with(out_refs);
         },
         Seed(9),
     )) {
@@ -780,15 +796,20 @@ fn s09_propagation_choose_control_and_failure_do_not_run_other_branches() {
     let runtime = Runtime::new();
 
     // (a) 选中分支发出 IterBreak：跨 Choose 边界到 Root → UnhandledControl。
-    let error = match block_on(runtime.execute(
+    let error = match block_on(runtime.execute::<_, Summary, _>(
         |flow, seed| {
-            let selector = flow.then(&selector_from_seed, seed);
+            let selector = flow.then_with_output(&selector_from_seed, seed);
             let picked = flow.choose(selector, |choice| {
-                choice.case(Key(1), |branch| branch.then(&branch_control, seed));
-                choice.case(Key(2), |branch| branch.then(&branch_other, seed));
-                choice.otherwise(|branch| branch.then(&branch_fallback, seed));
+                choice.case(Key(1), |branch| {
+                    branch.then_with_output(&branch_control, seed)
+                });
+                choice.case(Key(2), |branch| {
+                    branch.then_with_output(&branch_other, seed)
+                });
+                choice.otherwise(|branch| branch.then_with_output(&branch_fallback, seed));
             });
-            flow.then(&after_choose, picked)
+            let out_refs = flow.then_with_output(&after_choose, picked);
+            flow.output_with(out_refs);
         },
         Seed(1),
     )) {
@@ -813,15 +834,18 @@ fn s09_propagation_choose_control_and_failure_do_not_run_other_branches() {
 
     // (b) 选中分支 Failure：不回退 otherwise；原对象保留。
     reset();
-    let error = match block_on(runtime.execute(
+    let error = match block_on(runtime.execute::<_, Summary, _>(
         |flow, seed| {
-            let selector = flow.then(&selector_from_seed, seed);
+            let selector = flow.then_with_output(&selector_from_seed, seed);
             let picked = flow.choose(selector, |choice| {
-                choice.case(Key(1), |branch| branch.then(&branch_fail, seed));
-                choice.case(Key(2), |branch| branch.then(&branch_other, seed));
-                choice.otherwise(|branch| branch.then(&branch_fallback, seed));
+                choice.case(Key(1), |branch| branch.then_with_output(&branch_fail, seed));
+                choice.case(Key(2), |branch| {
+                    branch.then_with_output(&branch_other, seed)
+                });
+                choice.otherwise(|branch| branch.then_with_output(&branch_fallback, seed));
             });
-            flow.then(&after_choose, picked)
+            let out_refs = flow.then_with_output(&after_choose, picked);
+            flow.output_with(out_refs);
         },
         Seed(1),
     )) {
@@ -878,8 +902,13 @@ fn s09_propagation_each_stops_remaining_items() {
     let runtime = Runtime::new();
 
     // (a) 第二项 Failure：第三项不再执行。
-    let error = match block_on(runtime.execute(
-        |flow, items| flow.each(items, |item, each| each.then(&item_checked, item)),
+    let error = match block_on(runtime.execute::<_, Vec<Score>, _>(
+        |flow, items| {
+            let out_refs = flow.each(items, |item, each| {
+                each.then_with_output(&item_checked, item)
+            });
+            flow.output_with(out_refs);
+        },
         vec![Item(2), Item(1), Item(3)],
     )) {
         Ok(_) => panic!("an item failure must escape Each"),
@@ -900,8 +929,13 @@ fn s09_propagation_each_stops_remaining_items() {
 
     // (b) 第二项向外传播的 IterBreak：第三项不再执行，且无部分聚合。
     reset();
-    let error = match block_on(runtime.execute(
-        |flow, items| flow.each(items, |item, each| each.then(&item_control, item)),
+    let error = match block_on(runtime.execute::<_, Vec<Score>, _>(
+        |flow, items| {
+            let out_refs = flow.each(items, |item, each| {
+                each.then_with_output(&item_control, item)
+            });
+            flow.output_with(out_refs);
+        },
         vec![Item(1), Item(2), Item(3)],
     )) {
         Ok(_) => panic!("an unmatched control signal must escape Each"),
@@ -955,16 +989,17 @@ async fn after_outer(query: Query<&Verdict>) -> Result<Summary, BodyError> {
 fn s09_same_class_nearest_capture_retry_in_retry() {
     reset();
     let runtime = Runtime::new();
-    let delivered = block_on(runtime.execute(
+    let delivered = block_on(runtime.execute::<_, Summary, _>(
         |flow, seed| {
             let outer = flow.retry(3, |attempt| {
-                let probe = attempt.then(&outer_probe, seed);
+                let probe = attempt.then_with_output(&outer_probe, seed);
                 attempt.retry(1, |inner| {
-                    let candidate = inner.then(&nested_generate, probe);
-                    inner.then(&nested_judge, candidate)
+                    let candidate = inner.then_with_output(&nested_generate, probe);
+                    inner.then_with_output(&nested_judge, candidate)
                 })
             });
-            flow.then(&after_outer, outer)
+            let out_refs = flow.then_with_output(&after_outer, outer);
+            flow.output_with(out_refs);
         },
         Seed(1),
     ))
@@ -1029,19 +1064,20 @@ async fn outer_round_guard(query: Query<&Context>) -> Result<Verdict, BodyError>
 fn s09_same_class_nearest_capture_iter_in_iter() {
     reset();
     let runtime = Runtime::new();
-    let delivered = block_on(runtime.execute(
+    let delivered = block_on(runtime.execute::<_, Context, _>(
         |flow, context| {
-            flow.iter(context, 3, |current, round| {
+            let out_refs = flow.iter(context, 3, |current, round| {
                 let inner = round.iter(current, 3, |inner_current, inner_round| {
-                    let next = inner_round.then(&inner_advance, inner_current);
-                    inner_round.then(&inner_round_guard, inner_current);
+                    let next = inner_round.then_with_output(&inner_advance, inner_current);
+                    inner_round.then_with_output(&inner_round_guard, inner_current);
                     next
                 });
-                round.then(&outer_round_probe, inner);
-                let next = round.then(&bump_context, current);
-                round.then(&outer_round_guard, current);
+                round.then_with_output(&outer_round_probe, inner);
+                let next = round.then_with_output(&bump_context, current);
+                round.then_with_output(&outer_round_guard, current);
                 next
-            })
+            });
+            flow.output_with(out_refs);
         },
         Context(0),
     ))
@@ -1116,21 +1152,22 @@ async fn round_break_at_one(query: Query<&Context>) -> Result<Verdict, BodyError
 fn s09_retry_inside_iter_restarts_attempt_and_iter_state() {
     reset();
     let runtime = Runtime::new();
-    let (draft, context) = block_on(runtime.execute(
+    let (draft, context) = block_on(runtime.execute::<_, (Draft, Context), _>(
         |flow, (draft, context)| {
-            flow.retry(1, |attempt| {
+            let out_refs = flow.retry(1, |attempt| {
                 attempt.iter(
                     (draft, context),
                     3,
                     |(current_draft, current_context), round| {
-                        round.then(&gate, current_context);
-                        let next_draft = round.then(&revise, current_draft);
-                        let next_context = round.then(&bump_context, current_context);
-                        round.then(&round_break_at_one, current_context);
+                        round.then_with_output(&gate, current_context);
+                        let next_draft = round.then_with_output(&revise, current_draft);
+                        let next_context = round.then_with_output(&bump_context, current_context);
+                        round.then_with_output(&round_break_at_one, current_context);
                         (next_draft, next_context)
                     },
                 )
-            })
+            });
+            flow.output_with(out_refs);
         },
         (Draft(String::from("q")), Context(0)),
     ))
@@ -1185,16 +1222,17 @@ async fn after_retry_in_iter(query: Query<&Verdict>) -> Result<Summary, BodyErro
 fn s09_retry_does_not_capture_iter_break_and_iter_delivers_current() {
     reset();
     let runtime = Runtime::new();
-    let delivered = block_on(runtime.execute(
+    let delivered = block_on(runtime.execute::<_, Context, _>(
         |flow, context| {
-            flow.iter(context, 3, |current, round| {
+            let out_refs = flow.iter(context, 3, |current, round| {
                 let verdict = round.retry(2, |attempt| {
-                    let candidate = attempt.then(&gen_in_retry, current);
-                    attempt.then(&break_in_retry, candidate)
+                    let candidate = attempt.then_with_output(&gen_in_retry, current);
+                    attempt.then_with_output(&break_in_retry, candidate)
                 });
-                round.then(&after_retry_in_iter, verdict);
-                round.then(&bump_context, current)
-            })
+                round.then_with_output(&after_retry_in_iter, verdict);
+                round.then_with_output(&bump_context, current)
+            });
+            flow.output_with(out_refs);
         },
         Context(0),
     ))
@@ -1237,13 +1275,14 @@ async fn after_iter_limit(query: Query<&Context>) -> Result<Summary, BodyError> 
 fn s09_terminal_iteration_limit_reached() {
     reset();
     let runtime = Runtime::new();
-    let error = match block_on(runtime.execute(
+    let error = match block_on(runtime.execute::<_, Summary, _>(
         |flow, context| {
             let state = flow.iter(context, 2, |current, round| {
-                round.then(&limit_judge, current);
-                round.then(&bump_context, current)
+                round.then_with_output(&limit_judge, current);
+                round.then_with_output(&bump_context, current)
             });
-            flow.then(&after_iter_limit, state)
+            let out_refs = flow.then_with_output(&after_iter_limit, state);
+            flow.output_with(out_refs);
         },
         Context(0),
     )) {
@@ -1287,10 +1326,11 @@ async fn after_unhandled(query: Query<&Verdict>) -> Result<Summary, BodyError> {
 fn s09_terminal_unhandled_retry_without_boundary() {
     reset();
     let runtime = Runtime::new();
-    let error = match block_on(runtime.execute(
+    let error = match block_on(runtime.execute::<_, Summary, _>(
         |flow, seed| {
-            let verdict = flow.then(&ask_retry, seed);
-            flow.then(&after_unhandled, verdict)
+            let verdict = flow.then_with_output(&ask_retry, seed);
+            let out_refs = flow.then_with_output(&after_unhandled, verdict);
+            flow.output_with(out_refs);
         },
         Seed(7),
     )) {
@@ -1318,14 +1358,19 @@ fn s09_terminal_unhandled_retry_without_boundary() {
 fn s09_terminal_no_matching_case() {
     reset();
     let runtime = Runtime::new();
-    let error = match block_on(runtime.execute(
+    let error = match block_on(runtime.execute::<_, Summary, _>(
         |flow, seed| {
-            let selector = flow.then(&selector_from_seed, seed);
+            let selector = flow.then_with_output(&selector_from_seed, seed);
             let picked = flow.choose(selector, |choice| {
-                choice.case(Key(1), |branch| branch.then(&branch_other, seed));
-                choice.case(Key(2), |branch| branch.then(&branch_fallback, seed));
+                choice.case(Key(1), |branch| {
+                    branch.then_with_output(&branch_other, seed)
+                });
+                choice.case(Key(2), |branch| {
+                    branch.then_with_output(&branch_fallback, seed)
+                });
             });
-            flow.then(&after_choose, picked)
+            let out_refs = flow.then_with_output(&after_choose, picked);
+            flow.output_with(out_refs);
         },
         Seed(3),
     )) {
@@ -1362,12 +1407,13 @@ fn s09_definition_error_iter_zero_rounds_runs_zero_business() {
     reset();
     let runtime = Runtime::new();
     let defined = Cell::new(0);
-    let error = match block_on(runtime.execute(
+    let error = match block_on(runtime.execute::<_, Context, _>(
         |flow, context| {
             defined.set(defined.get() + 1);
-            flow.iter(context, 0, |current, round| {
-                round.then(&never_runs, current)
-            })
+            let out_refs = flow.iter(context, 0, |current, round| {
+                round.then_with_output(&never_runs, current)
+            });
+            flow.output_with(out_refs);
         },
         Context(1),
     )) {
@@ -1400,8 +1446,13 @@ fn s09_definition_error_iter_zero_rounds_runs_zero_business() {
 fn s09_definition_error_retry_max_budget_runs_zero_business() {
     reset();
     let runtime = Runtime::new();
-    let error = match block_on(runtime.execute(
-        |flow, seed| flow.retry(usize::MAX, |attempt| attempt.then(&never_runs_seed, seed)),
+    let error = match block_on(runtime.execute::<_, Verdict, _>(
+        |flow, seed| {
+            let out_refs = flow.retry(usize::MAX, |attempt| {
+                attempt.then_with_output(&never_runs_seed, seed)
+            });
+            flow.output_with(out_refs);
+        },
         Seed(1),
     )) {
         Ok(_) => panic!("max_retries = usize::MAX must be rejected at build time"),
@@ -1428,10 +1479,11 @@ fn s09_definition_error_retry_max_budget_runs_zero_business() {
 fn s09_root_duplicate_output_rejected_before_any_business() {
     reset();
     let runtime = Runtime::new();
-    let error = match block_on(runtime.execute(
+    let error = match block_on(runtime.execute::<_, (Verdict, Verdict), _>(
         |flow, seed| {
-            let value = flow.then(&x21_first, seed);
-            (value, value)
+            let value = flow.then_with_output(&x21_first, seed);
+            let out_refs = (value, value);
+            flow.output_with(out_refs);
         },
         Seed(1),
     )) {
@@ -1478,11 +1530,12 @@ async fn x21_after(query: Query<&Summary>) -> Result<Amount, BodyError> {
 fn x21_fault_stops_subsequent_business_with_zero_calls() {
     reset();
     let runtime = Runtime::new();
-    let error = match block_on(runtime.execute(
+    let error = match block_on(runtime.execute::<_, Amount, _>(
         |flow, seed| {
-            let first = flow.then(&x21_first, seed);
-            let failed = flow.then(&x21_fail, first);
-            flow.then(&x21_after, failed)
+            let first = flow.then_with_output(&x21_first, seed);
+            let failed = flow.then_with_output(&x21_fail, first);
+            let out_refs = flow.then_with_output(&x21_after, failed);
+            flow.output_with(out_refs);
         },
         Seed(1),
     )) {

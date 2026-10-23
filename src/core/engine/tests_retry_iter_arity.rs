@@ -85,10 +85,11 @@ macro_rules! retry_arity_case {
         #[test]
         fn $name() {
             let runtime = Runtime::new();
-            let outcome = block_on(runtime.execute(
+            let outcome = block_on(runtime.execute::<_, ($($t,)+), _>(
                 |flow: &mut Flow<'_>, refs| {
                     let ($($slot,)+) = refs;
-                    flow.retry(1, |attempt| ($(attempt.then(bump::<$t>, $slot),)+))
+                    let out_refs = flow.retry(1, |attempt| ($(attempt.then_with_output(bump::<$t>, $slot),)+));
+                    flow.output_with(out_refs);
                 },
                 ($(<$t as AritySlot>::BOOT,)+),
             ));
@@ -106,11 +107,12 @@ macro_rules! retry_arity_case {
 #[test]
 fn retry_unit_output_delivers_success_without_slots() {
     let runtime = Runtime::new();
-    let outcome = block_on(runtime.execute(
+    let outcome = block_on(runtime.execute::<_, (), _>(
         |flow: &mut Flow<'_>, value: Ref<u32>| {
-            flow.retry(1, |attempt| {
-                let _: () = attempt.then(&consume_u32, value);
-            })
+            let () = flow.retry(1, |attempt| {
+                let _: () = attempt.then_with_output(&consume_u32, value);
+            });
+            flow.output_with(());
         },
         7u32,
     ));
@@ -121,9 +123,10 @@ fn retry_unit_output_delivers_success_without_slots() {
 #[test]
 fn retry_single_ref_output_delivers_the_bumped_value() {
     let runtime = Runtime::new();
-    let outcome = block_on(runtime.execute(
+    let outcome = block_on(runtime.execute::<_, u32, _>(
         |flow: &mut Flow<'_>, value: Ref<u32>| {
-            flow.retry(1, |attempt| attempt.then(bump::<u32>, value))
+            let out_refs = flow.retry(1, |attempt| attempt.then_with_output(bump::<u32>, value));
+            flow.output_with(out_refs);
         },
         41u32,
     ));
@@ -310,17 +313,18 @@ macro_rules! iter_arity_case {
         #[test]
         fn $name() {
             let runtime = Runtime::new();
-            let outcome = block_on(runtime.execute(
+            let outcome = block_on(runtime.execute::<_, (u32, $($t,)+), _>(
                 |flow: &mut Flow<'_>, refs| {
                     let ($s0, $($slot,)+) = refs;
-                    flow.iter(($s0, $($slot,)+), 5, |current, round| {
+                    let out_refs = flow.iter(($s0, $($slot,)+), 5, |current, round| {
                         let ($s0, $($slot,)+) = current;
-                        let _: () = round.then(&judge_break_after_first_round, $s0);
+                        let _: () = round.then_with_output(&judge_break_after_first_round, $s0);
                         (
-                            round.then(bump::<u32>, $s0),
-                            $(round.then(bump::<$t>, $slot),)+
+                            round.then_with_output(bump::<u32>, $s0),
+                            $(round.then_with_output(bump::<$t>, $slot),)+
                         )
-                    })
+                    });
+                    flow.output_with(out_refs);
                 },
                 (0u32, $(<$t as AritySlot>::BOOT,)+),
             ));
@@ -339,12 +343,13 @@ macro_rules! iter_arity_case {
 #[test]
 fn iter_single_ref_state_advances_then_breaks() {
     let runtime = Runtime::new();
-    let outcome = block_on(runtime.execute(
+    let outcome = block_on(runtime.execute::<_, u32, _>(
         |flow: &mut Flow<'_>, seed: Ref<u32>| {
-            flow.iter(seed, 5, |current, round| {
-                let _: () = round.then(&judge_break_after_first_round, current);
-                round.then(bump::<u32>, current)
-            })
+            let out_refs = flow.iter(seed, 5, |current, round| {
+                let _: () = round.then_with_output(&judge_break_after_first_round, current);
+                round.then_with_output(bump::<u32>, current)
+            });
+            flow.output_with(out_refs);
         },
         0u32,
     ));
@@ -528,12 +533,13 @@ async fn sum_boxed(query: Query<&Box<(u8, u16)>>) -> Result<u32, BodyError> {
 #[test]
 fn retry_boxed_tuple_is_a_single_data_leaf() {
     let runtime = Runtime::new();
-    let outcome = block_on(runtime.execute(
+    let outcome = block_on(runtime.execute::<_, u32, _>(
         |flow: &mut Flow<'_>, _unit: ()| {
-            flow.retry(1, |attempt| {
-                let pair = attempt.then(&boxed_pair, ());
-                attempt.then(&sum_boxed, pair)
-            })
+            let out_refs = flow.retry(1, |attempt| {
+                let pair = attempt.then_with_output(&boxed_pair, ());
+                attempt.then_with_output(&sum_boxed, pair)
+            });
+            flow.output_with(out_refs);
         },
         (),
     ));

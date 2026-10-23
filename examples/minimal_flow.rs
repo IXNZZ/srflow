@@ -82,8 +82,9 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let receipt: Receipt = runtime
         .execute(
             |flow, order| {
-                let validated = flow.then(validate, order);
-                flow.then(Settle, validated)
+                let validated = flow.then_with_output(validate, order);
+                let out_refs = flow.then_with_output(Settle, validated);
+                flow.output_with(out_refs);
             },
             Order { id: 7, amount: 21 },
         )
@@ -93,10 +94,11 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
 
     // 失败不返回部分输出：业务错误经公开分类与 source chain 可观察。
     match runtime
-        .execute(
+        .execute::<_, Receipt, _>(
             |flow, order| {
-                let validated = flow.then(validate, order);
-                flow.then(Settle, validated)
+                let validated = flow.then_with_output(validate, order);
+                let out_refs = flow.then_with_output(Settle, validated);
+                flow.output_with(out_refs);
             },
             Order { id: 8, amount: 0 },
         )
