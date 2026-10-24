@@ -40,8 +40,11 @@ pub(crate) mod scope;
 pub(crate) mod signature;
 
 #[cfg(test)]
+#[path = "../../tests/internal/core/test_support.rs"]
 mod test_support;
 #[cfg(test)]
+#[path = "../../tests/internal/core/v21_08_tests_cap.rs"]
 mod v21_08_tests_cap;
 #[cfg(test)]
+#[path = "../../tests/internal/core/v21_10_tests_defence.rs"]
 mod v21_10_tests_defence;

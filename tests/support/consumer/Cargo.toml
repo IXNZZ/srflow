@@ -1,0 +1,15 @@
+[package]
+name = "test-cleanup-consumer"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+# 空 `[workspace]` 表：本工程自成 workspace 根，不成为 srflow 主 workspace 成员。
+[workspace]
+
+[dependencies]
+# 日常独立消费者：本地依赖名 `roundkit` 指向真实主包 `srflow`（重命名依赖消费路径）。
+# 路径相对本 Cargo.toml：consumer → support → tests → 工程根。
+roundkit = { package = "srflow", path = "../../.." }
+# 与主包 dev-dependency 相同的 executor 特性，不引入全局运行时。
+futures = { version = "0.3", default-features = false, features = ["executor"] }

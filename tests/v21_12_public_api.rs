@@ -30,7 +30,6 @@
 //! 不在可编译的测试文件内。
 //!
 //! 运行：`cargo test --offline --test v21_12_public_api`
-
 // `let _: () = …` 是刻意的 unit 形状断言（Node 输出），按测试意图保留。
 #![allow(clippy::unused_unit, clippy::let_unit_value)]
 

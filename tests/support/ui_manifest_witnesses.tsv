@@ -1,0 +1,3 @@
+case_id	path	mode	outcome	primary	allowed	anchor	symbols	marker	note
+T02::v22_t02_witness_unrelated_e0277.rs	witness__unrelated_error.rs	int	reject	E0277	E0277	flow.provide(|| ());	Data	-	【承接 T02::v22_t02_witness_unrelated_e0277.rs】无关 E0277 不得冒充 unit Factory 拒绝：严格判定必须 FAIL、仅比错误码的宽松判定误 PASS
+T02::v22_t02_witness_wrong_symbol_e0624.rs	witness__wrong_symbol.rs	ext	reject	E0624	E0624	async fn add_one(query: Query<&u32>) -> Result<u32, BodyError> {	next	-	【承接 T02::v22_t02_witness_wrong_symbol_e0624.rs】同码 E0624 但锚点行无该诊断：严格判定必须 FAIL、宽松判定误 PASS；私有锚点迁移链 then_auto（T02）→ Flow::next（T03/T05）→ Flow::open_child（T06：next／next_with 随五签名公开后改用仍私有的 open_child），case_id 与判定字段不变（symbols 列沿用 T05 期望值 next；该锚点行不存在任何主诊断，故对判定无影响）

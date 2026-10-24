@@ -3,7 +3,6 @@
 //!
 //! 只用 crate 根公开面（`srflow::{…}`）；每格都经真实 `Runtime::execute`，
 //! 断言业务 Node 调用次数与可观察值。运行：`cargo test --offline --test we_t07_external_forms`
-
 #![allow(clippy::unused_unit, clippy::let_unit_value)]
 
 use std::cell::Cell;

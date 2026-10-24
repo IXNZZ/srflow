@@ -14,7 +14,6 @@
 //! 本文件自足：只使用 `srflow` 的新公开面，不引用 `srflow::legacy`，不触碰 crate 私有路径。
 //!
 //! 运行：`cargo test --offline --test we_t06_s01_s03 -- --nocapture`
-
 // `let _: () = …` 是刻意的 unit 形状断言（Node／Chain 输出），按测试意图保留。
 #![allow(clippy::unused_unit, clippy::let_unit_value)]
 

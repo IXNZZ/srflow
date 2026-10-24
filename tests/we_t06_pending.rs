@@ -22,7 +22,6 @@
 //! 2. 借用检查下的编译事实：节点在 `await` 之后仍经同一 `&Item`／`&Prompt` 读取输入
 //!    （`pending:resume:*`），rustc 因此强制该借用存活到挂起点之后——借用不可能在来源
 //!    销毁后才结束。
-
 use futures::executor::block_on;
 use srflow::{BodyError, Data, Flow, Query, Ref, Runtime};
 use std::cell::{Cell, RefCell};

@@ -928,16 +928,8 @@ impl<'n> Flow<'n> {
             None => self.failed_shape::<T::Refs>(),
         }
     }
-
-    /// 测试可控入口：当前 Definition 身份，用于构造“无来源位置”反例。
-    #[cfg(test)]
-    pub(crate) fn definition_id(&self) -> crate::core::engine::identity::DefinitionId {
-        self.builder.borrow().definition_id()
-    }
-
-    /// 测试可控入口：下一个将分配的 Definition 内位置编号，用于构造“前向来源”反例。
-    #[cfg(test)]
-    pub(crate) fn next_position_id(&self) -> crate::core::engine::identity::PositionId {
-        self.builder.borrow().next_position_id()
-    }
 }
+
+#[cfg(test)]
+#[path = "../../../tests/internal/engine/flow_observe.rs"]
+pub(crate) mod observe;

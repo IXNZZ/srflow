@@ -29,14 +29,6 @@ impl RefIdSource {
         Self::create(0)
     }
 
-    /// 以指定起点创建**全新**来源根；仅测试构建可见，供 B02 验证 checked 耗尽。
-    ///
-    /// 起点只在创建新来源时生效，不能改写已使用来源的计数器。
-    #[cfg(test)]
-    pub(crate) fn with_start(start: u64) -> Arc<Self> {
-        Self::create(start)
-    }
-
     fn create(start: u64) -> Arc<Self> {
         Arc::new(Self {
             next: AtomicU64::new(start),
@@ -151,155 +143,11 @@ impl RefIdAllocator {
         let seq = self.source.allocate_next()?;
         Ok(RefId::new(Arc::clone(&self.source), seq))
     }
-
-    /// 从同一来源序列一次取 `count` 个连续 `RefId`（checked 整组分配）。
-    ///
-    /// 序列在同一次原子更新中推进 `count` 位：任何一个序号会溢出时整组失败，且**不
-    /// 消耗任何序号、不留下部分分配**。`count == 0` 不接触序列。调用方据此先完成全部
-    /// 可恢复预检、再整组提交。
-    ///
-    /// 当前生产路径逐位分配（`allocate`）；整组 epsilon 语义只在验收中作为保留设施
-    /// 断言（见 `tests` 的 `v21_05_batch_allocation_is_atomic_on_exhaustion` 与
-    /// `e12_checked_group_allocation_fails_as_a_whole_on_exhaustion`），故仅在 test 构建存在。
-    #[cfg(test)]
-    pub(crate) fn allocate_batch(&self, count: u64) -> Result<Vec<RefId>, InternalError> {
-        if count == 0 {
-            return Ok(Vec::new());
-        }
-        let start = self
-            .source
-            .next
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |next| {
-                next.checked_add(count)
-            })
-            .map_err(|_| InternalError::IdSpaceExhausted { kind: IdKind::Ref })?;
-        let mut batch = Vec::with_capacity(count as usize);
-        for offset in 0..count {
-            batch.push(RefId::new(Arc::clone(&self.source), start + offset));
-        }
-        Ok(batch)
-    }
-
-    /// 测试观测：本来源序列尚未分配的下一个序号（不改动序列）。
-    #[cfg(test)]
-    pub(crate) fn next_probe(&self) -> u64 {
-        self.source.next.load(Ordering::SeqCst)
-    }
 }
 
 #[cfg(test)]
-mod tests {
-    use std::collections::HashSet;
-    use std::sync::Arc;
-
-    use super::{RefId, RefIdAllocator, RefIdSource};
-    use crate::core::internal_error::{IdKind, InternalError};
-
-    #[test]
-    fn b02_ref_ids_from_one_source_continue_the_original_sequence() {
-        let source = RefIdSource::new();
-        let first = RefIdAllocator::new(Arc::clone(&source));
-
-        // 先分配，再克隆来源构造第二个句柄。
-        let a = first.allocate().unwrap();
-        let second = RefIdAllocator::new(Arc::clone(&source));
-        let b = second.allocate().unwrap();
-        let c = first.allocate().unwrap();
-
-        assert_eq!((a.seq(), b.seq(), c.seq()), (0, 1, 2));
-        assert_ne!(a, b);
-        assert_ne!(b, c);
-        assert_ne!(a, c);
-    }
-
-    #[test]
-    #[allow(clippy::mutable_key_type)] // Eq／Hash 只用来源地址与序号，二者不随分配变化
-    fn b02_ref_ids_from_different_sources_never_match() {
-        let first = RefIdAllocator::new(RefIdSource::new());
-        let second = RefIdAllocator::new(RefIdSource::new());
-        let id_in_first = first.allocate().unwrap();
-        let id_in_second = second.allocate().unwrap();
-
-        assert_eq!(id_in_first.seq(), id_in_second.seq());
-        assert_ne!(id_in_first, id_in_second);
-
-        let mut set: HashSet<RefId> = HashSet::new();
-        set.insert(id_in_first.clone());
-        set.insert(id_in_second.clone());
-        assert_eq!(set.len(), 2);
-        set.insert(id_in_first.clone());
-        assert_eq!(set.len(), 2);
-    }
-
-    #[test]
-    fn b02_ref_id_exhaustion_is_checked_and_does_not_wrap() {
-        let source = RefIdSource::with_start(u64::MAX - 1);
-        let allocator = RefIdAllocator::new(source);
-
-        let last = allocator.allocate().unwrap();
-        assert_eq!(last.seq(), u64::MAX - 1);
-
-        assert!(matches!(
-            allocator.allocate(),
-            Err(InternalError::IdSpaceExhausted { .. })
-        ));
-        // 耗尽后持续拒绝，且诊断带 RefId 类别。
-        match allocator.allocate() {
-            Err(error) => assert!(error.to_string().contains("RefId")),
-            Ok(id) => panic!("exhausted source handed out {id}"),
-        }
-    }
-
-    #[test]
-    fn ref_id_carries_no_business_value() {
-        // 来源根只保存分配元数据；RefId 的大小与业务类型无关。
-        let source = RefIdSource::new();
-        let allocator = RefIdAllocator::new(source);
-        let id = allocator.allocate().unwrap();
-        assert_eq!(id.seq(), 0);
-        assert!(std::mem::size_of::<RefId>() <= 4 * std::mem::size_of::<usize>());
-    }
-
-    /// 由旧 `signature::tests::v21_05_batch_allocation_is_atomic_on_exhaustion` 迁移：
-    /// 保留不变量“整组分配耗尽时原子失败——不消耗任何序号、不留部分分配”，改用
-    /// `RefIdAllocator::allocate_batch` 的真实入口（旧 `Out2<..>::allocate` 封套已退出）。
-    #[test]
-    fn v21_05_batch_allocation_is_atomic_on_exhaustion() {
-        let source = RefIdSource::with_start(u64::MAX - 1);
-        let allocator = RefIdAllocator::new(source);
-        // 只剩一个序号时一次取 2 个：整组失败。
-        let error = allocator.allocate_batch(2).unwrap_err();
-        assert!(matches!(
-            error,
-            InternalError::IdSpaceExhausted { kind: IdKind::Ref }
-        ));
-        // 整组失败不消耗序号：仍然只有一个序号可用。
-        assert_eq!(allocator.next_probe(), u64::MAX - 1);
-        assert_eq!(allocator.allocate_batch(1).unwrap()[0].seq(), u64::MAX - 1);
-        assert!(allocator.allocate_batch(1).is_err());
-    }
-
-    /// 由旧 `v21_05_tests::e12_checked_group_allocation_fails_as_a_whole_on_exhaustion`
-    /// 迁移：保留不变量“checked 整组分配（Step／声明／序号均不变）的原子失败”，改用
-    /// `RefIdAllocator::allocate_batch`；组内任一序号溢出即整组拒绝且零消耗。
-    #[test]
-    fn e12_checked_group_allocation_fails_as_a_whole_on_exhaustion() {
-        let source = RefIdSource::with_start(u64::MAX - 2);
-        let allocator = RefIdAllocator::new(source);
-        // 整组 1 个成功、整组 3 个溢出：失败者不留任何消耗。
-        let one = allocator.allocate_batch(1).unwrap();
-        assert_eq!(one.len(), 1);
-        assert_eq!(one[0].seq(), u64::MAX - 2);
-        let error = allocator.allocate_batch(3).unwrap_err();
-        assert!(matches!(
-            error,
-            InternalError::IdSpaceExhausted { kind: IdKind::Ref }
-        ));
-        // 序号仍停在失败前：整组分配没有留下部分分配。
-        assert_eq!(allocator.next_probe(), u64::MAX - 1);
-        let last = allocator.allocate_batch(1).unwrap();
-        assert_eq!(last[0].seq(), u64::MAX - 1);
-        assert!(allocator.allocate_batch(1).is_err());
-        assert_eq!(allocator.next_probe(), u64::MAX);
-    }
-}
+#[path = "../../tests/internal/core/ref_id_observe.rs"]
+pub(crate) mod observe;
+#[cfg(test)]
+#[path = "../../tests/internal/core/ref_id_tests.rs"]
+mod tests;

@@ -19,7 +19,6 @@
 //! 不引用 `srflow::legacy`，也不触碰 crate 私有入口；判据复用 T02～T05 已验收的语义，但每个
 //! 样本都在公开执行链上重新断言具体的值／事件顺序／调用计数／错误分类与 payload，而不是
 //! `is_ok()` 之类的壳断言。
-
 use std::cell::{Cell, RefCell};
 use std::error::Error;
 use std::fmt;

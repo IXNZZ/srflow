@@ -14,7 +14,6 @@
 //! 未覆盖（见报告 uncovered）：失败退出叠加清理故障 → `RunError::Runtime` 的组合、
 //! `NoMatchingCase` 叠加清理故障，以及任何需要内部钩子的清理诊断样本——这些由
 //! WE-T06 的见证／Each finish 工作项覆盖，不在本文件范围。
-
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::error::Error;

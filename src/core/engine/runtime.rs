@@ -15,49 +15,6 @@ use crate::core::engine::shape::{InputOps, RefShape, RootInput, RootInputOps, Sh
 use crate::core::identity::ScopeId;
 use crate::core::runtime::RootExecution;
 use std::any::Any;
-#[cfg(test)]
-use std::cell::Cell;
-
-#[cfg(test)]
-thread_local! {
-    /// cfg(test)：登记 owned 输入后销毁前 N 个 entry，使 Root 退出清理真实失败。
-    static ROOT_CLEANUP_FAULT: Cell<usize> = const { Cell::new(0) };
-    /// cfg(test)：登记第 N 个 Root 输入前，先把该声明位置预先绑定（构造 `RefAlreadyBound` 前提）。
-    static ROOT_INPUT_PREBIND: Cell<Option<usize>> = const { Cell::new(None) };
-}
-
-/// cfg(test)：安装一次 Root 退出清理故障（业务 Failure／Control 收口的清理诊断样本）。
-#[cfg(test)]
-pub(crate) fn install_root_cleanup_fault() {
-    install_root_cleanup_faults(1);
-}
-
-/// cfg(test)：安装 N 次 Root 退出清理故障（后续故障不得覆盖首清理诊断的样本）。
-#[cfg(test)]
-pub(crate) fn install_root_cleanup_faults(count: usize) {
-    ROOT_CLEANUP_FAULT.with(|fault| fault.set(count));
-}
-
-#[cfg(test)]
-fn take_root_cleanup_fault() -> usize {
-    ROOT_CLEANUP_FAULT.with(|fault| fault.replace(0))
-}
-
-/// cfg(test)：安装一次 Root 输入登记失败前提（旧 `k05` 的 `PrebindInput` 承接）。
-///
-/// 安装后，登记第 `index`（0 基）个声明输入前，先把该声明位置预先绑定到已成功接管的
-/// 第一个输入；随后**未修改**的 `register_owned_erased` 命中位置占用检查并返回
-/// `RefAlreadyBound`。这只是破坏前提：自然业务不会产生该状态——静态输入形状的每个声明
-/// 位置互不相同且初始未绑定，登记入口的占用检查只防守重复登记。
-#[cfg(test)]
-pub(crate) fn install_root_input_prebind_fault(index: usize) {
-    ROOT_INPUT_PREBIND.with(|fault| fault.set(Some(index)));
-}
-
-#[cfg(test)]
-fn take_root_input_prebind_fault() -> Option<usize> {
-    ROOT_INPUT_PREBIND.with(|fault| fault.take())
-}
 
 /// Application 侧唯一的 Root 执行入口。
 ///
@@ -107,7 +64,7 @@ impl Runtime {
         #[cfg(test)]
         let mut input_ids: Vec<crate::core::identity::DataId> = Vec::new();
         #[cfg(test)]
-        let prebind_fault = take_root_input_prebind_fault();
+        let prebind_fault = observe::take_root_input_prebind_fault();
         for (index, record) in built.root_inputs().enumerate() {
             #[cfg(not(test))]
             let _ = index;
@@ -115,18 +72,15 @@ impl Runtime {
                 break;
             };
             #[cfg(test)]
-            if prebind_fault == Some(index) {
-                // test-only 前提构造：把第 `index` 个声明输入位置预先绑定到已接管的第一个
-                // 输入，使本次登记自然命中 `RefAlreadyBound`。只破坏前提，不改判定路径；
-                // 自然业务不会产生该状态（见 `install_root_input_prebind_fault` 说明）。
-                if let Some(seed) = input_ids.first() {
-                    execution.context_mut().inject_scope_target_probe(
-                        &root,
-                        record.core(),
-                        crate::core::scope::RefTarget::Data(seed.clone()),
-                    );
-                }
-            }
+            observe::inject_root_input_prebind_fault_if(
+                execution.context_mut(),
+                prebind_fault,
+                index,
+                &root,
+                record.core(),
+                input_ids.first(),
+            );
+
             match execution.context_mut().register_owned_erased(
                 &root,
                 record.core(),
@@ -155,12 +109,7 @@ impl Runtime {
         }
         drop(pending);
         #[cfg(test)]
-        {
-            let faults = take_root_cleanup_fault();
-            for id in input_ids.iter().take(faults) {
-                execution.context_mut().destroy_probe(id);
-            }
-        }
+        observe::inject_root_cleanup_faults(execution.context_mut(), &input_ids);
 
         // 3) Root frame：执行 → 整组提取 → 关闭；失败保留首次执行失败。
         let mut failure: Option<ExecFailure> = None;
@@ -332,3 +281,7 @@ fn into_run_error(failure: ExecFailure, cleanup: Option<CleanupDiagnostic>) -> R
         },
     }
 }
+
+#[cfg(test)]
+#[path = "../../../tests/internal/engine/runtime_observe.rs"]
+pub(crate) mod observe;

@@ -38,29 +38,6 @@ impl ExecutionIdentity {
         Self::create(0, 0, 0)
     }
 
-    /// 以指定起点创建**全新**身份根；仅测试构建可见，供 A11 使用。
-    ///
-    /// 起点只在创建新身份根时生效，不能用于改写已有身份的序列，也不提供重置、
-    /// 回退或空闲列表能力。`CollectorId` 序列保持从 0 开始，需要近上限起点时用
-    /// [`Self::with_starts_and_collector_start`]。
-    #[cfg(test)]
-    pub(crate) fn with_starts(next_data_id: u64, next_scope_id: u64) -> Arc<Self> {
-        Self::create(next_data_id, next_scope_id, 0)
-    }
-
-    /// 以三条序列的指定起点创建全新身份根；仅测试构建可见。
-    ///
-    /// 与 [`Self::with_starts`] 分开，避免改动 V21-01／V21-02 已登记的 test-only
-    /// 入口签名。供 C22（完成时 DataId 耗尽）与 C27（CollectorId 耗尽）使用。
-    #[cfg(test)]
-    pub(crate) fn with_starts_and_collector_start(
-        next_data_id: u64,
-        next_scope_id: u64,
-        next_collector_id: u64,
-    ) -> Arc<Self> {
-        Self::create(next_data_id, next_scope_id, next_collector_id)
-    }
-
     /// 唯一创建路径：身份根与其三条序列同时建立。
     fn create(next_data_id: u64, next_scope_id: u64, next_collector_id: u64) -> Arc<Self> {
         Arc::new(Self {
@@ -83,17 +60,6 @@ impl ExecutionIdentity {
     /// 从 `CollectorId` 序列取下一个序号。
     fn next_collector_seq(&self) -> Result<u64, InternalError> {
         self.bump(&self.next_collector_id, IdKind::Collector)
-    }
-
-    /// 从给定序列取下一个序号。
-    ///
-    /// 计数是身份根内部唯一的序列来源，因此多个分配句柄交替取号不会重复。增量在
-    /// 赋值前完成溢出检查：`next + 1` 会溢出时返回 [`InternalError::IdSpaceExhausted`]，
-    /// 不 wrap；`u64::MAX` 本身不会被发出。
-    /// cfg(test) 只读：读取 `DataId` 计数器当前值（不推进）。
-    #[cfg(test)]
-    fn peek_data_seq(&self) -> Result<u64, InternalError> {
-        Ok(self.next_data_id.load(Ordering::SeqCst))
     }
 
     fn bump(&self, counter: &AtomicU64, kind: IdKind) -> Result<u64, InternalError> {
@@ -259,12 +225,6 @@ impl DataIdAllocator {
         Self { identity }
     }
 
-    /// cfg(test) 只读观察：下一个 `DataId` 序号（不分配）。
-    #[cfg(test)]
-    pub(crate) fn next_seq_probe(&self) -> Result<u64, InternalError> {
-        self.identity.peek_data_seq()
-    }
-
     /// 从本 Execution 的 `DataId` 序列取下一个 ID。
     pub(crate) fn allocate(&self) -> Result<DataId, InternalError> {
         let seq = self.identity.next_data_seq()?;
@@ -379,214 +339,9 @@ impl CollectorIdAllocator {
 }
 
 #[cfg(test)]
-mod tests {
-    use std::collections::HashSet;
-    use std::sync::Arc;
+#[path = "../../tests/internal/core/identity_tests.rs"]
+mod tests;
 
-    use super::{
-        CollectorId, CollectorIdAllocator, DataId, DataIdAllocator, ExecutionIdentity, ScopeId,
-        ScopeIdAllocator,
-    };
-    use crate::core::internal_error::InternalError;
-
-    #[test]
-    fn identity_roots_are_pointer_distinct() {
-        let first = ExecutionIdentity::new();
-        let second = ExecutionIdentity::new();
-        assert!(!Arc::ptr_eq(&first, &second));
-    }
-
-    #[test]
-    // `DataId` 持有 `Arc<ExecutionIdentity>`，身份根内部有序号原子量，因此 clippy 会
-    // 把 `DataId` 视为含内部可变性的 key。这里 hash 与 eq 只用身份根地址与本地序号，
-    // 二者都不随分配变化，集合语义安全；A03 要求的正是这一验证。
-    #[allow(clippy::mutable_key_type)]
-    fn data_ids_compare_and_hash_by_execution_identity_not_by_value() {
-        let first_ids = DataIdAllocator::new(ExecutionIdentity::new());
-        let second_ids = DataIdAllocator::new(ExecutionIdentity::new());
-        let id_in_first = first_ids.allocate().unwrap();
-        let same_id = first_ids.allocate().unwrap();
-        let id_in_second = second_ids.allocate().unwrap();
-
-        assert_eq!(id_in_first.seq(), 0);
-        assert_ne!(id_in_first, same_id);
-        // 不同身份根、序号相同：不相等——这正是 A03 要求防止的碰撞。
-        assert_ne!(id_in_first, id_in_second);
-        assert_eq!(id_in_first.seq(), id_in_second.seq());
-
-        // Hash 与 Eq 一致：不同 ID 不会因身份相等语义错误而被合并。
-        let mut set: HashSet<DataId> = HashSet::new();
-        set.insert(id_in_first.clone());
-        set.insert(id_in_second.clone());
-        assert_eq!(set.len(), 2);
-        set.insert(id_in_first.clone());
-        assert_eq!(set.len(), 2);
-    }
-
-    #[test]
-    fn a06_scope_ids_are_monotonic_and_never_repeat_within_one_execution() {
-        let scopes = ScopeIdAllocator::new(ExecutionIdentity::new());
-        let first = scopes.allocate().unwrap();
-        let second = scopes.allocate().unwrap();
-        let third = scopes.allocate().unwrap();
-
-        assert_eq!((first.seq(), second.seq(), third.seq()), (0, 1, 2));
-        assert_ne!(first, second);
-        assert_ne!(second, third);
-        assert_ne!(first, third);
-    }
-
-    #[test]
-    fn scope_ids_from_different_executions_do_not_match() {
-        let first = ScopeIdAllocator::new(ExecutionIdentity::new());
-        let second = ScopeIdAllocator::new(ExecutionIdentity::new());
-        let id_in_first = first.allocate().unwrap();
-        let id_in_second = second.allocate().unwrap();
-
-        assert_eq!(id_in_first.seq(), id_in_second.seq());
-        assert_ne!(id_in_first, id_in_second);
-    }
-
-    #[test]
-    fn a11_scope_id_exhaustion_is_checked_and_does_not_repeat() {
-        let scopes = ScopeIdAllocator::new(ExecutionIdentity::with_starts(0, u64::MAX - 1));
-
-        let last = scopes.allocate().unwrap();
-        assert_eq!(last.seq(), u64::MAX - 1);
-
-        assert!(matches!(
-            scopes.allocate(),
-            Err(InternalError::IdSpaceExhausted { .. })
-        ));
-        // 耗尽后仍持续拒绝，且诊断带上耗尽的身份类别。
-        match scopes.allocate() {
-            Err(error) => assert!(error.to_string().contains("ScopeId")),
-            Ok(id) => panic!("exhausted allocator handed out {id}"),
-        }
-    }
-
-    #[test]
-    fn a16_data_id_handles_share_one_sequence_per_execution() {
-        let identity = ExecutionIdentity::new();
-        let first = DataIdAllocator::new(Arc::clone(&identity));
-
-        // 先由 first 取号，再克隆身份并构造第二个句柄。
-        let a = first.allocate().unwrap();
-        let second = DataIdAllocator::new(Arc::clone(&identity));
-        let b = second.allocate().unwrap();
-        let c = first.allocate().unwrap();
-
-        // 新句柄续用原序列，没有重发初始序号。
-        assert_eq!((a.seq(), b.seq(), c.seq()), (0, 1, 2));
-        assert_ne!(a, b);
-        assert_ne!(b, c);
-        assert_ne!(a, c);
-    }
-
-    #[test]
-    fn a16_scope_id_handles_share_one_sequence_per_execution() {
-        let identity = ExecutionIdentity::new();
-        let first = ScopeIdAllocator::new(Arc::clone(&identity));
-
-        // 同样先分配，再克隆身份构造第二个句柄。
-        let a = first.allocate().unwrap();
-        let second = ScopeIdAllocator::new(Arc::clone(&identity));
-        let b = second.allocate().unwrap();
-        let c = second.allocate().unwrap();
-
-        assert_eq!((a.seq(), b.seq(), c.seq()), (0, 1, 2));
-        assert_ne!(a, b);
-        assert_ne!(b, c);
-        assert_ne!(a, c);
-    }
-
-    #[test]
-    fn a16_data_and_scope_sequences_are_independent() {
-        let identity = ExecutionIdentity::new();
-        let data = DataIdAllocator::new(Arc::clone(&identity));
-        let first_data = data.allocate().unwrap();
-
-        // 先分配后再构造 Scope 句柄：它取的是独立序列，不受 DataId 进度影响。
-        let scopes = ScopeIdAllocator::new(Arc::clone(&identity));
-        let first_scope = scopes.allocate().unwrap();
-        let second_data = data.allocate().unwrap();
-        let second_scope = scopes.allocate().unwrap();
-
-        assert_eq!((first_data.seq(), second_data.seq()), (0, 1));
-        assert_eq!((first_scope.seq(), second_scope.seq()), (0, 1));
-    }
-
-    #[test]
-    fn v21_03_collector_ids_follow_identity_and_share_one_sequence() {
-        let identity = ExecutionIdentity::new();
-        let first = CollectorIdAllocator::new(Arc::clone(&identity));
-        let a = first.allocate().unwrap();
-        // 先分配再构造第二个句柄：续用同一序列，不重发初始序号。
-        let second = CollectorIdAllocator::new(Arc::clone(&identity));
-        let b = second.allocate().unwrap();
-        assert_eq!((a.seq(), b.seq()), (0, 1));
-        assert_ne!(a, b);
-
-        // 另一次 Execution 的同序号 ID 不相等，也不能互相寻址。
-        let other = CollectorIdAllocator::new(ExecutionIdentity::new());
-        let foreign = other.allocate().unwrap();
-        assert_eq!(foreign.seq(), a.seq());
-        assert_ne!(foreign, a);
-
-        // Eq 与 Hash 一致：不同身份不会被合并。
-        #[allow(clippy::mutable_key_type)]
-        let mut set: HashSet<CollectorId> = HashSet::new();
-        set.insert(a.clone());
-        set.insert(foreign.clone());
-        assert_eq!(set.len(), 2);
-        set.insert(a.clone());
-        assert_eq!(set.len(), 2);
-    }
-
-    #[test]
-    fn v21_03_collector_id_exhaustion_is_checked_and_does_not_wrap() {
-        let ids = CollectorIdAllocator::new(ExecutionIdentity::with_starts_and_collector_start(
-            0,
-            0,
-            u64::MAX - 1,
-        ));
-        let last = ids.allocate().unwrap();
-        assert_eq!(last.seq(), u64::MAX - 1);
-        match ids.allocate() {
-            Err(error) => assert!(error.to_string().contains("CollectorId")),
-            Ok(id) => panic!("exhausted allocator handed out {id}"),
-        }
-    }
-
-    #[test]
-    fn v21_03_collector_data_and_scope_sequences_are_independent() {
-        let identity = ExecutionIdentity::new();
-        let collectors = CollectorIdAllocator::new(Arc::clone(&identity));
-        let data = DataIdAllocator::new(Arc::clone(&identity));
-        let scopes = ScopeIdAllocator::new(Arc::clone(&identity));
-
-        let first_collector = collectors.allocate().unwrap();
-        let first_data = data.allocate().unwrap();
-        let first_scope = scopes.allocate().unwrap();
-        assert_eq!(
-            (first_collector.seq(), first_data.seq(), first_scope.seq()),
-            (0, 0, 0)
-        );
-        assert_eq!(collectors.allocate().unwrap().seq(), 1);
-        assert_eq!(data.allocate().unwrap().seq(), 1);
-    }
-
-    #[test]
-    fn scope_id_is_a_distinct_type_from_data_id() {
-        // 类型分离的运行期见证：两者的值域与序列互相独立。
-        let identity = ExecutionIdentity::new();
-        let data = DataIdAllocator::new(Arc::clone(&identity));
-        let scopes = ScopeIdAllocator::new(Arc::clone(&identity));
-        let data_id = data.allocate().unwrap();
-        let scope_id: ScopeId = scopes.allocate().unwrap();
-
-        assert_eq!(data_id.seq(), scope_id.seq());
-        assert!(data_id.to_string().starts_with("DataId"));
-        assert!(scope_id.to_string().starts_with("ScopeId"));
-    }
-}
+#[cfg(test)]
+#[path = "../../tests/internal/core/identity_observe.rs"]
+pub(crate) mod observe;

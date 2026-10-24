@@ -13,7 +13,6 @@
 //! - Retry 由专用 attempt 计数驱动：首次发出 Retry 控制请求、第二次成功，断言恰好两次。
 //!
 //! 只用 crate 根公开面。运行：`cargo test --offline --test we_t07_final_scenario`
-
 #![allow(clippy::unused_unit, clippy::let_unit_value)]
 
 use std::cell::Cell;

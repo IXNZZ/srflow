@@ -1,0 +1,313 @@
+scope	group_or_case	action	carrier	basis
+# 说明：制表符分隔五列（scope/group_or_case/action/carrier/basis）；以 `#` 开头的行是段注释，读取时跳过。
+# UI：保留 64；删除 321（历史非活跃 226 + 原活跃 93 + 故障控制 2）归为 103 组，每组标注实际行为与载体；载体存在性已校验。逐组完整成员见 UI_DELETION_GROUPS.tsv。
+UI	执行成功｜28 个删除成员（f15_unfinished_builder_and_sealed_completion.rs, g14_match_unfinished_builder_branch.rs, h25_each_unfinished_body.rs …）	删除	tests/ui/positive__public_api_assembly.rs	执行成功（断言正常产出，exit 0）
+UI	Definition 拒绝｜21 个删除成员（v22_t02_ok_extern.rs, v22_t02_ok_internal.rs, v22_t02_witness_unrelated_e0277.rs …）	删除	（阶段契约退出，见 basis）	Definition 拒绝（运行期构建期 RunError::Definition）
+UI	Definition 拒绝｜16 个删除成员（v22_t03_c01_old_ref_return.rs, v22_t03_from_we_t01_ref_of_unit.rs, v22_t03_from_we_t02_internal_position_types_unreachable.rs …）	删除	（阶段契约退出，见 basis）	Definition 拒绝（运行期构建期 RunError::Definition）
+UI	编译拒绝｜13 个删除成员（h25_each_out2_body.rs, h25_each_shared_mismatch.rs, h25_each_unit_body.rs …）	删除	tests/ui/node__wrong_input_type.rs	编译拒绝：Node/循环体的输入与输出类型、arity 必须匹配声明（共同类型规则，含 unit 体与共享不匹配）
+UI	阶段契约退出｜11 个删除成员（e09_orchestrator_wrong_signature.rs, e09b_orchestrator_pack_signature_mismatch.rs, f14_flow_wiring_and_finish_type_negatives.rs …）	删除	（阶段契约退出，见 basis）	阶段契约退出：旧 orchestrator/match/flow 装配接口已退出；现行对应规则由 node__wrong_input_type.rs、choose__wrong_key_type.rs、a09_foreign_definition_ref_is_rejected 承接
+UI	编译拒绝｜10 个删除成员（e10_wrong_arity.rs, f15b_sealed_flow_fields.rs, g13_match_then_wrong_arity.rs …）	删除	tests/ui/node__arity_mismatch.rs	编译拒绝（cargo 检查/类型检查阶段）
+UI	阶段契约退出｜10 个删除成员（v22_t02_neg_extern_auto_bridge.rs, v22_t02_neg_extern_auto_callable_root.rs, v22_t02_neg_extern_auto_function_root.rs …）	删除	tests/ui/positive__public_api_assembly.rs	阶段契约退出：T02 内部接入尚未公开，该约束在 T03 公开门面后失效；现行可用性由当前公开入口正例承接
+UI	阶段契约退出｜9 个删除成员（v22_t03_from_legacy_v21_12_banned_datacontainer.rs, v22_t03_from_legacy_v21_12_banned_definition.rs, v22_t03_from_legacy_v21_12_banned_executioncontext.rs …）	删除	（阶段契约退出，见 basis）	阶段契约退出：V21-12 禁令对象已从公开 API 移除（符号见基准清单）
+UI	阶段契约退出｜9 个删除成员（v22_t03_from_t02_neg_extern_auto_bridge.rs, v22_t03_from_t02_neg_extern_auto_callable_root.rs, v22_t03_from_t02_neg_extern_auto_function_root.rs …）	删除	tests/ui/positive__public_api_assembly.rs	阶段契约退出：T02 内部接入尚未公开，该约束在 T03 公开门面后失效；现行可用性由当前公开入口正例承接
+UI	阶段契约退出｜9 个删除成员（v21_12_banned_datacontainer.rs, v21_12_banned_definition.rs, v21_12_banned_executioncontext.rs …）	删除	（阶段契约退出，见 basis）	阶段契约退出：V21-12 禁令对象已从公开 API 移除（符号见基准清单）
+UI	编译拒绝｜8 个删除成员（a14_borrow_while_destroying.rs, a14_borrow_while_inserting.rs, a14_borrow_while_removing.rs …）	删除	tests/ui/borrow__blocks_destroy.rs	编译拒绝（E0502：借用存活期间禁止 aborting/consuming/destroying/extracting/finalizing/inserting/promoting/removing 等变更）；保留夹具 borrow__* 为该编译规则代表
+UI	Definition 拒绝｜7 个删除成员（v22_t03_from_we_t03_c06_foreign_ref_rejected.rs, v22_t03_from_we_t04_e03_foreign_ref_rejected.rs, v22_t03_from_we_t05_p04_foreign_ref_rejected.rs …）	删除	tests/internal/engine/tests.rs::a09_foreign_definition_ref_is_rejected	Definition 拒绝（运行期构建期 RunError::Definition）
+UI	执行成功｜7 个删除成员（v22_t04_from_we_t04_e02_positive_shapes.rs, v22_t05_from_we_t04_e01_positive_retry_iter_usage.rs, v22_t05_from_we_t05_p02_positive_box_leaf_aggregate.rs …）	删除	tests/ui/positive__public_api_assembly.rs	执行成功（断言正常产出，exit 0）
+UI	编译拒绝｜6 个删除成员（e07_function_wrong_input_type.rs, e08_struct_node_wrong_type_and_owned_param.rs, g07_match_branch_wrong_input_type.rs …）	删除	tests/ui/node__wrong_input_type.rs	编译拒绝（cargo 检查/类型检查阶段）
+UI	编译拒绝｜6 个删除成员（a04_core_is_not_reachable.rs, e24_internal_wiring_names_are_not_reachable.rs, f24_flow_names_are_not_reachable.rs …）	删除	tests/ui/reachability__core_module_private.rs	编译拒绝（cargo 检查/类型检查阶段）
+UI	编译拒绝｜5 个删除成员（v22_t03_from_legacy_a14_borrow_while_inserting.rs, v22_t03_from_legacy_a14_borrow_while_removing.rs, v22_t03_from_legacy_b19_borrow_while_aborting.rs …）	删除	tests/ui/borrow__blocks_destroy.rs	编译拒绝（E0502：借用存活期间禁止 aborting/finalizing/inserting/promoting/removing 等变更）；保留夹具 borrow__* 为该编译规则代表
+UI	编译拒绝｜5 个删除成员（v22_t03_from_we_t04_e02_retry_output_17_slots.rs, v22_t03_from_we_t05_p02_each_body_output_17_slots.rs, we_t04_e02_iter_state_17_slots.rs …）	删除	tests/ui/shape__iter_17_slots_state.rs	编译拒绝（cargo 检查/类型检查阶段）
+UI	Definition 拒绝｜4 个删除成员（v22_t03_from_we_t02_foreign_ref_rejected.rs, v22_t04_from_we_t04_e03_foreign_ref_rejected.rs, v22_t05_from_we_t03_c06_foreign_ref_rejected.rs …）	删除	tests/internal/engine/tests.rs::a09_foreign_definition_ref_is_rejected	Definition 拒绝（运行期构建期 RunError::Definition）
+UI	编译拒绝｜4 个删除成员（v22_t03_from_t02_neg_wrong_arity.rs, v22_t03_from_we_t01_arity_mismatch.rs, v22_t05_from_we_t03_c05_branch_arity_mismatch.rs …）	删除	tests/ui/node__arity_mismatch.rs	编译拒绝（cargo 检查/类型检查阶段）
+UI	编译拒绝｜4 个删除成员（e11_by_value_input.rs, we_t01_ref_has_no_accessor.rs, we_t02_ref_has_no_accessor.rs …）	删除	tests/ui/ref_api__no_value_accessor.rs	编译拒绝（cargo 检查/类型检查阶段）
+UI	编译拒绝｜4 个删除成员（v22_t03_from_we_t05_p02_collection_element_mismatch.rs, v22_t03_from_we_t05_p02_element_not_data_bound.rs, we_t05_p02_collection_element_mismatch.rs …）	删除	tests/ui/shape__each_element_not_data.rs	编译拒绝（cargo 检查/类型检查阶段）
+UI	Definition 拒绝｜3 个删除成员（v22_t03_from_we_t05_p03_each_seventeen_slots_child_chain.rs, v22_t04_from_we_t05_p03_each_seventeen_slots_child_chain.rs, we_t05_p03_each_seventeen_slots_child_chain.rs）	删除	tests/internal/engine/tests.rs::a07_chain_builds_child_body_and_parent_refs	Definition 拒绝（运行期构建期 RunError::Definition）
+UI	Definition 拒绝｜3 个删除成员（v22_t03_from_we_t05_p01_frozen_natural_usage.rs, v22_t04_from_we_t05_p01_frozen_natural_usage.rs, we_t05_p01_frozen_natural_usage.rs）	删除	tests/internal/engine/tests_each.rs::p01_frozen_usage_feeds_later_then_chain_and_root	Definition 拒绝（运行期构建期 RunError::Definition）
+UI	Definition 拒绝｜3 个删除成员（v22_t03_from_we_t04_e04_retry_budget_max_rejected.rs, v22_t03_from_we_t06_invalid_budget.rs, we_t04_e04_retry_budget_max_rejected.rs）	删除	tests/internal/engine/tests_retry_iter.rs::e02_retry_budget_max_is_rejected_at_build_time	Definition 拒绝（运行期构建期 RunError::Definition）
+UI	Definition 拒绝｜3 个删除成员（v22_t03_from_we_t03_c01_frozen_choose_usage.rs, v22_t04_from_we_t03_c01_frozen_choose_usage.rs, we_t03_c01_frozen_choose_usage.rs）	删除	tests/internal/engine/tests_runtime.rs::c01_frozen_choose_usage_runs_case_case_and_fallback	Definition 拒绝（运行期构建期 RunError::Definition）
+UI	编译拒绝｜3 个删除成员（v22_t03_from_we_t04_e02_iter_unit_state.rs, v22_t03_from_we_t06_unit_shape.rs, v22_t06_iter_nested_tuple_state_rejected.rs）	删除	tests/ui/shape__iter_unit_state.rs	编译拒绝（cargo 检查/类型检查阶段）
+UI	编译拒绝｜3 个删除成员（d21_active_input_future_blocks_mutation.rs, h15_item_borrow_blocks_mutation.rs, we_t02_pending_borrow_blocks_mutation.rs）	删除	tests/ui/borrow__pending_blocks_mutation.rs	编译拒绝（cargo 检查/类型检查阶段）
+UI	编译拒绝｜3 个删除成员（v21_12_arc_dyn_node_is_not_supported.rs, we_t01_dyn_node.rs, we_t02_dyn_node.rs）	删除	tests/ui/node__dyn_not_object_safe.rs	编译拒绝（cargo 检查/类型检查阶段）
+UI	编译拒绝｜3 个删除成员（v21_12_unit_signature_is_not_expressible.rs, we_t01_ref_of_unit.rs, we_t02_ref_of_unit_is_not_expressible.rs）	删除	tests/ui/shape__unit_ref_not_expressible.rs	编译拒绝：unit 不可作为 Ref/根输出表达（同判据保留夹具）
+UI	Definition 拒绝｜2 个删除成员（v22_t04_from_we_t04_e04_retry_budget_max_rejected.rs, v22_t04_from_we_t06_invalid_budget.rs）	删除	tests/internal/engine/tests_retry_iter.rs::e02_retry_budget_max_is_rejected_at_build_time	Definition 拒绝（运行期构建期 RunError::Definition）
+UI	Definition 拒绝｜2 个删除成员（v22_t04_e02_retry_output_mismatch_old_closure.rs, v22_t04_from_we_t04_e02_retry_output_shape_mismatch.rs）	删除	tests/internal/engine/tests_v22_t04.rs::t04_retry_output_expectation_rejects_shape_mismatch_before_any_attempt	Definition 拒绝（运行期构建期 RunError::Definition）
+UI	Definition 拒绝｜2 个删除成员（v22_t03_from_we_t02_fragment_forms.rs, we_t02_fragment_forms.rs）	删除	tests/internal/engine/tests.rs::a07_fragment_forms_build_with_non_static_nodes	Definition 拒绝（运行期构建期 RunError::Definition）
+UI	Definition 拒绝｜2 个删除成员（v22_t03_from_we_t05_p13_ancestor_ref_collect_rejected.rs, we_t05_p13_ancestor_ref_collect_rejected.rs）	删除	tests/internal/engine/tests_each.rs::p04_forward_collection_position_is_rejected	Definition 拒绝（运行期构建期 RunError::Definition）
+UI	Definition 拒绝｜2 个删除成员（h25_each_wrong_collection_element.rs, j07_borrow_blocks_round_collection.rs）	删除	tests/internal/engine/tests_each.rs::p07_item_borrow_is_the_original_element_of_the_collection	Definition 拒绝（运行期构建期 RunError::Definition）
+UI	Definition 拒绝｜2 个删除成员（v22_t03_from_we_t05_p04_item_as_body_output_rejected.rs, we_t05_p04_item_as_body_output_rejected.rs）	删除	tests/internal/engine/tests_each_consume.rs::p13_engine_item_output_is_rejected_by_the_real_group_preflight	Definition 拒绝（运行期构建期 RunError::Definition）
+UI	Definition 拒绝｜2 个删除成员（v22_t03_from_we_t05_p13_duplicate_owned_alias_rejected.rs, we_t05_p13_duplicate_owned_alias_rejected.rs）	删除	tests/internal/engine/tests_each_consume.rs::p15_duplicate_owned_alias_group_is_rejected_before_any_move	Definition 拒绝（运行期构建期 RunError::Definition）
+UI	Definition 拒绝｜2 个删除成员（g08_match_common_signature_mismatch.rs, g10_match_pack_bound_mismatch.rs）	删除	tests/internal/engine/tests_promote_group.rs::e21_selected_length_mismatch_is_rejected_before_freeze	Definition 拒绝（运行期构建期 RunError::Definition）
+UI	Definition 拒绝｜2 个删除成员（v22_t03_from_we_t03_c02_minimal_key_and_borrowed_node.rs, we_t03_c02_minimal_key_and_borrowed_node.rs）	删除	tests/internal/engine/tests_runtime.rs::c02_minimal_key_and_borrowed_node_run	Definition 拒绝（运行期构建期 RunError::Definition）
+UI	Definition 拒绝｜2 个删除成员（v22_t03_from_we_t04_e02_retry_output_shape_mismatch.rs, we_t04_e02_retry_output_shape_mismatch.rs）	删除	tests/internal/engine/tests_v22_t04.rs::t04_retry_output_expectation_rejects_shape_mismatch_before_any_attempt	Definition 拒绝（运行期构建期 RunError::Definition）
+UI	判定器自检｜2 个删除成员（t03_witness_fault_unexpected_success.rs, t03_witness_fault_unrelated_e0425.rs）	删除	tests/support/ui_check.py	判定器自检/见证（判定器不误接收装配错误与意外成功；不涉及 Builder 规则）
+UI	执行成功｜2 个删除成员（v22_t03_from_we_t05_p02_positive_empty_collection.rs, we_t05_p02_positive_empty_collection.rs）	删除	tests/internal/engine/tests_each.rs::p12_empty_collection_finishes_empty_vecs_without_items	执行成功（断言正常产出，exit 0）
+UI	执行成功｜2 个删除成员（v22_t03_from_we_t02_spec_minimal_example.rs, we_t02_spec_minimal_example.rs）	删除	tests/internal/engine/tests_runtime.rs::b01_spec_minimal_example_returns_43	执行成功（断言正常产出，exit 0）
+UI	执行成功｜2 个删除成员（v22_t03_from_we_t02_nonstatic_node_borrow.rs, we_t02_nonstatic_node_borrow.rs）	删除	tests/internal/engine/tests_runtime.rs::b03_fragment_forms_execute_with_non_static_nodes	执行成功（断言正常产出，exit 0）
+UI	编译拒绝｜2 个删除成员（v22_t03_from_we_t01_dyn_node.rs, v22_t03_from_we_t02_dyn_node.rs）	删除	tests/ui/node__dyn_not_object_safe.rs	编译拒绝（cargo 检查/类型检查阶段）
+UI	编译拒绝｜2 个删除成员（v22_t03_from_t02_neg_wrong_type.rs, v22_t03_from_we_t01_wrong_input_type.rs）	删除	tests/ui/node__wrong_input_type.rs	编译拒绝（cargo 检查/类型检查阶段）
+UI	编译拒绝｜2 个删除成员（we_t03_c22_no_choose_macro.rs, we_t03_c22_no_predicate_case_protocol.rs）	删除	tests/ui/choose_api__no_predicate_protocol.rs	编译拒绝：Choice 谓词/宏协议不存在（无 choose 宏、无 predicate 协议入口）；保留夹具 choose_api__no_predicate_protocol.rs 代表该公开面约束
+UI	编译拒绝｜2 个删除成员（v22_t03_from_we_t03_c22_choice_not_constructible.rs, we_t03_c22_choice_not_constructible.rs）	删除	tests/ui/choose_api__choice_not_constructible.rs	编译拒绝（cargo 检查/类型检查阶段）
+UI	编译拒绝｜2 个删除成员（we_t01_sync_result_function.rs, we_t02_sync_result_function.rs）	删除	tests/ui/node__sync_function_not_callable.rs	编译拒绝（cargo 检查/类型检查阶段）
+UI	编译拒绝｜2 个删除成员（v21_12_hardcoded_ref_is_not_constructible.rs, we_t03_c22_ref_not_constructible.rs）	删除	tests/ui/ref_api__not_constructible.rs	编译拒绝（cargo 检查/类型检查阶段）
+UI	编译拒绝｜2 个删除成员（a04_scope_id_is_not_data_id.rs, c12_collector_id_is_not_data_id.rs）	删除	tests/ui/types__scope_id_is_not_data_id.rs	编译拒绝（cargo 检查/类型检查阶段）
+UI	编译拒绝｜2 个删除成员（we_t02_internal_position_types_unreachable.rs, we_t04_e32_private_constructors_unreachable.rs）	删除	tests/ui/reachability__core_module_private.rs	编译拒绝：内部位置类型与私有构造入口的可见性约束（reachability 保留夹具代表）
+UI	编译拒绝｜2 个删除成员（d22_reentering_borrowed_context.rs, we_t01_borrowed_data.rs）	删除	tests/ui/borrow__pending_blocks_mutation.rs	编译拒绝（借用规则）：借用存活期间禁止变更或重入；保留夹具 borrow__pending_blocks_mutation.rs 代表该规则
+UI	编译拒绝｜2 个删除成员（l02_wrong_each_element.rs, we_t05_p02_wrong_collection_shape.rs）	删除	tests/ui/shape__each_element_not_data.rs	编译拒绝：集合元素必须为可声明 Data 的类型
+UI	编译拒绝｜2 个删除成员（we_t04_e02_nested_ref_tuple.rs, we_t05_p02_nested_ref_tuple.rs）	删除	tests/ui/shape__retry_nested_ref_tuple.rs	编译拒绝：嵌套引用元组的形状约束
+UI	编译拒绝｜2 个删除成员（v21_12_wrong_root_shape_is_not_executable.rs, we_t01_illegal_node_output.rs）	删除	tests/ui/shape__bare_owned_tail_is_not_root_output.rs	编译拒绝：根输出必须是 Ref 形状（同判据保留夹具）
+UI	编译拒绝｜2 个删除成员（we_t03_c05_key_without_partialeq.rs, we_t03_c05_wrong_key_type.rs）	删除	tests/ui/choose__wrong_key_type.rs	编译拒绝：Choose 键类型必须满足约束（无 PartialEq 键/错误键类型；同域保留夹具代表）
+UI	Definition 拒绝｜1 个删除成员（v22_t04_from_we_t06_child_local_leak.rs）	删除	tests/internal/engine/definition_each_static_tests.rs::t04_formal_item_is_child_local_and_rejected_in_the_parent	Definition 拒绝（运行期构建期 RunError::Definition）
+UI	Definition 拒绝｜1 个删除成员（v22_t05_from_we_t05_p03_each_seventeen_slots_child_chain.rs）	删除	tests/internal/engine/tests.rs::a07_chain_builds_child_body_and_parent_refs	Definition 拒绝（运行期构建期 RunError::Definition）
+UI	Definition 拒绝｜1 个删除成员（v22_t04_from_we_t02_fragment_forms.rs）	删除	tests/internal/engine/tests.rs::a07_fragment_forms_build_with_non_static_nodes	Definition 拒绝（运行期构建期 RunError::Definition）
+UI	Definition 拒绝｜1 个删除成员（v22_t03_from_we_t02_ref_from_handle_has_no_source.rs）	删除	tests/internal/engine/tests.rs::a11_registered_source_survives_handle_reconstruction	Definition 拒绝（运行期构建期 RunError::Definition）
+UI	Definition 拒绝｜1 个删除成员（v22_t05_from_we_t06_unselected_branch_source.rs）	删除	tests/internal/engine/tests.rs::t03_unselected_branch_forward_source_is_rejected	Definition 拒绝（运行期构建期 RunError::Definition）
+UI	Definition 拒绝｜1 个删除成员（v22_t05_from_we_t05_p01_frozen_natural_usage.rs）	删除	tests/internal/engine/tests_each.rs::p01_frozen_usage_feeds_later_then_chain_and_root	Definition 拒绝（运行期构建期 RunError::Definition）
+UI	Definition 拒绝｜1 个删除成员（v22_t05_each_output_missing_aggregate.rs）	删除	tests/internal/engine/tests_v22_t05.rs	Definition 拒绝（定义期：each 输出缺少 aggregate 声明时返回 RunError::Definition 且业务调用为 0）；该样本无逐一对应函数，断言以该任务模块的定义期声明校验族代表
+UI	Definition 拒绝｜1 个删除成员（v22_t05_from_we_t05_p13_ancestor_ref_collect_rejected.rs）	删除	tests/internal/engine/tests_each.rs::p04_forward_collection_position_is_rejected	Definition 拒绝（运行期构建期 RunError::Definition）
+UI	Definition 拒绝｜1 个删除成员（v22_t05_from_we_t05_p04_item_as_body_output_rejected.rs）	删除	tests/internal/engine/tests_each_consume.rs::p13_engine_item_output_is_rejected_by_the_real_group_preflight	Definition 拒绝（运行期构建期 RunError::Definition）
+UI	Definition 拒绝｜1 个删除成员（v22_t05_from_we_t05_p13_duplicate_owned_alias_rejected.rs）	删除	tests/internal/engine/tests_each_consume.rs::p15_duplicate_owned_alias_group_is_rejected_before_any_move	Definition 拒绝（运行期构建期 RunError::Definition）
+UI	Definition 拒绝｜1 个删除成员（v22_t03_from_we_t04_e02_iter_state_shape_mismatch.rs）	删除	tests/internal/engine/tests_promote_group.rs::e21_state_count_mismatch_is_rejected_before_freeze	Definition 拒绝（运行期构建期 RunError::Definition）
+UI	Definition 拒绝｜1 个删除成员（v22_t03_from_we_t04_e04_iter_zero_rounds_rejected.rs）	删除	tests/internal/engine/tests_retry_iter.rs::e02_iter_zero_rounds_is_rejected_at_build_time	Definition 拒绝（运行期构建期 RunError::Definition）
+UI	Definition 拒绝｜1 个删除成员（v22_t05_from_we_t03_c01_frozen_choose_usage.rs）	删除	tests/internal/engine/tests_runtime.rs::c01_frozen_choose_usage_runs_case_case_and_fallback	Definition 拒绝（运行期构建期 RunError::Definition）
+UI	Definition 拒绝｜1 个删除成员（v22_t05_from_we_t03_c02_minimal_key_and_borrowed_node.rs）	删除	tests/internal/engine/tests_runtime.rs::c02_minimal_key_and_borrowed_node_run	Definition 拒绝（运行期构建期 RunError::Definition）
+UI	Definition 拒绝｜1 个删除成员（v22_t03_from_we_t01_root_output_not_ref_shape.rs）	删除	tests/internal/engine/tests_v22_t04.rs::t04_output_expectation_accepts_matching_shapes_and_unit_pairs	Definition 拒绝（运行期构建期 RunError::Definition）
+UI	Definition 拒绝｜1 个删除成员（v22_t05_from_we_t06_invalid_choose_config.rs）	删除	tests/internal/engine/tests_v22_t05.rs::t05_empty_choose_is_rejected_with_config_error	Definition 拒绝（运行期构建期 RunError::Definition）
+UI	Definition 拒绝｜1 个删除成员（v22_t06_current_outside_round_rejected.rs）	删除	tests/internal/engine/tests_v22_t06.rs::t06_current_is_rejected_outside_a_direct_round_body	Definition 拒绝（运行期构建期 RunError::Definition）
+UI	Definition 拒绝｜1 个删除成员（v22_t03_from_we_t06_round_local_leak.rs）	删除	tests/we_t06_s04_s07.rs::s07_formal_current_is_round_local	Definition 拒绝（运行期构建期 RunError::Definition）
+UI	Definition 拒绝｜1 个删除成员（v22_t03_from_we_t06_child_local_leak.rs）	删除	tests/internal/engine/definition_each_static_tests.rs::t04_formal_item_is_child_local_and_rejected_in_the_parent	Definition 拒绝（运行期构建期 RunError::Definition）
+UI	Definition 拒绝｜1 个删除成员（we_t02_ref_from_handle_has_no_source.rs）	删除	tests/internal/engine/tests.rs::a11_registered_source_survives_handle_reconstruction	Definition 拒绝（运行期构建期 RunError::Definition）
+UI	Definition 拒绝｜1 个删除成员（v22_t03_from_we_t06_unselected_branch_source.rs）	删除	tests/internal/engine/tests.rs::t03_unselected_branch_forward_source_is_rejected	Definition 拒绝（运行期构建期 RunError::Definition）
+UI	Definition 拒绝｜1 个删除成员（g12_match_then_wrong_branch_input_type.rs）	删除	tests/internal/engine/tests_each_control.rs::p32b_no_matching_case_is_terminal_and_switches_no_branch	Definition 拒绝（运行期构建期 RunError::Definition）
+UI	Definition 拒绝｜1 个删除成员（we_t04_e02_iter_state_shape_mismatch.rs）	删除	tests/internal/engine/tests_promote_group.rs::e21_state_count_mismatch_is_rejected_before_freeze	Definition 拒绝（运行期构建期 RunError::Definition）
+UI	Definition 拒绝｜1 个删除成员（we_t04_e04_iter_zero_rounds_rejected.rs）	删除	tests/internal/engine/tests_retry_iter.rs::e02_iter_zero_rounds_is_rejected_at_build_time	Definition 拒绝（运行期构建期 RunError::Definition）
+UI	Definition 拒绝｜1 个删除成员（k03_wrong_owned_output_type.rs）	删除	tests/internal/engine/tests_runtime.rs::b15_owned_output_leaves_the_runtime_alive	Definition 拒绝（运行期构建期 RunError::Definition）
+UI	Definition 拒绝｜1 个删除成员（v22_t03_from_we_t06_p03_chain_fragment.rs）	删除	tests/internal/engine/tests_runtime.rs::c01_choose_nests_chain_choose_and_fragment_forms	Definition 拒绝（运行期构建期 RunError::Definition）
+UI	Definition 拒绝｜1 个删除成员（we_t01_root_output_not_ref_shape.rs）	删除	tests/internal/engine/tests_v22_t04.rs::t04_output_expectation_accepts_matching_shapes_and_unit_pairs	Definition 拒绝（运行期构建期 RunError::Definition）
+UI	Definition 拒绝｜1 个删除成员（v22_t03_from_we_t06_invalid_choose_config.rs）	删除	tests/internal/engine/tests_v22_t05.rs::t05_empty_choose_is_rejected_with_config_error	Definition 拒绝（运行期构建期 RunError::Definition）
+UI	Definition 拒绝｜1 个删除成员（v21_12_flow_input_over_sixteen.rs）	删除	tests/v21_12_public_api.rs::tuple_root_inputs_support_sixteen_positions	Definition 拒绝（运行期构建期 RunError::Definition）
+UI	执行成功｜1 个删除成员（v22_t05_from_we_t05_p02_positive_empty_collection.rs）	删除	tests/internal/engine/tests_each.rs::p12_empty_collection_finishes_empty_vecs_without_items	执行成功（断言正常产出，exit 0）
+UI	执行成功｜1 个删除成员（v22_t04_from_we_t02_spec_minimal_example.rs）	删除	tests/internal/engine/tests_runtime.rs::b01_spec_minimal_example_returns_43	执行成功（断言正常产出，exit 0）
+UI	执行成功｜1 个删除成员（v22_t04_from_we_t02_nonstatic_node_borrow.rs）	删除	tests/internal/engine/tests_runtime.rs::b03_fragment_forms_execute_with_non_static_nodes	执行成功（断言正常产出，exit 0）
+UI	执行成功｜1 个删除成员（we_t05_p39_renamed_dependency.rs）	删除	tests/ui/positive__renamed_dependency.rs	执行成功：重命名依赖下的正例装配（exit 0）
+UI	编译拒绝｜1 个删除成员（v22_t05_from_we_t03_c22_choice_not_constructible.rs）	删除	tests/ui/choose_api__choice_not_constructible.rs	编译拒绝（cargo 检查/类型检查阶段）
+UI	编译拒绝｜1 个删除成员（v22_t03_from_we_t01_sync_result_function.rs）	删除	tests/ui/node__sync_function_not_callable.rs	编译拒绝（cargo 检查/类型检查阶段）
+UI	编译拒绝｜1 个删除成员（v22_t03_from_we_t01_ref_has_no_accessor.rs）	删除	tests/ui/ref_api__no_value_accessor.rs	编译拒绝（cargo 检查/类型检查阶段）
+UI	编译拒绝｜1 个删除成员（v22_t03_from_we_t03_c22_ref_not_constructible.rs）	删除	tests/ui/ref_api__not_constructible.rs	编译拒绝（cargo 检查/类型检查阶段）
+UI	编译拒绝｜1 个删除成员（v22_t05_from_we_t05_p02_collection_element_mismatch.rs）	删除	tests/ui/shape__each_element_not_data.rs	编译拒绝（cargo 检查/类型检查阶段）
+UI	编译拒绝｜1 个删除成员（v22_t03_from_we_t04_e02_iter_state_17_slots.rs）	删除	tests/ui/shape__iter_17_slots_state.rs	编译拒绝（cargo 检查/类型检查阶段）
+UI	编译拒绝｜1 个删除成员（v22_t03_from_legacy_c12_collector_id_is_not_data_id.rs）	删除	tests/ui/types__scope_id_is_not_data_id.rs	编译拒绝（cargo 检查/类型检查阶段）
+UI	编译拒绝｜1 个删除成员（v22_t02_neg_e0499_nested.rs）	删除	tests/ui/borrow__nested_mutable_builders.rs	编译拒绝（E0499）：嵌套可变借用在同一 Builder 上被拒绝；保留夹具 borrow__nested_mutable_builders.rs 代表该规则
+UI	编译拒绝｜1 个删除成员（v22_t02_neg_provide_async.rs）	删除	tests/ui/factory__async_rejected.rs	编译拒绝（cargo 检查/类型检查阶段）
+UI	编译拒绝｜1 个删除成员（v22_t02_neg_provide_value.rs）	删除	tests/ui/factory__direct_value_rejected.rs	编译拒绝（cargo 检查/类型检查阶段）
+UI	编译拒绝｜1 个删除成员（v22_t02_neg_provide_fnonly.rs）	删除	tests/ui/factory__fn_mut_only_rejected.rs	编译拒绝（cargo 检查/类型检查阶段）
+UI	编译拒绝｜1 个删除成员（v22_t02_neg_provide_fnonce.rs）	删除	tests/ui/factory__fn_once_rejected.rs	编译拒绝（cargo 检查/类型检查阶段）
+UI	编译拒绝｜1 个删除成员（v22_t02_neg_provide_unit.rs）	删除	tests/ui/factory__unit_rejected.rs	编译拒绝（cargo 检查/类型检查阶段）
+UI	编译拒绝｜1 个删除成员（we_t04_e02_iter_unit_state.rs）	删除	tests/ui/shape__iter_unit_state.rs	编译拒绝（cargo 检查/类型检查阶段）
+UI	v22_t04_from_we_t01_positive_assembly.rs	重命名保留	tests/ui/positive__public_api_assembly.rs	判据：码=run-int/模式=ok/锚点=-/符号=-（未放宽）
+UI	v22_t03_from_we_t01_illegal_node_output.rs	重命名保留	tests/ui/shape__tuple_is_not_node_output.rs	判据：码=int/模式=reject/锚点=E0277/符号=E0277（未放宽）
+UI	v22_t03_from_we_t01_borrowed_data.rs	重命名保留	tests/ui/types__non_static_data_rejected.rs	判据：码=int/模式=reject/锚点=E0478/符号=E0478,E0803（未放宽）
+UI	v22_t03_from_legacy_a04_scope_id_is_not_data_id.rs	重命名保留	tests/ui/types__scope_id_is_not_data_id.rs	判据：码=int/模式=reject/锚点=E0308/符号=E0308（未放宽）
+UI	v22_t03_from_legacy_a14_borrow_while_destroying.rs	重命名保留	tests/ui/borrow__blocks_destroy.rs	判据：码=int/模式=reject/锚点=E0502/符号=E0502（未放宽）
+UI	v22_t03_from_legacy_c23_borrow_while_consuming.rs	重命名保留	tests/ui/borrow__blocks_consume.rs	判据：码=int/模式=reject/锚点=E0502/符号=E0502（未放宽）
+UI	v22_t03_from_legacy_j07_borrow_blocks_round_collection.rs	重命名保留	tests/ui/borrow__blocks_round_collection.rs	判据：码=int/模式=reject/锚点=E0502/符号=E0502（未放宽）
+UI	v22_t03_from_legacy_k04_borrow_while_extracting.rs	重命名保留	tests/ui/borrow__blocks_extraction.rs	判据：码=int/模式=reject/锚点=E0502/符号=E0502（未放宽）
+UI	v22_t03_from_legacy_a04_core_is_not_reachable.rs	重命名保留	tests/ui/reachability__core_module_private.rs	判据：码=ext/模式=reject/锚点=E0432/符号=E0432,E0603（未放宽）
+UI	v22_t03_from_we_t02_ref_has_no_accessor.rs	重命名保留	tests/ui/ref_api__no_value_accessor.rs	判据：码=ext/模式=reject/锚点=E0599/符号=E0599（未放宽）
+UI	v22_t03_from_we_t02_ref_has_no_field_projection.rs	重命名保留	tests/ui/ref_api__no_field_projection.rs	判据：码=ext/模式=reject/锚点=E0609/符号=E0609（未放宽）
+UI	v22_t03_from_we_t02_ref_of_unit_is_not_expressible.rs	重命名保留	tests/ui/shape__unit_ref_not_expressible.rs	判据：码=ext/模式=reject/锚点=E0277/符号=E0277（未放宽）
+UI	v22_t03_from_we_t02_sync_result_function.rs	重命名保留	tests/ui/node__sync_function_not_callable.rs	判据：码=ext/模式=reject/锚点=E0277/符号=E0277（未放宽）
+UI	v22_t03_from_we_t02_wrong_input_type.rs	重命名保留	tests/ui/node__wrong_input_type.rs	判据：码=ext/模式=reject/锚点=E0271/符号=E0271（未放宽）
+UI	v22_t03_from_we_t02_arity_mismatch.rs	重命名保留	tests/ui/node__arity_mismatch.rs	判据：码=ext/模式=reject/锚点=E0271/符号=E0271（未放宽）
+UI	v22_t03_from_we_t02_root_flow_builder_absent.rs	重命名保留	tests/ui/reachability__stale_builder_name_absent.rs	判据：码=ext/模式=reject/锚点=E0432/符号=E0432（未放宽）
+UI	v22_t03_from_we_t02_pending_borrow_blocks_mutation.rs	重命名保留	tests/ui/borrow__pending_blocks_mutation.rs	判据：码=int/模式=reject/锚点=E0502/符号=E0502（未放宽）
+UI	v22_t05_from_we_t03_c05_wrong_key_type.rs	重命名保留	tests/ui/choose__wrong_key_type.rs	判据：码=ext/模式=reject/锚点=E0308/符号=E0308（未放宽）
+UI	v22_t05_from_we_t03_c05_key_without_partialeq.rs	重命名保留	tests/ui/choose__key_without_partial_eq.rs	判据：码=ext/模式=reject/锚点=E0277/符号=E0277,E0599（未放宽）
+UI	v22_t05_from_we_t03_c22_no_predicate_case_protocol.rs	重命名保留	tests/ui/choose_api__no_predicate_protocol.rs	判据：码=ext/模式=reject/锚点=E0599/符号=E0599（未放宽）
+UI	v22_t03_from_we_t03_c22_no_choose_macro.rs	重命名保留	tests/ui/reachability__no_choose_macro.rs	判据：码=ext/模式=reject/锚点=E0432/符号=E0432,E0433（未放宽）
+UI	v22_t04_from_we_t04_e02_retry_output_17_slots.rs	重命名保留	tests/ui/shape__retry_output_17_slots.rs	判据：码=ext/模式=reject/锚点=E0277/符号=E0277（未放宽）
+UI	v22_t04_from_we_t04_e02_nested_ref_tuple.rs	重命名保留	tests/ui/shape__retry_nested_ref_tuple.rs	判据：码=ext/模式=reject/锚点=E0277/符号=E0277（未放宽）
+UI	v22_t05_from_we_t04_e32_private_constructors_unreachable.rs	重命名保留	tests/ui/choose_api__choice_not_constructible.rs	判据：码=ext/模式=reject/锚点=E0624/符号=E0624（未放宽）
+UI	v22_t05_from_we_t05_p02_each_body_output_17_slots.rs	重命名保留	tests/ui/shape__each_body_17_slots.rs	判据：码=ext/模式=reject/锚点=E0277/符号=E0277（未放宽）
+UI	v22_t05_from_we_t05_p02_wrong_collection_shape.rs	重命名保留	tests/ui/each__wrong_collection_shape.rs	判据：码=ext/模式=reject/锚点=E0308/符号=E0308（未放宽）
+UI	v22_t05_from_we_t05_p02_element_not_data_bound.rs	重命名保留	tests/ui/shape__each_element_not_data.rs	判据：码=ext/模式=reject/锚点=E0277/符号=E0277,E0310（未放宽）
+UI	v22_t03_from_we_t06_p01_root_linear.rs	重命名保留	tests/ui/positive__root_linear.rs	判据：码=run/模式=ok/锚点=-/符号=-（未放宽）
+UI	v22_t03_from_we_t06_p02_node_forms.rs	重命名保留	tests/ui/positive__node_forms.rs	判据：码=run/模式=ok/锚点=-/符号=-（未放宽）
+UI	v22_t04_from_we_t06_p03_chain_fragment.rs	重命名保留	tests/ui/positive__chain_fragment.rs	判据：码=run/模式=ok/锚点=-/符号=-（未放宽）
+UI	v22_t05_from_we_t06_p04_each.rs	重命名保留	tests/ui/positive__each.rs	判据：码=run/模式=ok/锚点=-/符号=-（未放宽）
+UI	v22_t05_from_we_t06_p05_choose.rs	重命名保留	tests/ui/positive__choose.rs	判据：码=run/模式=ok/锚点=-/符号=-（未放宽）
+UI	v22_t04_from_we_t06_p06_retry.rs	重命名保留	tests/ui/positive__retry.rs	判据：码=run/模式=ok/锚点=-/符号=-（未放宽）
+UI	v22_t03_from_we_t06_p07_iter.rs	重命名保留	tests/ui/positive__iter.rs	判据：码=run/模式=ok/锚点=-/符号=-（未放宽）
+UI	v22_t05_from_we_t06_p08_six_ops_composition.rs	重命名保留	tests/ui/positive__six_ops_composition.rs	判据：码=run/模式=ok/锚点=-/符号=-（未放宽）
+UI	v22_t03_from_we_t06_p09_renamed_dependency.rs	重命名保留	tests/ui/positive__renamed_dependency.rs	判据：码=run/模式=ok/锚点=-/符号=-（未放宽）
+UI	v22_t03_from_we_t06_x03_node_input_17.rs	重命名保留	tests/ui/shape__node_input_17_slots.rs	判据：码=ext/模式=reject/锚点=E0277/符号=E0277（未放宽）
+UI	v22_t03_from_we_t06_x03_nested_ref_input.rs	重命名保留	tests/ui/shape__root_nested_ref_input.rs	判据：码=ext/模式=reject/锚点=E0277/符号=E0277（未放宽）
+UI	v22_t03_from_we_t06_ref_not_constructible.rs	重命名保留	tests/ui/ref_api__not_constructible.rs	判据：码=ext/模式=reject/锚点=E0624/符号=E0624（未放宽）
+UI	v22_t03_from_we_t06_wrong_root_shape.rs	重命名保留	tests/ui/shape__bare_owned_tail_is_not_root_output.rs	判据：码=ext/模式=reject/锚点=E0308/符号=E0308（未放宽）
+UI	v22_t03_from_we_t06_internal_types_unreachable.rs	重命名保留	tests/ui/reachability__internal_types_unreachable.rs	判据：码=ext/模式=reject/锚点=E0432/符号=E0432（未放宽）
+UI	v22_t03_from_we_t06_dyn_node.rs	重命名保留	tests/ui/node__dyn_not_object_safe.rs	判据：码=ext/模式=reject/锚点=E0038/符号=E0038（未放宽）
+UI	v22_t03_from_t02_ok_internal.rs	重命名保留	tests/ui/positive__internal_assembly.rs	判据：码=int/模式=ok/锚点=-/符号=-（未放宽）
+UI	v22_t03_from_t02_neg_e0499_nested.rs	重命名保留	tests/ui/borrow__nested_mutable_builders.rs	判据：码=int/模式=reject/锚点=E0499/符号=E0499（未放宽）
+UI	v22_t03_from_t02_neg_provide_fnonce.rs	重命名保留	tests/ui/factory__fn_once_rejected.rs	判据：码=int/模式=reject/锚点=E0507/符号=E0507（未放宽）
+UI	v22_t03_from_t02_neg_provide_fnonly.rs	重命名保留	tests/ui/factory__fn_mut_only_rejected.rs	判据：码=int/模式=reject/锚点=E0594/符号=E0594（未放宽）
+UI	v22_t03_from_t02_neg_provide_async.rs	重命名保留	tests/ui/factory__async_rejected.rs	判据：码=int/模式=reject/锚点=E0277/符号=E0277（未放宽）
+UI	v22_t03_from_t02_neg_provide_value.rs	重命名保留	tests/ui/factory__direct_value_rejected.rs	判据：码=int/模式=reject/锚点=E0277/符号=E0277（未放宽）
+UI	v22_t03_from_t02_neg_provide_unit.rs	重命名保留	tests/ui/factory__unit_rejected.rs	判据：码=int/模式=reject/锚点=E0277/符号=E0277（未放宽）
+UI	v22_t03_from_t02_ok_extern.rs	重命名保留	tests/ui/positive__external_assembly.rs	判据：码=ext/模式=ok/锚点=-/符号=-（未放宽）
+UI	v22_t03_from_t02_neg_extern_provide_node.rs	重命名保留	tests/ui/reachability__provide_node_not_exported.rs	判据：码=ext/模式=reject/锚点=E0432/符号=E0432,E0603（未放宽）
+UI	v22_t03_c01_missing_out_context.rs	重命名保留	tests/ui/builder__missing_out_context.rs	判据：码=ext/模式=reject/锚点=E0283/符号=E0283（未放宽）
+UI	v22_t03_c01_flow_tail.rs	重命名保留	tests/ui/builder__flow_tail_must_not_be_discarded.rs	判据：码=ext/模式=reject/锚点=E0308/符号=E0308（未放宽）
+UI	consumer/src/main.rs	重命名保留	tests/support/consumer/src/main.rs	判据：码=consumer/模式=ok/锚点=-/符号=-（未放宽）
+UI	v22_t05_old_two_arg_choose_rejected.rs	重命名保留	tests/ui/legacy_api__two_arg_choose_rejected.rs	判据：码=ext/模式=reject/锚点=E0061/符号=E0061,E0277（未放宽）
+UI	v22_t05_branch_closure_returns_ref.rs	重命名保留	tests/ui/choose__branch_closure_returns_ref.rs	判据：码=ext/模式=reject/锚点=E0308/符号=E0308（未放宽）
+UI	v22_t06_old_two_arg_iter_rejected.rs	重命名保留	tests/ui/legacy_api__two_arg_iter_rejected.rs	判据：码=ext/模式=reject/锚点=E0593/符号=E0593（未放宽）
+UI	v22_t06_iter_closure_returns_ref_rejected.rs	重命名保留	tests/ui/iter__round_body_returns_ref.rs	判据：码=ext/模式=reject/锚点=E0308/符号=E0308（未放宽）
+UI	v22_t06_iter_unit_state_rejected.rs	重命名保留	tests/ui/shape__iter_unit_state.rs	判据：码=ext/模式=reject/锚点=E0277/符号=E0277（未放宽）
+UI	v22_t06_iter_17_slots_rejected.rs	重命名保留	tests/ui/shape__iter_17_slots_state.rs	判据：码=ext/模式=reject/锚点=E0277/符号=E0277（未放宽）
+UI	v22_t06_next_unit_type_rejected.rs	重命名保留	tests/ui/shape__next_unit_type.rs	判据：码=ext/模式=reject/锚点=E0277/符号=E0277（未放宽）
+UI	v22_t06_iter_ordinary_publishes_state.rs	重命名保留	tests/ui/positive__iter_ordinary_publishes_state.rs	判据：码=run/模式=ok/锚点=-/符号=-（未放宽）
+UI	v22_t03_from_t02_witness_unrelated_e0277.rs	重命名保留	tests/ui/witness__unrelated_error.rs	判据：码=int/模式=reject/锚点=E0277/符号=E0277（未放宽）
+UI	v22_t03_from_t02_witness_wrong_symbol_e0624.rs	重命名保留	tests/ui/witness__wrong_symbol.rs	判据：码=ext/模式=reject/锚点=E0624/符号=E0624（未放宽）
+UI	tests/ui/witness_faults/*（2 文件）	删除	（改由判定器自检承担）	ui_manifest_witnesses.tsv + `ui_check.py --self-test/--witnesses`
+UI	tests/support/ui_check.py + ui_manifest.tsv（62 项）+ ui_manifest_witnesses.tsv（2 项）	新增	python3 tests/support/ui_check.py [--self-test|--witnesses]	严格判定=错误码+允许集合+唯一锚点行+符号 token；实测主检 62/62、自检 13/13、见证 2/2
+UI	独立消费者（Cargo 包）	新增	cd tests/support/consumer && cargo run --offline --locked（依赖别名 roundkit）	正例（exit 0）；构造入口被编译期拒绝由 ref_api__not_constructible.rs 与 choose_api__choice_not_constructible.rs 承接
+# Rust 迁移（src 仅保留加载声明、结构字段与窄调用点）
+Rust	src/core/context.rs → 模块 mod	迁移（测试主体）	tests/internal/core/context_creation_counts.rs	加载声明 #[cfg(test)] #[path]，运行期不编译；实测执行用例数 = 0（cargo test -- --list）
+Rust	src/core/context.rs → 模块 tests	迁移（测试主体）	tests/internal/core/context_tests.rs	加载声明 #[cfg(test)] #[path]，运行期不编译；实测执行用例数 = 30（cargo test -- --list）
+Rust	src/core/context.rs → 模块 mod	迁移（测试主体）	tests/internal/core/context_observe.rs	加载声明 #[cfg(test)] #[path]，运行期不编译；实测执行用例数 = 0（cargo test -- --list）
+Rust	src/core/data_container.rs → 模块 tests	迁移（测试主体）	tests/internal/core/data_container_tests.rs	加载声明 #[cfg(test)] #[path]，运行期不编译；实测执行用例数 = 17（cargo test -- --list）
+Rust	src/core/data_container.rs → 模块 mod	迁移（测试主体）	tests/internal/core/data_container_observe.rs	加载声明 #[cfg(test)] #[path]，运行期不编译；实测执行用例数 = 0（cargo test -- --list）
+Rust	src/core/engine/boundary.rs → 模块 mod	迁移（测试主体）	tests/internal/engine/boundary_observe.rs	加载声明 #[cfg(test)] #[path]，运行期不编译；实测执行用例数 = 0（cargo test -- --list）
+Rust	src/core/engine/definition.rs → 模块 each_static_tests	迁移（测试主体）	tests/internal/engine/definition_each_static_tests.rs	加载声明 #[cfg(test)] #[path]，运行期不编译；实测执行用例数 = 3（cargo test -- --list）
+Rust	src/core/engine/definition.rs → 模块 mod	迁移（测试主体）	tests/internal/engine/definition_observe.rs	加载声明 #[cfg(test)] #[path]，运行期不编译；实测执行用例数 = 0（cargo test -- --list）
+Rust	src/core/engine/flow.rs → 模块 mod	迁移（测试主体）	tests/internal/engine/flow_observe.rs	加载声明 #[cfg(test)] #[path]，运行期不编译；实测执行用例数 = 0（cargo test -- --list）
+Rust	src/core/engine/mod.rs → 模块 mod	迁移（测试主体）	tests/internal/engine/observe.rs	加载声明 #[cfg(test)] #[path]，运行期不编译；实测执行用例数 = 0（cargo test -- --list）
+Rust	src/core/engine/mod.rs → 模块 tests	迁移（测试主体）	tests/internal/engine/tests.rs	加载声明 #[cfg(test)] #[path]，运行期不编译；实测执行用例数 = 29（cargo test -- --list）
+Rust	src/core/engine/mod.rs → 模块 tests_each	迁移（测试主体）	tests/internal/engine/tests_each.rs	加载声明 #[cfg(test)] #[path]，运行期不编译；实测执行用例数 = 17（cargo test -- --list）
+Rust	src/core/engine/mod.rs → 模块 tests_each_consume	迁移（测试主体）	tests/internal/engine/tests_each_consume.rs	加载声明 #[cfg(test)] #[path]，运行期不编译；实测执行用例数 = 24（cargo test -- --list）
+Rust	src/core/engine/mod.rs → 模块 tests_each_control	迁移（测试主体）	tests/internal/engine/tests_each_control.rs	加载声明 #[cfg(test)] #[path]，运行期不编译；实测执行用例数 = 12（cargo test -- --list）
+Rust	src/core/engine/mod.rs → 模块 tests_each_finish	迁移（测试主体）	tests/internal/engine/tests_each_finish.rs	加载声明 #[cfg(test)] #[path]，运行期不编译；实测执行用例数 = 2（cargo test -- --list）
+Rust	src/core/engine/mod.rs → 模块 tests_each_nested	迁移（测试主体）	tests/internal/engine/tests_each_nested.rs	加载声明 #[cfg(test)] #[path]，运行期不编译；实测执行用例数 = 8（cargo test -- --list）
+Rust	src/core/engine/mod.rs → 模块 tests_promote_group	迁移（测试主体）	tests/internal/engine/tests_promote_group.rs	加载声明 #[cfg(test)] #[path]，运行期不编译；实测执行用例数 = 13（cargo test -- --list）
+Rust	src/core/engine/mod.rs → 模块 tests_retry_iter	迁移（测试主体）	tests/internal/engine/tests_retry_iter.rs	加载声明 #[cfg(test)] #[path]，运行期不编译；实测执行用例数 = 14（cargo test -- --list）
+Rust	src/core/engine/mod.rs → 模块 tests_retry_iter_arity	迁移（测试主体）	tests/internal/engine/tests_retry_iter_arity.rs	加载声明 #[cfg(test)] #[path]，运行期不编译；实测执行用例数 = 8（cargo test -- --list）
+Rust	src/core/engine/mod.rs → 模块 tests_retry_iter_matrix	迁移（测试主体）	tests/internal/engine/tests_retry_iter_matrix.rs	加载声明 #[cfg(test)] #[path]，运行期不编译；实测执行用例数 = 12（cargo test -- --list）
+Rust	src/core/engine/mod.rs → 模块 tests_retry_iter_nesting	迁移（测试主体）	tests/internal/engine/tests_retry_iter_nesting.rs	加载声明 #[cfg(test)] #[path]，运行期不编译；实测执行用例数 = 9（cargo test -- --list）
+Rust	src/core/engine/mod.rs → 模块 tests_retry_iter_state	迁移（测试主体）	tests/internal/engine/tests_retry_iter_state.rs	加载声明 #[cfg(test)] #[path]，运行期不编译；实测执行用例数 = 5（cargo test -- --list）
+Rust	src/core/engine/mod.rs → 模块 tests_runtime	迁移（测试主体）	tests/internal/engine/tests_runtime.rs	加载声明 #[cfg(test)] #[path]，运行期不编译；实测执行用例数 = 89（cargo test -- --list）
+Rust	src/core/engine/mod.rs → 模块 tests_v22_t01	迁移（测试主体）	tests/internal/engine/tests_v22_t01.rs	加载声明 #[cfg(test)] #[path]，运行期不编译；实测执行用例数 = 16（cargo test -- --list）
+Rust	src/core/engine/mod.rs → 模块 tests_v22_t02	迁移（测试主体）	tests/internal/engine/tests_v22_t02.rs	加载声明 #[cfg(test)] #[path]，运行期不编译；实测执行用例数 = 16（cargo test -- --list）
+Rust	src/core/engine/mod.rs → 模块 tests_v22_t02_repeat	迁移（测试主体）	tests/internal/engine/tests_v22_t02_repeat.rs	加载声明 #[cfg(test)] #[path]，运行期不编译；实测执行用例数 = 8（cargo test -- --list）
+Rust	src/core/engine/mod.rs → 模块 tests_v22_t03	迁移（测试主体）	tests/internal/engine/tests_v22_t03.rs	加载声明 #[cfg(test)] #[path]，运行期不编译；实测执行用例数 = 4（cargo test -- --list）
+Rust	src/core/engine/mod.rs → 模块 tests_v22_t04	迁移（测试主体）	tests/internal/engine/tests_v22_t04.rs	加载声明 #[cfg(test)] #[path]，运行期不编译；实测执行用例数 = 20（cargo test -- --list）
+Rust	src/core/engine/mod.rs → 模块 tests_v22_t05	迁移（测试主体）	tests/internal/engine/tests_v22_t05.rs	加载声明 #[cfg(test)] #[path]，运行期不编译；实测执行用例数 = 27（cargo test -- --list）
+Rust	src/core/engine/mod.rs → 模块 tests_v22_t06	迁移（测试主体）	tests/internal/engine/tests_v22_t06.rs	加载声明 #[cfg(test)] #[path]，运行期不编译；实测执行用例数 = 27（cargo test -- --list）
+Rust	src/core/engine/mod.rs → 模块 tests_v22_t07	迁移（测试主体）	tests/internal/engine/tests_v22_t07.rs	加载声明 #[cfg(test)] #[path]，运行期不编译；实测执行用例数 = 3（cargo test -- --list）
+Rust	src/core/engine/mod.rs → 模块 tests_v22_t07_compose	迁移（测试主体）	tests/internal/engine/tests_v22_t07_compose.rs	加载声明 #[cfg(test)] #[path]，运行期不编译；实测执行用例数 = 6（cargo test -- --list）
+Rust	src/core/engine/mod.rs → 模块 tests_we_t06_arity	迁移（测试主体）	tests/internal/engine/tests_we_t06_arity.rs	加载声明 #[cfg(test)] #[path]，运行期不编译；实测执行用例数 = 3（cargo test -- --list）
+Rust	src/core/engine/mod.rs → 模块 tests_we_t06_root_preflight	迁移（测试主体）	tests/internal/engine/tests_we_t06_root_preflight.rs	加载声明 #[cfg(test)] #[path]，运行期不编译；实测执行用例数 = 10（cargo test -- --list）
+Rust	src/core/engine/mod.rs → 模块 tests_we_t06_witnesses	迁移（测试主体）	tests/internal/engine/tests_we_t06_witnesses.rs	加载声明 #[cfg(test)] #[path]，运行期不编译；实测执行用例数 = 8（cargo test -- --list）
+Rust	src/core/engine/runtime.rs → 模块 mod	迁移（测试主体）	tests/internal/engine/runtime_observe.rs	加载声明 #[cfg(test)] #[path]，运行期不编译；实测执行用例数 = 0（cargo test -- --list）
+Rust	src/core/engine/shape.rs → 模块 each_shape_tests	迁移（测试主体）	tests/internal/engine/shape_each_shape_tests.rs	加载声明 #[cfg(test)] #[path]，运行期不编译；实测执行用例数 = 4（cargo test -- --list）
+Rust	src/core/identity.rs → 模块 tests	迁移（测试主体）	tests/internal/core/identity_tests.rs	加载声明 #[cfg(test)] #[path]，运行期不编译；实测执行用例数 = 6（cargo test -- --list）
+Rust	src/core/identity.rs → 模块 mod	迁移（测试主体）	tests/internal/core/identity_observe.rs	加载声明 #[cfg(test)] #[path]，运行期不编译；实测执行用例数 = 0（cargo test -- --list）
+Rust	src/core/mod.rs → 模块 test_support	迁移（测试主体）	tests/internal/core/test_support.rs	加载声明 #[cfg(test)] #[path]，运行期不编译；实测执行用例数 = 0（cargo test -- --list）
+Rust	src/core/mod.rs → 模块 v21_08_tests_cap	迁移（测试主体）	tests/internal/core/v21_08_tests_cap.rs	加载声明 #[cfg(test)] #[path]，运行期不编译；实测执行用例数 = 8（cargo test -- --list）
+Rust	src/core/mod.rs → 模块 v21_10_tests_defence	迁移（测试主体）	tests/internal/core/v21_10_tests_defence.rs	加载声明 #[cfg(test)] #[path]，运行期不编译；实测执行用例数 = 2（cargo test -- --list）
+Rust	src/core/orchestrator.rs → 模块 mod	迁移（测试主体）	tests/internal/core/orchestrator_observe.rs	加载声明 #[cfg(test)] #[path]，运行期不编译；实测执行用例数 = 0（cargo test -- --list）
+Rust	src/core/ref_id.rs → 模块 mod	迁移（测试主体）	tests/internal/core/ref_id_observe.rs	加载声明 #[cfg(test)] #[path]，运行期不编译；实测执行用例数 = 0（cargo test -- --list）
+Rust	src/core/ref_id.rs → 模块 tests	迁移（测试主体）	tests/internal/core/ref_id_tests.rs	加载声明 #[cfg(test)] #[path]，运行期不编译；实测执行用例数 = 4（cargo test -- --list）
+Rust	src/core/runtime.rs → 模块 mod	迁移（测试主体）	tests/internal/core/runtime_observe.rs	加载声明 #[cfg(test)] #[path]，运行期不编译；实测执行用例数 = 0（cargo test -- --list）
+Rust	src/core/scope.rs → 模块 tests	迁移（测试主体）	tests/internal/core/scope_tests.rs	加载声明 #[cfg(test)] #[path]，运行期不编译；实测执行用例数 = 60（cargo test -- --list）
+Rust	src/core/scope.rs → 模块 mod	迁移（测试主体）	tests/internal/core/scope_observe.rs	加载声明 #[cfg(test)] #[path]，运行期不编译；实测执行用例数 = 0（cargo test -- --list）
+Rust	src/core/context.rs 的 non-canonical 用例	已删除 13 条；仍保留 0 条（未落地删除）	tests/internal/**（同源文件对应模块）	逐条核对表见 target/test-cleanup-evidence/deleted_tests.tsv 的 applied 列（以 cargo test -- --list 实测为准）
+Rust	src/core/data_container.rs 的 non-canonical 用例	已删除 4 条；仍保留 0 条（未落地删除）	tests/internal/**（同源文件对应模块）	逐条核对表见 target/test-cleanup-evidence/deleted_tests.tsv 的 applied 列（以 cargo test -- --list 实测为准）
+Rust	src/core/engine/tests.rs 的 non-canonical 用例	已删除 16 条；仍保留 0 条（未落地删除）	tests/internal/**（同源文件对应模块）	逐条核对表见 target/test-cleanup-evidence/deleted_tests.tsv 的 applied 列（以 cargo test -- --list 实测为准）
+Rust	src/core/engine/tests_each.rs 的 non-canonical 用例	已删除 5 条；仍保留 0 条（未落地删除）	tests/internal/**（同源文件对应模块）	逐条核对表见 target/test-cleanup-evidence/deleted_tests.tsv 的 applied 列（以 cargo test -- --list 实测为准）
+Rust	src/core/engine/tests_each_consume.rs 的 non-canonical 用例	已删除 1 条；仍保留 0 条（未落地删除）	tests/internal/**（同源文件对应模块）	逐条核对表见 target/test-cleanup-evidence/deleted_tests.tsv 的 applied 列（以 cargo test -- --list 实测为准）
+Rust	src/core/engine/tests_each_control.rs 的 non-canonical 用例	已删除 1 条；仍保留 0 条（未落地删除）	tests/internal/**（同源文件对应模块）	逐条核对表见 target/test-cleanup-evidence/deleted_tests.tsv 的 applied 列（以 cargo test -- --list 实测为准）
+Rust	src/core/engine/tests_each_nested.rs 的 non-canonical 用例	已删除 1 条；仍保留 0 条（未落地删除）	tests/internal/**（同源文件对应模块）	逐条核对表见 target/test-cleanup-evidence/deleted_tests.tsv 的 applied 列（以 cargo test -- --list 实测为准）
+Rust	src/core/engine/tests_promote_group.rs 的 non-canonical 用例	已删除 1 条；仍保留 0 条（未落地删除）	tests/internal/**（同源文件对应模块）	逐条核对表见 target/test-cleanup-evidence/deleted_tests.tsv 的 applied 列（以 cargo test -- --list 实测为准）
+Rust	src/core/engine/tests_retry_iter.rs 的 non-canonical 用例	已删除 3 条；仍保留 0 条（未落地删除）	tests/internal/**（同源文件对应模块）	逐条核对表见 target/test-cleanup-evidence/deleted_tests.tsv 的 applied 列（以 cargo test -- --list 实测为准）
+Rust	src/core/engine/tests_retry_iter_arity.rs 的 non-canonical 用例	已删除 26 条；仍保留 0 条（未落地删除）	tests/internal/**（同源文件对应模块）	逐条核对表见 target/test-cleanup-evidence/deleted_tests.tsv 的 applied 列（以 cargo test -- --list 实测为准）
+Rust	src/core/engine/tests_retry_iter_matrix.rs 的 non-canonical 用例	已删除 4 条；仍保留 0 条（未落地删除）	tests/internal/**（同源文件对应模块）	逐条核对表见 target/test-cleanup-evidence/deleted_tests.tsv 的 applied 列（以 cargo test -- --list 实测为准）
+Rust	src/core/engine/tests_retry_iter_nesting.rs 的 non-canonical 用例	已删除 6 条；仍保留 0 条（未落地删除）	tests/internal/**（同源文件对应模块）	逐条核对表见 target/test-cleanup-evidence/deleted_tests.tsv 的 applied 列（以 cargo test -- --list 实测为准）
+Rust	src/core/engine/tests_runtime.rs 的 non-canonical 用例	已删除 36 条；仍保留 13 条（未落地删除）	tests/internal/**（同源文件对应模块）	逐条核对表见 target/test-cleanup-evidence/deleted_tests.tsv 的 applied 列（以 cargo test -- --list 实测为准）
+Rust	src/core/engine/tests_v22_t01.rs 的 non-canonical 用例	已删除 26 条；仍保留 0 条（未落地删除）	tests/internal/**（同源文件对应模块）	逐条核对表见 target/test-cleanup-evidence/deleted_tests.tsv 的 applied 列（以 cargo test -- --list 实测为准）
+Rust	src/core/engine/tests_v22_t02.rs 的 non-canonical 用例	已删除 16 条；仍保留 0 条（未落地删除）	tests/internal/**（同源文件对应模块）	逐条核对表见 target/test-cleanup-evidence/deleted_tests.tsv 的 applied 列（以 cargo test -- --list 实测为准）
+Rust	src/core/engine/tests_v22_t02_repeat.rs 的 non-canonical 用例	已删除 1 条；仍保留 0 条（未落地删除）	tests/internal/**（同源文件对应模块）	逐条核对表见 target/test-cleanup-evidence/deleted_tests.tsv 的 applied 列（以 cargo test -- --list 实测为准）
+Rust	src/core/engine/tests_v22_t03.rs 的 non-canonical 用例	已删除 1 条；仍保留 0 条（未落地删除）	tests/internal/**（同源文件对应模块）	逐条核对表见 target/test-cleanup-evidence/deleted_tests.tsv 的 applied 列（以 cargo test -- --list 实测为准）
+Rust	src/core/engine/tests_v22_t04.rs 的 non-canonical 用例	已删除 5 条；仍保留 0 条（未落地删除）	tests/internal/**（同源文件对应模块）	逐条核对表见 target/test-cleanup-evidence/deleted_tests.tsv 的 applied 列（以 cargo test -- --list 实测为准）
+Rust	src/core/engine/tests_v22_t05.rs 的 non-canonical 用例	已删除 2 条；仍保留 0 条（未落地删除）	tests/internal/**（同源文件对应模块）	逐条核对表见 target/test-cleanup-evidence/deleted_tests.tsv 的 applied 列（以 cargo test -- --list 实测为准）
+Rust	src/core/engine/tests_v22_t06.rs 的 non-canonical 用例	已删除 13 条；仍保留 0 条（未落地删除）	tests/internal/**（同源文件对应模块）	逐条核对表见 target/test-cleanup-evidence/deleted_tests.tsv 的 applied 列（以 cargo test -- --list 实测为准）
+Rust	src/core/engine/tests_v22_t07.rs 的 non-canonical 用例	已删除 39 条；仍保留 0 条（未落地删除）	tests/internal/**（同源文件对应模块）	逐条核对表见 target/test-cleanup-evidence/deleted_tests.tsv 的 applied 列（以 cargo test -- --list 实测为准）
+Rust	src/core/engine/tests_we_t06_witnesses.rs 的 non-canonical 用例	已删除 4 条；仍保留 0 条（未落地删除）	tests/internal/**（同源文件对应模块）	逐条核对表见 target/test-cleanup-evidence/deleted_tests.tsv 的 applied 列（以 cargo test -- --list 实测为准）
+Rust	src/core/identity.rs 的 non-canonical 用例	已删除 6 条；仍保留 0 条（未落地删除）	tests/internal/**（同源文件对应模块）	逐条核对表见 target/test-cleanup-evidence/deleted_tests.tsv 的 applied 列（以 cargo test -- --list 实测为准）
+Rust	src/core/ref_id.rs 的 non-canonical 用例	已删除 2 条；仍保留 0 条（未落地删除）	tests/internal/**（同源文件对应模块）	逐条核对表见 target/test-cleanup-evidence/deleted_tests.tsv 的 applied 列（以 cargo test -- --list 实测为准）
+Rust	src/core/scope.rs 的 non-canonical 用例	已删除 10 条；仍保留 0 条（未落地删除）	tests/internal/**（同源文件对应模块）	逐条核对表见 target/test-cleanup-evidence/deleted_tests.tsv 的 applied 列（以 cargo test -- --list 实测为准）
+Rust	tests/we_t06_pending.rs 的 non-canonical 用例	已删除 0 条；仍保留 1 条（未落地删除）	tests/internal/**（同源文件对应模块）	逐条核对表见 target/test-cleanup-evidence/deleted_tests.tsv 的 applied 列（以 cargo test -- --list 实测为准）
+Rust	tests/we_t06_s01_s03.rs 的 non-canonical 用例	已删除 0 条；仍保留 1 条（未落地删除）	tests/internal/**（同源文件对应模块）	逐条核对表见 target/test-cleanup-evidence/deleted_tests.tsv 的 applied 列（以 cargo test -- --list 实测为准）
+Rust	tests/we_t06_s04_s07.rs 的 non-canonical 用例	已删除 0 条；仍保留 1 条（未落地删除）	tests/internal/**（同源文件对应模块）	逐条核对表见 target/test-cleanup-evidence/deleted_tests.tsv 的 applied 列（以 cargo test -- --list 实测为准）
+Rust	tests/we_t06_s08_s09.rs 的 non-canonical 用例	已删除 0 条；仍保留 7 条（未落地删除）	tests/internal/**（同源文件对应模块）	逐条核对表见 target/test-cleanup-evidence/deleted_tests.tsv 的 applied 列（以 cargo test -- --list 实测为准）
+Rust	tests/we_t06_s10.rs 的 non-canonical 用例	已删除 0 条；仍保留 5 条（未落地删除）	tests/internal/**（同源文件对应模块）	逐条核对表见 target/test-cleanup-evidence/deleted_tests.tsv 的 applied 列（以 cargo test -- --list 实测为准）
+Rust	tests/we_t07_external_forms.rs 的 non-canonical 用例	已删除 0 条；仍保留 5 条（未落地删除）	tests/internal/**（同源文件对应模块）	逐条核对表见 target/test-cleanup-evidence/deleted_tests.tsv 的 applied 列（以 cargo test -- --list 实测为准）
+# K01～K13 关键判据（按 K×文件 分组；K05/K07 另附指定载体）
+K	K01（5 项在本文件）	保留并执行	tests/internal/engine/tests_runtime.rs	代表判据：b04_unpolled_future_does_not_build_or_call；b04_build_failure_yields_definition_error_without_root
+K	K01（3 项在本文件）	保留并执行	tests/internal/core/context_tests.rs	代表判据：d01_root_creation_is_unique_and_shared；d06_leaf_await_registers_output_once_and_unit_leaves_allocate_nothing
+K	K01（3 项在本文件）	保留并执行	tests/internal/engine/tests_v22_t03.rs	代表判据：c03_root_expectation_rejects_declared_shape_mismatch_before_any_business；c03_root_expectation_accepts_the_same_body_when_the_declaration_matches
+K	K02（13 项在本文件）	保留并执行	tests/internal/engine/tests.rs	代表判据：a03_ref_copy_keeps_identity_and_supports_non_clone_data；a03_same_type_distinct_inputs_keep_distinct_identity
+K	K02（11 项在本文件）	保留并执行	tests/internal/engine/tests_v22_t01.rs	代表判据：a01_nearest_root_and_node_sources_are_frozen；a02_ancestor_shadowing_and_chain_output_visibility
+K	K02（9 项在本文件）	保留并执行	tests/internal/engine/tests_runtime.rs	代表判据：b11_deep_capture_reads_the_real_value；b11_each_layer_imports_the_same_static_refid_once
+K	K03（14 项在本文件）	保留并执行	tests/internal/engine/tests_v22_t06.rs	代表判据：t06_missing_next_is_rejected_before_business_code；t06_duplicate_next_is_rejected_and_keeps_the_first_declaration
+K	K03（12 项在本文件）	保留并执行	tests/internal/engine/tests_v22_t05.rs	代表判据：t05_choose_all_undeclared_and_all_unit_are_legal_and_distinct；t05_choose_mixed_declaration_states_rejected_before_business
+K	K03（9 项在本文件）	保留并执行	tests/internal/engine/tests_v22_t04.rs	代表判据：t04_child_declaration_states_are_distinct；t04_output_expectation_rejects_undeclared_body_before_any_business
+K	K04（6 项在本文件）	保留并执行	tests/we_t07_external_forms.rs	代表判据：t07_external_form_function_item；t07_external_form_function_reference
+K	K04（5 项在本文件）	保留并执行	tests/internal/engine/tests.rs	代表判据：a04_all_supported_node_forms_register_without_calling；a05_query_maps_declarations_to_leaf_borrows
+K	K04（5 项在本文件）	保留并执行	tests/internal/engine/tests_runtime.rs	代表判据：b01_spec_minimal_example_returns_43；b03_fragment_forms_execute_with_non_static_nodes
+K	K05	保留并执行	tests/internal/engine/tests_v22_t02.rs::b05_duplicate_query_rejects_before_any_business_execution	关键判据：**自动** Query 重复类型在 Definition 阶段被拒绝；显式只读重复 Ref 允许（冻结规则不变）
+K	K05	保留并执行	tests/v21_12_public_api.rs::tuple_root_inputs_support_sixteen_positions	关键判据：根输入 16 槽位形状支持
+K	K05（21 项在本文件）	保留并执行	tests/internal/engine/tests_runtime.rs	代表判据：b05_arity_2；b05_arity_16
+K	K05（8 项在本文件）	保留并执行	tests/internal/engine/tests_retry_iter_arity.rs	代表判据：retry_unit_output_delivers_success_without_slots；retry_single_ref_output_delivers_the_bumped_value
+K	K05（7 项在本文件）	保留并执行	tests/internal/engine/tests.rs	代表判据：a01_unit_root_registers_no_position_and_keeps_zero_input_node；a01_root_shapes_single_tuple_and_boundaries
+K	K06（6 项在本文件）	保留并执行	tests/internal/engine/tests_v22_t02_repeat.rs	代表判据：b10_each_runs_one_factory_per_item_with_independent_identity；b10_empty_collection_still_builds_the_body_without_factory_calls
+K	K06（4 项在本文件）	保留并执行	tests/internal/engine/tests_v22_t02.rs	代表判据：b09_factory_is_not_called_by_building_or_by_unpolled_execute；b09_factory_runs_at_its_step_only_and_returns_fresh_owned_data
+K	K06（1 项在本文件）	保留并执行	tests/we_t06_s04_s07.rs	代表判据：s06_retry_restarts_full_attempt_and_cleans_before_the_next
+K	K07	保留并执行	tests/internal/engine/tests_v22_t04.rs::t04_chain_plain_and_output_share_registration_and_execution	关键判据：普通 chain 与其输出共享登记与执行
+K	K07	保留并执行	tests/internal/engine/tests_runtime.rs::c09_selection_runs_one_branch_and_creates_one_boundary	关键判据：Choose 只运行一个分支且只建一个 Boundary
+K	K07（31 项在本文件）	保留并执行	tests/internal/engine/tests_runtime.rs	代表判据：b13_mixed_child_and_ancestor_sources_export_in_one_group；b05_chain_arity_2
+K	K07（8 项在本文件）	保留并执行	tests/internal/engine/tests_v22_t05.rs	代表判据：t05_choose_four_facades_share_structure_and_values；t05_choose_auto_chain_reads_parent_output_value
+K	K07（5 项在本文件）	保留并执行	tests/we_t06_s01_s03.rs	代表判据：s03_fragment_factory_and_flow_receiving_function；s03_deep_capture_imports_ancestor_and_cleans_non_output_owned
+K	K08（10 项在本文件）	保留并执行	tests/internal/engine/tests_each_consume.rs	代表判据：p09_single_output_aggregates_in_index_order；p10_heterogeneous_and_same_type_slots_stay_independent
+K	K08（10 项在本文件）	保留并执行	tests/internal/core/scope_tests.rs	代表判据：c12_collector_physical_storage_is_container_only；c14_item_owned_direct_consume
+K	K08（9 项在本文件）	保留并执行	tests/internal/engine/tests_each.rs	代表判据：p01_frozen_usage_feeds_later_then_chain_and_root；p01_frozen_usage_registers_one_each_step_with_declared_slots
+K	K09（16 项在本文件）	保留并执行	tests/internal/engine/tests_v22_t06.rs	代表判据：t06_iter_output_delivers_the_entry_current_of_the_break_round；t06_iter_ordinary_form_publishes_the_final_state_to_the_parent
+K	K09（11 项在本文件）	保留并执行	tests/we_t06_s08_s09.rs	代表判据：s09_path_a_iter_break_delivers_current_not_next；s09_path_b_inner_retry_restarts_complete_attempt_in_round
+K	K09（9 项在本文件）	保留并执行	tests/we_t06_s04_s07.rs	代表判据：s06_retry_restarts_full_attempt_and_cleans_before_the_next；s06_budget_boundaries_zero_n_and_max
+K	K10（13 项在本文件）	保留并执行	tests/we_t06_s08_s09.rs	代表判据：s08_six_operations_compose_in_one_execution；s09_path_b_inner_retry_restarts_complete_attempt_in_round
+K	K10（9 项在本文件）	保留并执行	tests/internal/engine/tests_runtime.rs	代表判据：b17_dynamic_failure_and_source_chain_are_preserved；b18_iter_break_is_also_unhandled_without_a_controller
+K	K10（7 项在本文件）	保留并执行	tests/internal/engine/tests_each_control.rs	代表判据：p29_control_partial_success_exits_item_then_each；p30_iter_captures_choose_break_and_delivers_current
+K	K11（50 项在本文件）	保留并执行	tests/internal/core/scope_tests.rs	代表判据：b01_execution_identity_is_shared_and_foreign_scopes_are_rejected_first；b05_batch_import_failure_leaves_no_partial_binding
+K	K11（21 项在本文件）	保留并执行	tests/internal/engine/tests_runtime.rs	代表判据：b13_mixed_child_and_ancestor_sources_export_in_one_group；b15_owned_output_leaves_the_runtime_alive
+K	K11（17 项在本文件）	保留并执行	tests/internal/core/data_container_tests.rs	代表判据：a01_entries_are_addressable_by_data_id_not_by_type；a02_non_clone_values_share_read_borrows_without_copying
+K	K12（24 项在本文件）	保留并执行	tests/internal/engine/tests_runtime.rs	代表判据：b04_unpolled_future_does_not_build_or_call；b08_query_borrow_survives_real_pending
+K	K12（18 项在本文件）	保留并执行	tests/internal/core/context_tests.rs	代表判据：d04_frame_stack_restores_and_orders；d10_error_exit_and_d11_leaf_guard_keeps_caller_scope
+K	K12（10 项在本文件）	保留并执行	tests/internal/core/scope_tests.rs	代表判据：b13_precommit_snapshot_and_formal_failure_exit；b17_multi_level_failure_cleanup_is_post_order
+K	K13（8 项在本文件）	保留并执行	tests/internal/engine/tests_runtime.rs	代表判据：b01_spec_minimal_example_returns_43；b02_derive_variants_and_manual_marker_execute
+K	K13（4 项在本文件）	保留并执行	tests/internal/engine/tests_v22_t02.rs	代表判据：b08_short_borrow_non_send_and_await_borrow_stay_usable；b08_non_send_data_runs_through_auto_entries
+K	K13（3 项在本文件）	保留并执行	tests/internal/engine/tests_each_consume.rs	代表判据：p13_core_item_borrow_and_ancestor_alias_are_rejected_with_exact_targets；p17_core_cap_escape_and_closed_item_resolve_are_rejected
+# 任务书 §5 真实缺陷/关键回归
+§5	五结构经普通控制入口同次执行（普通 chain 必须发布声明输出供自动下游读取）	保留并执行	tests/we_t07_final_scenario.rs::t07_five_structures_via_ordinary_entries_compose_in_one_execution	1 项；含普通 chain 的自动下游读取断言
+§5	六形式×两入口×两形态的组合矩阵	保留并执行	tests/we_t07_external_forms.rs（9 项：t07_external_form_*）	9 项组合矩阵全部保留并执行
+§5	WE-T06 S08/S09 场景	保留并执行	tests/we_t06_s08_s09.rs（19 项）	含 s08 六操作同次执行、s09 路径 A/B
+§5	重复声明隔离四个入口	保留并执行	tests/internal/engine/tests_v22_t04.rs::t04_duplicate_declaration_isolates_all_four_entries	重复声明不污染其它入口
+§5	被污染 child 声明阻断父发布（负例）	保留并执行	tests/internal/engine/tests_v22_t06.rs::t06_tainted_child_declaration_blocks_parent_publication	被污染 child 阻断父发布
+§5	被污染 child 的合法正对照	保留并执行	tests/internal/engine/tests_v22_t06.rs::t06_clean_child_declaration_still_publishes_after_an_earlier_error	先前的错误不影响后续合法 child 的发布
+§5	B11/B12 实例所有权与同一实例交接	保留并执行	tests/internal/engine/tests_v22_t02_repeat.rs::b11_retry_rebuilds_factory_per_attempt_and_cleans_before_next；tests/internal/engine/tests_v22_t02_repeat.rs::b12_child_factory_registers_in_current_scope_and_exports_owned	每次尝试重建 Factory 并在下次前清理；child Factory 在**当前 Scope** 登记并导出 owned——即 DataId/owner 与「同一实例」判据
+§5	Root 期望形状（声明匹配同一 Body 可接受）	保留并执行	tests/internal/engine/tests_v22_t03.rs::c03_root_expectation_accepts_the_same_body_when_the_declaration_matches（等 3 项 c03_root_expectation_*）	期望形状与声明一致性；与 16 槽边界分列
+§5	Root 输入 16 槽边界	保留并执行	tests/v21_12_public_api.rs::tuple_root_inputs_support_sixteen_positions	16 槽位根输入形状的独立载体
+§5	后位槽拒绝不留部分提交	保留并执行	tests/internal/engine/tests_promote_group.rs::e22_late_slot_rejection_leaves_no_partial_commit	整组提交的原子性
+§5	后位槽拒绝时首位槽不动	保留并执行	tests/internal/engine/tests_each_consume.rs::p21_later_slot_reject_leaves_the_first_slot_unmoved	首位槽在拒绝时保持原位
+§5	未 poll／真实 Pending 下的取消清理	保留并执行	core::context::tests::d15_cancel_while_input_borrow_is_pending；core::engine::tests_each_control::p35_pending_cancel_ends_the_borrow_first_and_drops_each_instance_once（共 10 项）	真实 Pending 与未 poll drop 的清理路径
+# 生产不变性与例外
+不变性	src/** 生产非测试文本	与 HEAD 逐块比对	prod_blocks.py（item_end 边界已修正：字段按行尾逗号、use 按分号、if-else 链续扫）	10 OK + 4 已登记差异（3 处为删测试块后 rustfmt 吞空行、1 处为仅承载测试方法的空 impl）；登记项按 diff 指纹校验，见 tools/PROD_EXCEPTIONS.tsv
+不变性	窄反例：生产初始化被替换	必须被检出	tools/prod_blocks.py compare HEAD src/core/data_container.rs	注入 DataIdAllocator::new(ExecutionIdentity::new()) → DIFF 且 exit=1；恢复后逐字节一致（见 negative_controls/C_prod_checker.log）

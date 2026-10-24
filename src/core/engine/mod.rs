@@ -24,57 +24,83 @@ pub(crate) mod flow;
 pub(crate) mod identity;
 pub(crate) mod node;
 #[cfg(test)]
+#[path = "../../../tests/internal/engine/observe.rs"]
 pub(crate) mod observe;
 pub(crate) mod runtime;
 pub(crate) mod shape;
 
 #[cfg(test)]
+#[path = "../../../tests/internal/engine/tests.rs"]
 mod tests;
 #[cfg(test)]
+#[path = "../../../tests/internal/engine/tests_each.rs"]
 mod tests_each;
 #[cfg(test)]
+#[path = "../../../tests/internal/engine/tests_each_consume.rs"]
 mod tests_each_consume;
 #[cfg(test)]
+#[path = "../../../tests/internal/engine/tests_each_control.rs"]
 mod tests_each_control;
 #[cfg(test)]
+#[path = "../../../tests/internal/engine/tests_each_finish.rs"]
 mod tests_each_finish;
 #[cfg(test)]
+#[path = "../../../tests/internal/engine/tests_each_nested.rs"]
 mod tests_each_nested;
 #[cfg(test)]
+#[path = "../../../tests/internal/engine/tests_promote_group.rs"]
 mod tests_promote_group;
 #[cfg(test)]
+#[path = "../../../tests/internal/engine/tests_retry_iter.rs"]
 mod tests_retry_iter;
 #[cfg(test)]
+#[path = "../../../tests/internal/engine/tests_retry_iter_arity.rs"]
 mod tests_retry_iter_arity;
 #[cfg(test)]
+#[path = "../../../tests/internal/engine/tests_retry_iter_matrix.rs"]
 mod tests_retry_iter_matrix;
 #[cfg(test)]
+#[path = "../../../tests/internal/engine/tests_retry_iter_nesting.rs"]
 mod tests_retry_iter_nesting;
 #[cfg(test)]
+#[path = "../../../tests/internal/engine/tests_retry_iter_state.rs"]
 mod tests_retry_iter_state;
 #[cfg(test)]
+#[path = "../../../tests/internal/engine/tests_runtime.rs"]
 mod tests_runtime;
 #[cfg(test)]
+#[path = "../../../tests/internal/engine/tests_v22_t01.rs"]
 mod tests_v22_t01;
 #[cfg(test)]
+#[path = "../../../tests/internal/engine/tests_v22_t02.rs"]
 mod tests_v22_t02;
 #[cfg(test)]
+#[path = "../../../tests/internal/engine/tests_v22_t02_repeat.rs"]
 mod tests_v22_t02_repeat;
 #[cfg(test)]
+#[path = "../../../tests/internal/engine/tests_v22_t03.rs"]
 mod tests_v22_t03;
 #[cfg(test)]
+#[path = "../../../tests/internal/engine/tests_v22_t04.rs"]
 mod tests_v22_t04;
 #[cfg(test)]
+#[path = "../../../tests/internal/engine/tests_v22_t05.rs"]
 mod tests_v22_t05;
 #[cfg(test)]
+#[path = "../../../tests/internal/engine/tests_v22_t06.rs"]
 mod tests_v22_t06;
 #[cfg(test)]
+#[path = "../../../tests/internal/engine/tests_v22_t07.rs"]
 mod tests_v22_t07;
 #[cfg(test)]
+#[path = "../../../tests/internal/engine/tests_v22_t07_compose.rs"]
 mod tests_v22_t07_compose;
 #[cfg(test)]
+#[path = "../../../tests/internal/engine/tests_we_t06_arity.rs"]
 mod tests_we_t06_arity;
 #[cfg(test)]
+#[path = "../../../tests/internal/engine/tests_we_t06_root_preflight.rs"]
 mod tests_we_t06_root_preflight;
 #[cfg(test)]
+#[path = "../../../tests/internal/engine/tests_we_t06_witnesses.rs"]
 mod tests_we_t06_witnesses;
