@@ -252,9 +252,11 @@ fn e24_retry_wrapping_iter_handles_break_at_the_inner_boundary() {
     let outcome = block_on(runtime.execute::<_, Context, _>(
         |flow: &mut crate::core::engine::flow::Flow<'_>, context: Ref<Context>| {
             let out_refs: Ref<Context> = flow.retry_output(2, |attempt| {
-                let out_refs = attempt.iter(context, 5, |current, round| {
+                let out_refs = attempt.iter_output(context, 5, |round| {
+                    let current = round.current::<Context>();
                     round.then_with_output(&judge_break_on_context, current);
-                    round.then_with_output(&bump, current)
+                    let next = round.then_with_output(&bump, current);
+                    round.next_with(next);
                 });
                 attempt.output_with(out_refs);
             });
@@ -303,13 +305,15 @@ fn e24_iter_wrapping_retry_propagates_inner_exhaustion_as_terminal() {
     let runtime = Runtime::new();
     let outcome = block_on(runtime.execute::<_, Context, _>(
         |flow: &mut crate::core::engine::flow::Flow<'_>, context: Ref<Context>| {
-            let out_refs = flow.iter(context, 5, |current, round| {
+            let out_refs = flow.iter_output(context, 5, |round| {
+                let current = round.current::<Context>();
                 round.retry(1, |attempt| {
                     let candidate = attempt.then_with_output(&generate_from_context, current);
                     let out_refs = attempt.then_with_output(&judge_always_retrying, candidate);
                     attempt.output_with(out_refs);
                 });
-                round.then_with_output(&bump, current)
+                let next = round.then_with_output(&bump, current);
+                round.next_with(next);
             });
             flow.output_with(out_refs);
         },
@@ -725,11 +729,12 @@ fn e29_iter_nested_pending_cancel_releases_every_layer_once() {
     let mut future = Box::pin(runtime.execute::<_, Context, _>(
         |flow: &mut crate::core::engine::flow::Flow<'_>,
          (seed, context): (Ref<Seed>, Ref<Context>)| {
-            let out_refs = flow.iter(context, 5, |current, round| {
+            let out_refs = flow.iter_output(context, 5, |round| {
+                let current = round.current::<Context>();
                 let _temp = round.then_with_output(&track_temp, seed);
                 let pending = round.then_with_output(&pending_guard_node, seed);
                 let _ = round.then_with_output(&after_pending, pending);
-                current
+                round.next_with(current);
             });
             flow.output_with(out_refs);
         },
@@ -879,9 +884,11 @@ fn e26_iter_limit_with_cleanup_fault_becomes_runtime() {
     let outcome = block_on(runtime.execute::<_, Context, _>(
         |flow: &mut crate::core::engine::flow::Flow<'_>,
          (_filler, context): (Ref<Filler>, Ref<Context>)| {
-            let out_refs = flow.iter(context, 2, |current, round| {
+            let out_refs = flow.iter_output(context, 2, |round| {
+                let current = round.current::<Context>();
                 round.then_with_output(&judge_continue, current);
-                round.then_with_output(&bump, current)
+                let next = round.then_with_output(&bump, current);
+                round.next_with(next);
             });
             flow.output_with(out_refs);
         },
@@ -1026,9 +1033,11 @@ fn e26_iter_limit_keeps_first_cleanup_over_later_scopes() {
          (_filler, context): (Ref<Filler>, Ref<Context>)| {
             let out_refs: Ref<Context> = flow.chain_output(|sub| {
                 let _produced = sub.then_with_output(&bump, context);
-                let out_refs = sub.iter(context, 2, |current, round| {
+                let out_refs = sub.iter_output(context, 2, |round| {
+                    let current = round.current::<Context>();
                     round.then_with_output(&judge_continue, current);
-                    round.then_with_output(&bump, current)
+                    let next = round.then_with_output(&bump, current);
+                    round.next_with(next);
                 });
                 sub.output_with(out_refs);
             });

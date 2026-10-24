@@ -1325,16 +1325,13 @@ fn s07_break_delivers_the_entry_current_of_the_round() {
     let judge = BreakAt { threshold: 1 };
     let (draft, context) = block_on(Runtime::new().execute::<_, (Draft, Context), _>(
         |flow: &mut Flow<'_>, (draft, context): (Ref<Draft>, Ref<Context>)| {
-            let out_refs = flow.iter(
-                (draft, context),
-                5,
-                |(current_draft, current_context), round| {
-                    round.then_with_output(&judge, current_context);
-                    let next_draft = round.then_with_output(&revise, current_draft);
-                    let next_context = round.then_with_output(&bump, current_context);
-                    (next_draft, next_context)
-                },
-            );
+            let out_refs = flow.iter_output((draft, context), 5, |round| {
+                let (current_draft, current_context) = round.current::<(Draft, Context)>();
+                round.then_with_output(&judge, current_context);
+                let next_draft = round.then_with_output(&revise, current_draft);
+                let next_context = round.then_with_output(&bump, current_context);
+                round.next_with((next_draft, next_context));
+            });
             flow.output_with(out_refs);
         },
         (Draft(String::from("s0")), Context(0)),
@@ -1361,16 +1358,13 @@ fn s07_first_round_break_returns_the_original_state() {
     let judge = BreakAt { threshold: 1 };
     let (draft, context) = block_on(Runtime::new().execute::<_, (Draft, Context), _>(
         |flow: &mut Flow<'_>, (draft, context): (Ref<Draft>, Ref<Context>)| {
-            let out_refs = flow.iter(
-                (draft, context),
-                1,
-                |(current_draft, current_context), round| {
-                    round.then_with_output(&judge, current_context);
-                    let _next_draft = round.then_with_output(&revise, current_draft);
-                    // same-target：两个槽都保留 current。
-                    (current_draft, current_context)
-                },
-            );
+            let out_refs = flow.iter_output((draft, context), 1, |round| {
+                let (current_draft, current_context) = round.current::<(Draft, Context)>();
+                round.then_with_output(&judge, current_context);
+                let _next_draft = round.then_with_output(&revise, current_draft);
+                // same-target：两个槽都保留 current。
+                round.next_with((current_draft, current_context));
+            });
             flow.output_with(out_refs);
         },
         (Draft(String::from("keep")), Context(9)),
@@ -1396,16 +1390,13 @@ fn s07_round_limit_does_not_deliver_the_next_or_judge_again() {
     let judge = Continue;
     let error = block_on(Runtime::new().execute::<_, (Draft, Context), _>(
         |flow: &mut Flow<'_>, (draft, context): (Ref<Draft>, Ref<Context>)| {
-            let out_refs = flow.iter(
-                (draft, context),
-                2,
-                |(current_draft, current_context), round| {
-                    round.then_with_output(&judge, current_context);
-                    let next_draft = round.then_with_output(&revise, current_draft);
-                    let next_context = round.then_with_output(&bump, current_context);
-                    (next_draft, next_context)
-                },
-            );
+            let out_refs = flow.iter_output((draft, context), 2, |round| {
+                let (current_draft, current_context) = round.current::<(Draft, Context)>();
+                round.then_with_output(&judge, current_context);
+                let next_draft = round.then_with_output(&revise, current_draft);
+                let next_context = round.then_with_output(&bump, current_context);
+                round.next_with((next_draft, next_context));
+            });
             flow.output_with(out_refs);
         },
         (Draft(String::from("r")), Context(0)),
@@ -1432,15 +1423,12 @@ fn s07_multi_state_promote_keeps_imported_owner_and_same_target() {
         block_on(Runtime::new().execute::<_, (Draft, Context, Context), _>(
             |flow: &mut Flow<'_>, (draft, context): (Ref<Draft>, Ref<Context>)| {
                 // 多状态成组 Promote：槽 1 same-target（原样保留），槽 2 被推进。
-                let (kept_draft, advanced) = flow.iter(
-                    (draft, context),
-                    5,
-                    |(current_draft, current_context), round| {
-                        round.then_with_output(&judge, current_context);
-                        let next_context = round.then_with_output(&bump, current_context);
-                        (current_draft, next_context)
-                    },
-                );
+                let (kept_draft, advanced) = flow.iter_output((draft, context), 5, |round| {
+                    let (current_draft, current_context) = round.current::<(Draft, Context)>();
+                    round.then_with_output(&judge, current_context);
+                    let next_context = round.then_with_output(&bump, current_context);
+                    round.next_with((current_draft, next_context));
+                });
                 // imported 初始状态保持原 owner：iter 之后仍可读取原始 root 输入。
                 let original = flow.then_with_output(&read_context, context);
                 let out_refs = (kept_draft, advanced, original);
@@ -1467,10 +1455,11 @@ fn s07_formal_current_is_round_local() {
     let mut escaped: Option<Ref<Draft>> = None;
     let error = block_on(Runtime::new().execute::<_, Draft, _>(
         |flow: &mut Flow<'_>, initial: Ref<Draft>| {
-            let _output = flow.iter(initial, 1, |current, round| {
+            let _output = flow.iter_output(initial, 1, |round| {
+                let current = round.current::<Draft>();
                 escaped = Some(current);
                 round.then_with_output(&revise, current);
-                current
+                round.next_with(current);
             });
             let out_refs = escaped.expect("captured round-local current");
             flow.output_with(out_refs);
@@ -1493,10 +1482,11 @@ fn s07_formal_current_is_round_local() {
     let mut escaped: Option<Ref<Draft>> = None;
     let error = block_on(Runtime::new().execute::<_, Draft, _>(
         |flow: &mut Flow<'_>, initial: Ref<Draft>| {
-            let _output = flow.iter(initial, 1, |current, round| {
+            let _output = flow.iter_output(initial, 1, |round| {
+                let current = round.current::<Draft>();
                 escaped = Some(current);
                 round.then_with_output(&revise, current);
-                current
+                round.next_with(current);
             });
             let out_refs =
                 flow.then_with_output(&revise, escaped.expect("captured round-local current"));
@@ -1518,9 +1508,10 @@ fn s07_duplicate_initial_and_capture_overlap_are_legal() {
     reset();
     let out = block_on(Runtime::new().execute::<_, Draft, _>(
         |flow: &mut Flow<'_>, initial: Ref<Draft>| {
-            let both = flow.iter((initial, initial), 1, |(left, right), round| {
+            let both = flow.iter_output((initial, initial), 1, |round| {
+                let (left, right) = round.current::<(Draft, Draft)>();
                 round.then_with_output(&compare_and_break, (left, right));
-                (left, right)
+                round.next_with((left, right));
             });
             let out_refs = both.0;
             flow.output_with(out_refs);
@@ -1535,9 +1526,10 @@ fn s07_duplicate_initial_and_capture_overlap_are_legal() {
     reset();
     let out = block_on(Runtime::new().execute::<_, Draft, _>(
         |flow: &mut Flow<'_>, initial: Ref<Draft>| {
-            let out_refs = flow.iter(initial, 1, |current, round| {
+            let out_refs = flow.iter_output(initial, 1, |round| {
+                let current = round.current::<Draft>();
                 round.then_with_output(&compare_and_break, (current, initial));
-                current
+                round.next_with(current);
             });
             flow.output_with(out_refs);
         },

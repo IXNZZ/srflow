@@ -520,7 +520,8 @@ fn p30_iter_captures_choose_break_and_delivers_current() {
     let runtime = Runtime::new();
     let outcome = block_on(runtime.execute::<_, Context, _>(
         |flow, (items, context): (Ref<Vec<Item>>, Ref<Context>)| {
-            let out_refs = flow.iter(context, 2, |current, round| {
+            let out_refs = flow.iter_output(context, 2, |round| {
+                let current = round.current::<Context>();
                 let round_no = round.then_with_output(&round_number, current);
                 let _scores: Ref<Vec<Score>> = round.each_output(items, |each| {
                     let item = each.ref_of::<Item>();
@@ -538,7 +539,8 @@ fn p30_iter_captures_choose_break_and_delivers_current() {
                     });
                     each.output_with(out_refs);
                 });
-                round.then_with_output(&bump_context, current)
+                let next = round.then_with_output(&bump_context, current);
+                round.next_with(next);
             });
             flow.output_with(out_refs);
         },
@@ -736,8 +738,10 @@ fn p31_retry_restarts_the_whole_each_attempt() {
     let outcome = block_on(runtime.execute::<_, Context, _>(
         |flow, (items, context): (Ref<Vec<Item>>, Ref<Context>)| {
             let out_refs: Ref<Context> = flow.retry_output(1, |attempt| {
-                let current = attempt.iter(context, 2, |current, round| {
-                    round.then_with_output(&break_at_one, current)
+                let current = attempt.iter_output(context, 2, |round| {
+                    let round_current = round.current::<Context>();
+                    let next = round.then_with_output(&break_at_one, round_current);
+                    round.next_with(next);
                 });
                 let _scores: Ref<Vec<Score>> = attempt.each_output(items, |each| {
                     let item = each.ref_of::<Item>();

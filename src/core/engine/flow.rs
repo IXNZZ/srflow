@@ -572,8 +572,10 @@ impl<'n> Flow<'n> {
     }
 
     /// 控制器：用 Normal next 推进受控状态，用 IterBreak 交付进入本轮时的 current
-    /// （SPEC §11、Engine §6.9）。
+    /// （SPEC §8.5、Engine §6.9）。
     ///
+    /// Round Body 是单参数 unit 闭包，用 [`Flow::next`]／[`Flow::next_with`] 声明**恰好一次**
+    /// 完整 Next（与 initial 同 StateShape；缺失/重复/类型不符/Round 使用 output 都构建拒绝）。
     /// `max_iterations = N` 要求 `N > 0`，第一轮计入 N。状态形状为单 Ref 或 2～16 个 flat
     /// Ref tuple，initial／current／next／最终输出同 Shape；**不支持 unit 状态**。每轮从正式
     /// ControlState 经 StateImport 导入 current，整组 Promote 接受 next，不重绑 parent
@@ -581,49 +583,102 @@ impl<'n> Flow<'n> {
     /// [`RunError::IterationLimitReached`](crate::RunError::IterationLimitReached) 结束，不强制
     /// 成功、不额外执行一次判断、不通过错误返回最后状态；IterBreak 交付进入本轮时的完整
     /// current，且不在此报告次数耗尽。
+    ///
+    /// 普通形式返回 Flow：最终 State 照常发布为 parent 域来源（可 `ref_of` 解析，未发布即
+    /// 不可用）；取最终 State 用 [`Flow::iter_output`]。
+    ///
+    /// ```text
+    /// flow.iter(initial, 5, |round| {
+    ///     let current = round.ref_of::<State>();
+    ///     round.then_with(&judge, current).then(&advance);
+    ///     round.next::<State>();
+    /// });
+    /// ```
     #[allow(private_bounds)]
-    pub fn iter<S, F>(&mut self, initial: S, max_iterations: usize, definition: F) -> S
+    pub fn iter<S, F>(&mut self, initial: S, max_iterations: usize, definition: F) -> &mut Self
     where
         S: RefShape + StateShape,
-        F: FnOnce(S, &mut Flow<'n>) -> S,
+        F: FnOnce(&mut Flow<'n>),
     {
-        // round Body 必须先于 formal current 建立：current 的 owner 是该 round Body，
-        // 使其词法可见性限定在本轮（round 内合法，parent／sibling／Root 使用按
-        // OutOfScope(ChildLocal) 在 Definition 阶段拒绝）。new_body 不消耗定义顺序，
-        // 因此先建 Body 不改变任何位置编号或顺序。
-        let (step, round, current) = {
+        let _ = self.register_iter_round(initial, max_iterations, definition);
+        self
+    }
+
+    /// 取输出形式：与 [`Flow::iter`] 共享同一条登记路径，返回父域最终 State RefShape。
+    ///
+    /// `S` 同时锚定 initial、formal Current、Next 期望与最终交付契约；登记失败（缺声明、
+    /// 预算为 0、Shape 不符、来源不可用等）按请求槽数返回失效句柄形状，不 panic、不制造
+    /// 合法假来源，最终仍由 Definition 收口拒绝。
+    #[allow(private_bounds)]
+    pub fn iter_output<S, F>(&mut self, initial: S, max_iterations: usize, definition: F) -> S
+    where
+        S: RefShape + StateShape,
+        F: FnOnce(&mut Flow<'n>),
+    {
+        match self.register_iter_round(initial, max_iterations, definition) {
+            Some(outputs) => <S as ShapeOps>::from_positions(&mut outputs.into_iter()),
+            None => self.failed_shape::<S>(),
+        }
+    }
+
+    /// Iter 的唯一登记实现（普通/取输出共用）。
+    ///
+    /// 入口顺序在**构建 Round 之前**取得：initial 的使用/imports 时点必须早于 Round 内新增
+    /// 来源与 Next 声明，这样后增来源不能反向成为 initial 的合法来源，Round 的声明顺序也
+    /// 不会掩盖 initial 的首因。Round Body 只构建一次，运行期每轮复用同一 Definition；
+    /// 登记只消费 Body 已冻结的 Next 声明，不补声明、不重解析最近来源。
+    ///
+    /// round Body 先于 formal current 建立：current 的 owner 是该 round Body，使其词法
+    /// 可见性限定在本轮（round 内合法，parent／sibling／Root 使用按 OutOfScope(ChildLocal)
+    /// 在 Definition 阶段拒绝）。new_body 不消耗定义顺序，因此先建 Body 不改变位置编号。
+    #[allow(private_bounds)]
+    fn register_iter_round<S, F>(
+        &mut self,
+        initial: S,
+        max_iterations: usize,
+        definition: F,
+    ) -> Option<Vec<PositionHandle>>
+    where
+        S: RefShape + StateShape,
+        F: FnOnce(&mut Flow<'n>),
+    {
+        let (step, round, entry_order, current) = {
             let mut builder = self.builder.borrow_mut();
             let step = builder.step_count(self.body);
+            let entry_order = builder.fresh_order();
             let round = builder.new_body(Some(self.body), BodyRole::Round);
             builder.set_round_initial(round, <S as ShapeOps>::type_descs());
             let current =
                 builder.allocate_iter_current(round, step, &<S as ShapeOps>::type_descs());
-            (step, round, current)
-        };
-        let current_refs = {
-            let mut handles = current.iter().copied();
-            <S as ShapeOps>::from_positions(&mut handles)
+            (step, round, entry_order, current)
         };
         let initial_slots = initial.positions();
-        let next = {
+        // Round 及其后代的构建失败必须使父结果失效：以**已知失败标记**的增量捕捉「本轮新增的
+        // 任何失败」——既含即时入列的错误（current 查询错误、child Body 错误、来源/shape 失败），
+        // 也含未写入错误列表的已知失败：延后到 finish 分类的未登记/前向来源，以及为保留更早
+        // 首因而未重复记录的派生失败（子声明选中了已失效来源）。
+        let failures_before = self.builder.borrow().failure_marker();
+        {
             let mut sub = Flow {
                 builder: Rc::clone(&self.builder),
                 body: round,
             };
-            definition(current_refs, &mut sub)
-        };
-        let outputs = self.builder.borrow_mut().register_iter(
+            definition(&mut sub);
+        }
+        let round_clean = self.builder.borrow().failure_marker() == failures_before;
+        let (outputs, ok) = self.builder.borrow_mut().register_iter(
             self.body,
             round,
             step,
+            entry_order,
             initial_slots,
-            next.positions(),
             current,
             max_iterations,
+            round_clean,
             <S as StateShape>::register_states,
             <S as StateShape>::state_import_slots,
         );
-        <S as ShapeOps>::from_positions(&mut outputs.into_iter())
+        ok.then_some(outputs)
     }
 
     /// 控制器：按集合元素顺序对每项执行同一 item Body，并按槽聚合输出（SPEC §8.3、Engine §6.6）。
@@ -791,9 +846,15 @@ impl<'n> Flow<'n> {
         self
     }
 
-    /// 内部自动 Next 声明：仅直接 Iter Round 合法。
-    #[allow(private_bounds, dead_code)] // T06 公开前由内部测试/后续任务使用
-    pub(crate) fn next<T: RootInput>(&mut self) -> &mut Self
+    /// 自动 Next 声明：在声明位置按类型解析最近合法来源并**冻结**（SPEC §8.5）。
+    ///
+    /// 仅直接 Iter Round Body 合法；Round 必须恰好有一次完整 Next 声明，与 initial 同 Shape
+    /// （arity/逐槽类型），unit 状态因缺 `StateShape` impl 在编译期拒绝。声明不终止 Body、
+    /// 不提前 Promote；其后的步骤照常登记/执行。同类型多槽应改用 [`Flow::next_with`]。
+    ///
+    /// 名字来自 Iter 的 Next 状态（SPEC 术语），与 `Iterator::next` 无关。
+    #[allow(private_bounds, clippy::should_implement_trait)]
+    pub fn next<T: RootInput>(&mut self) -> &mut Self
     where
         T::Refs: StateShape,
     {
@@ -819,15 +880,53 @@ impl<'n> Flow<'n> {
         self
     }
 
-    /// 内部显式 Next 声明；仅直接 Iter Round 合法。
-    #[allow(dead_code)] // T06 公开前由内部测试/后续任务使用
-    pub(crate) fn next_with<R: StateShape>(&mut self, refs: R) -> &mut Self {
+    /// 显式 Next 声明：逐槽给出 Ref，保留同类型多槽的次序与来源（SPEC §8.5）。
+    ///
+    /// 与 [`Flow::next`] 同等受唯一声明与用途校验约束：仅直接 Iter Round Body 合法，
+    /// 完整 Shape 必须与 initial 一致（arity/逐槽类型），重复声明仍构建拒绝。
+    #[allow(private_bounds)]
+    pub fn next_with<S: StateShape>(&mut self, refs: S) -> &mut Self {
         let slots = refs.positions();
         let mut builder = self.builder.borrow_mut();
         let order = builder.fresh_order();
         let _ = builder.declare(self.body, DeclarationKind::Next, slots, order, false);
         drop(builder);
         self
+    }
+
+    /// 取得本 Round 的完整 formal Current 槽（G06 审定能力，SPEC §8.5）。
+    ///
+    /// 仅直接 Iter Round Body 合法：返回该 Round 全部 formal Current 槽（声明序 = initial
+    /// 槽序），arity／逐槽类型必须与 initial 完全一致。不做“最近来源”选择（那是
+    /// [`Flow::ref_of`] 的语义），不接受子 Shape 部分查询，重复调用幂等（同一批槽身份）；
+    /// 与 captured initial（原实例、不随轮推进）也不同。`&self` 查询不登记 Step/Data、
+    /// 不声明 Next/Output、不推进、不做运行期查询；非直接 Round 或 Shape 不符记 Definition
+    /// 期首因并按 `T::Refs` 返回受控失败形状，不 panic、不产生可运行来源。
+    ///
+    /// ```text
+    /// flow.iter((x0, y0, z0), 5, |round| {
+    ///     let (x, y, z) = round.current::<(Parcel, Parcel, Parcel)>();
+    ///     round.then_with(&judge, x);
+    ///     round.next_with((y, x, z)); // 逐槽交换/保留
+    /// });
+    /// ```
+    #[allow(private_bounds)]
+    pub fn current<T: RootInput>(&self) -> T::Refs
+    where
+        T::Refs: StateShape,
+    {
+        let wanted = <T::Refs as ShapeOps>::type_descs();
+        let handles = self
+            .builder
+            .borrow_mut()
+            .resolve_iter_current(self.body, &wanted);
+        match handles {
+            Some(handles) => {
+                let mut handles = handles.into_iter();
+                <T::Refs as ShapeOps>::from_positions(&mut handles)
+            }
+            None => self.failed_shape::<T::Refs>(),
+        }
     }
 
     /// 测试可控入口：当前 Definition 身份，用于构造“无来源位置”反例。

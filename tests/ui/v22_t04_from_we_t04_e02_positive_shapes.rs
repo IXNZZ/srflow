@@ -126,9 +126,11 @@ fn main() {
     // 3) Iter 单 Ref State：第二轮 Break 交付进入本轮时的 current。
     let counter = block_on(runtime.execute::<_, Counter, _>(
         |flow: &mut srflow::Flow<'_>, counter: Ref<Counter>| {
-            let out_refs = flow.iter(counter, 3, |current, round| {
+            let out_refs = flow.iter_output(counter, 3, |round| {
+                let current = round.current::<Counter>();
                 let _ = round.then_with_output(&break_at, current);
-                round.then_with_output(&bump, current)
+                let next = round.then_with_output(&bump, current);
+                round.next_with(next);
             });
             flow.output_with(out_refs);
         },

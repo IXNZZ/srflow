@@ -174,16 +174,13 @@ fn main() {
             });
             // iter（第二轮 Break 交付 current）
             let initial_draft = flow.then_with_output(draft_of, seed);
-            let (draft, context) = flow.iter(
-                (initial_draft, report),
-                4,
-                |(current_draft, current_context), round| {
-                    round.then_with_output(judge_break, current_draft);
-                    let next_draft = round.then_with_output(revise, current_draft);
-                    let next_context = round.then_with_output(bump, current_context);
-                    (next_draft, next_context)
-                },
-            );
+            let (draft, context) = flow.iter_output((initial_draft, report), 4, |round| {
+                let (current_draft, current_context) = round.current::<(Draft, Report)>();
+                round.then_with_output(judge_break, current_draft);
+                let next_draft = round.then_with_output(revise, current_draft);
+                let next_context = round.then_with_output(bump, current_context);
+                round.next_with((next_draft, next_context));
+            });
             let out_refs: (Ref<Amount>, Ref<Vec<Mark>>, Ref<Draft>, Ref<Report>) =
                 (picked, marks, draft, context);
             flow.output_with(out_refs);

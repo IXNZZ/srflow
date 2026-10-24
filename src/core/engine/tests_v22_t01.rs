@@ -450,8 +450,10 @@ fn a03b_newer_retry_and_iter_bridges_are_excluded_from_queries() {
     assert_eq!(retry_definition.root().steps().len(), 1);
 
     let iter_definition = build_definition::<Amount, Amount, _>(|flow, amount_ref| {
-        let iterated = flow.iter(amount_ref, 1, |current, sub| {
-            sub.then_with_output(add_one, current)
+        let iterated = flow.iter_output(amount_ref, 1, |round| {
+            let current = round.current::<Amount>();
+            let next = round.then_with_output(add_one, current);
+            round.next_with(next);
         });
         let found = flow.ref_of::<Amount>();
         assert_eq!(found.handle(), iterated.handle());
@@ -483,14 +485,15 @@ fn a04_item_and_current_are_visible_and_shadowed() {
     .expect("item query, shadowing and collected output should build");
 
     let _ = build_definition::<Amount, Amount, _>(|flow, amount_ref| {
-        let out_refs = flow.iter(amount_ref, 1, |current, round| {
+        let out_refs = flow.iter_output(amount_ref, 1, |round| {
+            let current = round.current::<Amount>();
             let saved = round.ref_of::<Amount>();
             assert_eq!(saved.handle(), current.handle());
             let advanced = round.then_with_output(add_one, current);
             let nearest = round.ref_of::<Amount>();
             assert_eq!(nearest.handle(), advanced.handle());
             let _ = round.then_with_output(sink_amount, saved);
-            advanced
+            round.next_with(advanced);
         });
         flow.output_with(out_refs);
     })
@@ -1478,8 +1481,10 @@ fn a11_next_declaration_states_and_shapes() {
 #[test]
 fn a11_old_iter_maps_state_to_next() {
     let definition = build_definition::<Amount, Amount, _>(|flow, amount_ref| {
-        let out_refs = flow.iter(amount_ref, 1, |current, sub| {
-            sub.then_with_output(add_one, current)
+        let out_refs = flow.iter_output(amount_ref, 1, |round| {
+            let current = round.current::<Amount>();
+            let next = round.then_with_output(add_one, current);
+            round.next_with(next);
         });
         flow.output_with(out_refs);
     })
@@ -1584,8 +1589,10 @@ fn a12_old_unit_and_next_mappings() {
     }
 
     let iter = build_definition::<Amount, Amount, _>(|flow, amount_ref| {
-        let out_refs = flow.iter(amount_ref, 1, |current, sub| {
-            sub.then_with_output(add_one, current)
+        let out_refs = flow.iter_output(amount_ref, 1, |round| {
+            let current = round.current::<Amount>();
+            let next = round.then_with_output(add_one, current);
+            round.next_with(next);
         });
         flow.output_with(out_refs);
     })
@@ -1755,14 +1762,25 @@ fn a12_old_adapters_reject_second_declarations() {
             let mut flow = Flow::open(Rc::clone(&builder), round);
             flow.next_with(amount(inputs[0]));
         }
+        // 新契约：`register_iter` 不再接收 `declared` 并自行补声明。原「第二次声明必须被
+        // 拒绝」改为等价的显式声明路径，判定目的（DuplicateDeclaration + 首份声明不被覆盖）
+        // 不变。
+        let order = builder.borrow_mut().fresh_order();
+        assert!(!builder.borrow_mut().declare_next(
+            round,
+            vec![desc(inputs[0], TypeDesc::of::<Amount>())],
+            order
+        ));
+        let entry_order = builder.borrow_mut().fresh_order();
         builder.borrow_mut().register_iter(
             root,
             round,
             0,
-            vec![desc(inputs[0], TypeDesc::of::<Amount>())],
+            entry_order,
             vec![desc(inputs[0], TypeDesc::of::<Amount>())],
             Vec::new(),
             1,
+            true, // 低层登记：本节测试不引入 Round 内新增构建错误
             <Ref<Amount> as StateShape>::register_states,
             <Ref<Amount> as StateShape>::state_import_slots,
         );
@@ -2166,14 +2184,24 @@ fn a12_old_adapters_preserve_non_unit_and_first_failure() {
             flow.next_with(amount(inputs[0]));
         }
         let before = next_snapshot(&builder, round);
-        let outputs = builder.borrow_mut().register_iter(
+        // 新契约：`declared` 不再经 `register_iter` 补声明；原第二次声明改为等价的显式
+        // 声明路径，仍须被拒绝且不得覆盖首份声明。
+        let order = builder.borrow_mut().fresh_order();
+        assert!(!builder.borrow_mut().declare_next(
+            round,
+            vec![desc(inputs[0], TypeDesc::of::<Amount>())],
+            order
+        ));
+        let entry_order = builder.borrow_mut().fresh_order();
+        let (outputs, _declared) = builder.borrow_mut().register_iter(
             root,
             round,
             0,
-            vec![desc(inputs[0], TypeDesc::of::<Amount>())],
+            entry_order,
             vec![desc(inputs[0], TypeDesc::of::<Amount>())],
             Vec::new(),
             1,
+            true, // 低层登记：本节测试不引入 Round 内新增构建错误
             <Ref<Amount> as StateShape>::register_states,
             <Ref<Amount> as StateShape>::state_import_slots,
         );
@@ -2204,14 +2232,24 @@ fn a12_old_adapters_preserve_non_unit_and_first_failure() {
         }
         let before = next_snapshot(&builder, round);
         assert_eq!(before.0, DeclarationState::Failed);
-        let outputs = builder.borrow_mut().register_iter(
+        // 新契约：`declared` 不再经 `register_iter` 补声明；原第二次声明改为等价的显式
+        // 声明路径，仍须被拒绝且不得覆盖首因。
+        let order = builder.borrow_mut().fresh_order();
+        assert!(!builder.borrow_mut().declare_next(
+            round,
+            vec![desc(inputs[0], TypeDesc::of::<Amount>())],
+            order
+        ));
+        let entry_order = builder.borrow_mut().fresh_order();
+        let (outputs, _declared) = builder.borrow_mut().register_iter(
             root,
             round,
             0,
-            vec![desc(inputs[0], TypeDesc::of::<Amount>())],
+            entry_order,
             vec![desc(inputs[0], TypeDesc::of::<Amount>())],
             Vec::new(),
             1,
+            true, // 低层登记：本节测试不引入 Round 内新增构建错误
             <Ref<Amount> as StateShape>::register_states,
             <Ref<Amount> as StateShape>::state_import_slots,
         );
@@ -2379,14 +2417,23 @@ fn a13b_tainted_and_unpublished_sources_do_not_publish_outputs() {
                 .borrow_mut()
                 .allocate_iter_current(round, 0, &[TypeDesc::of::<Amount>()]);
         let tainted = tainted_amount(&builder, root);
-        let outputs = builder.borrow_mut().register_iter(
+        // 新契约：Next 声明由显式路径给出（`register_iter` 不再接收、也不补 `declared`）。
+        let order = builder.borrow_mut().fresh_order();
+        let _ = builder.borrow_mut().declare_next(
+            round,
+            vec![desc(tainted, TypeDesc::of::<Amount>())],
+            order,
+        );
+        let entry_order = builder.borrow_mut().fresh_order();
+        let (outputs, _declared) = builder.borrow_mut().register_iter(
             root,
             round,
             0,
+            entry_order,
             vec![desc(inputs[0], TypeDesc::of::<Amount>())],
-            vec![desc(tainted, TypeDesc::of::<Amount>())],
             current,
             1,
+            true, // 低层登记：本节测试不引入 Round 内新增构建错误
             <Ref<Amount> as StateShape>::register_states,
             <Ref<Amount> as StateShape>::state_import_slots,
         );
@@ -2506,14 +2553,24 @@ fn a13b_first_unpublished_declaration_survives_old_return() {
         }
         let before = next_snapshot(&builder, round);
         assert_eq!(before.0, DeclarationState::Failed);
+        // 新契约：`register_iter` 不再接收 `declared` 并自行补声明；原旧收尾的第二次声明
+        // 改为等价的显式路径，仍须被拒绝且不得覆盖首因（NotPublished）。
+        let order = builder.borrow_mut().fresh_order();
+        assert!(!builder.borrow_mut().declare_next(
+            round,
+            vec![desc(source, TypeDesc::of::<Amount>())],
+            order
+        ));
+        let entry_order = builder.borrow_mut().fresh_order();
         builder.borrow_mut().register_iter(
             root,
             round,
             step,
+            entry_order,
             Vec::new(),
-            vec![desc(source, TypeDesc::of::<Amount>())],
             Vec::new(),
             1,
+            true, // 低层登记：本节测试不引入 Round 内新增构建错误
             <Ref<Amount> as StateShape>::register_states,
             <Ref<Amount> as StateShape>::state_import_slots,
         );
@@ -2732,14 +2789,23 @@ fn a13b1_unpublished_source_is_rejected_by_all_register_paths() {
             builder
                 .borrow_mut()
                 .allocate_iter_current(round, 0, &[TypeDesc::of::<Amount>()]);
-        let outputs = builder.borrow_mut().register_iter(
+        // 新契约：Next 声明由显式路径给出（`register_iter` 不再接收、也不补 `declared`）。
+        let order = builder.borrow_mut().fresh_order();
+        let _ = builder.borrow_mut().declare_next(
+            round,
+            vec![desc(source, TypeDesc::of::<Amount>())],
+            order,
+        );
+        let entry_order = builder.borrow_mut().fresh_order();
+        let (outputs, _declared) = builder.borrow_mut().register_iter(
             root,
             round,
             0,
+            entry_order,
             vec![desc(inputs[0], TypeDesc::of::<Amount>())],
-            vec![desc(source, TypeDesc::of::<Amount>())],
             current,
             1,
+            true, // 低层登记：本节测试不引入 Round 内新增构建错误
             <Ref<Amount> as StateShape>::register_states,
             <Ref<Amount> as StateShape>::state_import_slots,
         );

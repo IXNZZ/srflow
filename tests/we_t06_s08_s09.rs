@@ -300,16 +300,13 @@ fn s08_six_operations_compose_in_one_execution() {
                         each.output_with(out_refs);
                     });
                 // 6) iter：第一轮 Continue，第二轮 Break（本轮 next 已产生但不交付）。
-                let (draft, context) = flow.iter(
-                    (draft, context),
-                    3,
-                    |(current_draft, current_context), round| {
-                        let next_draft = round.then_with_output(&revise, current_draft);
-                        let next_context = round.then_with_output(&bump_context, current_context);
-                        round.then_with_output(&round_judge, current_context);
-                        (next_draft, next_context)
-                    },
-                );
+                let (draft, context) = flow.iter_output((draft, context), 3, |round| {
+                    let (current_draft, current_context) = round.current::<(Draft, Context)>();
+                    let next_draft = round.then_with_output(&revise, current_draft);
+                    let next_context = round.then_with_output(&bump_context, current_context);
+                    round.then_with_output(&round_judge, current_context);
+                    round.next_with((next_draft, next_context));
+                });
                 let out_refs = (
                     verdict, amount, merged, label, scores, summaries, draft, context,
                 );
@@ -423,16 +420,13 @@ fn s09_path_a_iter_break_delivers_current_not_next() {
     let runtime = Runtime::new();
     let (draft, context) = block_on(runtime.execute::<_, (Draft, Context), _>(
         |flow, (draft, context)| {
-            let out_refs = flow.iter(
-                (draft, context),
-                4,
-                |(current_draft, current_context), round| {
-                    let next_draft = round.then_with_output(&revise, current_draft);
-                    let next_context = round.then_with_output(&bump_context, current_context);
-                    round.then_with_output(&break_at_one, current_context);
-                    (next_draft, next_context)
-                },
-            );
+            let out_refs = flow.iter_output((draft, context), 4, |round| {
+                let (current_draft, current_context) = round.current::<(Draft, Context)>();
+                let next_draft = round.then_with_output(&revise, current_draft);
+                let next_context = round.then_with_output(&bump_context, current_context);
+                round.then_with_output(&break_at_one, current_context);
+                round.next_with((next_draft, next_context));
+            });
             flow.output_with(out_refs);
         },
         (Draft(String::from("a")), Context(0)),
@@ -492,22 +486,19 @@ fn s09_path_b_inner_retry_restarts_complete_attempt_in_round() {
     let runtime = Runtime::new();
     let (draft, context) = block_on(runtime.execute::<_, (Draft, Context), _>(
         |flow, (draft, context)| {
-            let out_refs = flow.iter(
-                (draft, context),
-                3,
-                |(current_draft, current_context), round| {
-                    let verdict: Ref<Verdict> = round.retry_output(1, |attempt| {
-                        let candidate = attempt.then_with_output(&gen_in_round, current_context);
-                        let out_refs = attempt.then_with_output(&judge_in_round, candidate);
-                        attempt.output_with(out_refs);
-                    });
-                    round.then_with_output(&consume, verdict);
-                    let next_draft = round.then_with_output(&revise, current_draft);
-                    let next_context = round.then_with_output(&bump_context, current_context);
-                    round.then_with_output(&break_at_one, current_context);
-                    (next_draft, next_context)
-                },
-            );
+            let out_refs = flow.iter_output((draft, context), 3, |round| {
+                let (current_draft, current_context) = round.current::<(Draft, Context)>();
+                let verdict: Ref<Verdict> = round.retry_output(1, |attempt| {
+                    let candidate = attempt.then_with_output(&gen_in_round, current_context);
+                    let out_refs = attempt.then_with_output(&judge_in_round, candidate);
+                    attempt.output_with(out_refs);
+                });
+                round.then_with_output(&consume, verdict);
+                let next_draft = round.then_with_output(&revise, current_draft);
+                let next_context = round.then_with_output(&bump_context, current_context);
+                round.then_with_output(&break_at_one, current_context);
+                round.next_with((next_draft, next_context));
+            });
             flow.output_with(out_refs);
         },
         (Draft(String::from("b")), Context(0)),
@@ -1106,16 +1097,18 @@ fn s09_same_class_nearest_capture_iter_in_iter() {
     let runtime = Runtime::new();
     let delivered = block_on(runtime.execute::<_, Context, _>(
         |flow, context| {
-            let out_refs = flow.iter(context, 3, |current, round| {
-                let inner = round.iter(current, 3, |inner_current, inner_round| {
+            let out_refs = flow.iter_output(context, 3, |round| {
+                let current = round.current::<Context>();
+                let inner = round.iter_output(current, 3, |inner_round| {
+                    let inner_current = inner_round.current::<Context>();
                     let next = inner_round.then_with_output(&inner_advance, inner_current);
                     inner_round.then_with_output(&inner_round_guard, inner_current);
-                    next
+                    inner_round.next_with(next);
                 });
                 round.then_with_output(&outer_round_probe, inner);
                 let next = round.then_with_output(&bump_context, current);
                 round.then_with_output(&outer_round_guard, current);
-                next
+                round.next_with(next);
             });
             flow.output_with(out_refs);
         },
@@ -1195,17 +1188,14 @@ fn s09_retry_inside_iter_restarts_attempt_and_iter_state() {
     let (draft, context) = block_on(runtime.execute::<_, (Draft, Context), _>(
         |flow, (draft, context)| {
             let out_refs: (Ref<Draft>, Ref<Context>) = flow.retry_output(1, |attempt| {
-                let out_refs = attempt.iter(
-                    (draft, context),
-                    3,
-                    |(current_draft, current_context), round| {
-                        round.then_with_output(&gate, current_context);
-                        let next_draft = round.then_with_output(&revise, current_draft);
-                        let next_context = round.then_with_output(&bump_context, current_context);
-                        round.then_with_output(&round_break_at_one, current_context);
-                        (next_draft, next_context)
-                    },
-                );
+                let out_refs = attempt.iter_output((draft, context), 3, |round| {
+                    let (current_draft, current_context) = round.current::<(Draft, Context)>();
+                    round.then_with_output(&gate, current_context);
+                    let next_draft = round.then_with_output(&revise, current_draft);
+                    let next_context = round.then_with_output(&bump_context, current_context);
+                    round.then_with_output(&round_break_at_one, current_context);
+                    round.next_with((next_draft, next_context));
+                });
                 attempt.output_with(out_refs);
             });
             flow.output_with(out_refs);
@@ -1265,14 +1255,16 @@ fn s09_retry_does_not_capture_iter_break_and_iter_delivers_current() {
     let runtime = Runtime::new();
     let delivered = block_on(runtime.execute::<_, Context, _>(
         |flow, context| {
-            let out_refs = flow.iter(context, 3, |current, round| {
+            let out_refs = flow.iter_output(context, 3, |round| {
+                let current = round.current::<Context>();
                 let verdict: Ref<Verdict> = round.retry_output(2, |attempt| {
                     let candidate = attempt.then_with_output(&gen_in_retry, current);
                     let out_refs = attempt.then_with_output(&break_in_retry, candidate);
                     attempt.output_with(out_refs);
                 });
                 round.then_with_output(&after_retry_in_iter, verdict);
-                round.then_with_output(&bump_context, current)
+                let next = round.then_with_output(&bump_context, current);
+                round.next_with(next);
             });
             flow.output_with(out_refs);
         },
@@ -1319,9 +1311,11 @@ fn s09_terminal_iteration_limit_reached() {
     let runtime = Runtime::new();
     let error = match block_on(runtime.execute::<_, Summary, _>(
         |flow, context| {
-            let state = flow.iter(context, 2, |current, round| {
+            let state = flow.iter_output(context, 2, |round| {
+                let current = round.current::<Context>();
                 round.then_with_output(&limit_judge, current);
-                round.then_with_output(&bump_context, current)
+                let next = round.then_with_output(&bump_context, current);
+                round.next_with(next);
             });
             let out_refs = flow.then_with_output(&after_iter_limit, state);
             flow.output_with(out_refs);
@@ -1454,8 +1448,10 @@ fn s09_definition_error_iter_zero_rounds_runs_zero_business() {
     let error = match block_on(runtime.execute::<_, Context, _>(
         |flow, context| {
             defined.set(defined.get() + 1);
-            let out_refs = flow.iter(context, 0, |current, round| {
-                round.then_with_output(&never_runs, current)
+            let out_refs = flow.iter_output(context, 0, |round| {
+                let current = round.current::<Context>();
+                let next = round.then_with_output(&never_runs, current);
+                round.next_with(next);
             });
             flow.output_with(out_refs);
         },

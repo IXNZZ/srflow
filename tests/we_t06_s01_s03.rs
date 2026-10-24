@@ -1041,9 +1041,11 @@ fn s03_chain_body_maps_all_six_operations() {
                             attempt.output_with(out_refs);
                         });
                         let zero = sub.then_with_output(zero_amount, seed);
-                        let state = sub.iter(zero, 4, |current, round| {
+                        let state = sub.iter_output(zero, 4, |round| {
+                            let current = round.current::<Amount>();
                             let _judged = round.then_with_output(judge_break, current);
-                            round.then_with_output(bump_amount, current)
+                            let next = round.then_with_output(bump_amount, current);
+                            round.next_with(next);
                         });
                         let t04_out_refs = (scores, picked, nested, report, state);
                         sub.output_with(t04_out_refs);

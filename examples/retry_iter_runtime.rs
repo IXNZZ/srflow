@@ -158,16 +158,13 @@ fn main() -> Result<(), Box<dyn Error>> {
     // 3) Iter：第二轮 Break —— 交付进入本轮时的 current（draft 一个加号、context 为 1）。
     let (draft, context) = block_on(runtime.execute::<_, (Draft, Context), _>(
         |flow: &mut Flow<'_>, (draft, context)| {
-            let out_refs = flow.iter(
-                (draft, context),
-                5,
-                |(current_draft, current_context), round| {
-                    round.then_with_output(&judge_until_break, current_context);
-                    let next_draft = round.then_with_output(&revise, current_draft);
-                    let next_context = round.then_with_output(&bump, current_context);
-                    (next_draft, next_context)
-                },
-            );
+            let out_refs = flow.iter_output((draft, context), 5, |round| {
+                let (current_draft, current_context) = round.current::<(Draft, Context)>();
+                round.then_with_output(&judge_until_break, current_context);
+                let next_draft = round.then_with_output(&revise, current_draft);
+                let next_context = round.then_with_output(&bump, current_context);
+                round.next_with((next_draft, next_context));
+            });
             flow.output_with(out_refs);
         },
         (Draft(String::from("s0")), Context(0)),
@@ -178,16 +175,13 @@ fn main() -> Result<(), Box<dyn Error>> {
     // 4) Iter 轮次上限：第 N 轮仍 Continue。
     let error = match block_on(runtime.execute::<_, (Draft, Context), _>(
         |flow: &mut Flow<'_>, (draft, context)| {
-            let out_refs = flow.iter(
-                (draft, context),
-                2,
-                |(current_draft, current_context), round| {
-                    round.then_with_output(&judge_always_continue, current_context);
-                    let next_draft = round.then_with_output(&revise, current_draft);
-                    let next_context = round.then_with_output(&bump, current_context);
-                    (next_draft, next_context)
-                },
-            );
+            let out_refs = flow.iter_output((draft, context), 2, |round| {
+                let (current_draft, current_context) = round.current::<(Draft, Context)>();
+                round.then_with_output(&judge_always_continue, current_context);
+                let next_draft = round.then_with_output(&revise, current_draft);
+                let next_context = round.then_with_output(&bump, current_context);
+                round.next_with((next_draft, next_context));
+            });
             flow.output_with(out_refs);
         },
         (Draft(String::from("x")), Context(0)),

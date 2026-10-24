@@ -41,9 +41,11 @@ fn main() {
     let leaked: Cell<Option<Ref<Amount>>> = Cell::new(None);
     let error = block_on(runtime.execute::<_, Amount, _>(
         |flow: &mut Flow<'_>, amount: Ref<Amount>| {
-            let declared = flow.iter(amount, 3, |current, round| {
+            let declared = flow.iter_output(amount, 3, |round| {
+                let current = round.current::<Amount>();
                 leaked.set(Some(current));
-                round.then_with_output(&bump, current)
+                let next = round.then_with_output(&bump, current);
+                round.next_with(next);
             });
             // declared 是本轮 StateShape 的声明输出（合法）；leaked 是轮内 current（非法）。
             let _ = declared;

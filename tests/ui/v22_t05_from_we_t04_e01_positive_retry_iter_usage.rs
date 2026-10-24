@@ -7,8 +7,11 @@
 //!
 //! ```text
 //! flow.retry(3, |attempt| { … attempt.then_with_output(…) … })         // attempt 是完整 &mut Flow<'n>
-//! flow.iter(state, 5, |state, round| { … round.then_with_output(…) … }) // round 是完整 &mut Flow<'n>
+//! flow.iter_output(state, 5, |round| { … round.next_with(next) … })    // round 是完整 &mut Flow<'n>
 //! ```
+//!
+//! T06 迁移：Round Body 由旧双参 `|state, round|` 改为单参 unit 闭包 `|round|`，Current 在 Body
+//! 顶部经 [`Flow::current`] 显式取得，Next 改由 [`Flow::next_with`] 声明；取输出用 `iter_output`。
 //!
 //! 覆盖：
 //!
@@ -176,16 +179,13 @@ fn main() {
     // 3) 冻结 iter 用法：2 元 State，第二轮 Break 交付进入本轮时的 current。
     let (draft, context) = block_on(runtime.execute::<_, (Draft, Context), _>(
         |flow: &mut Flow<'_>, (draft, context)| {
-            let out_refs = flow.iter(
-                (draft, context),
-                5,
-                |(current_draft, current_context), round| {
-                    round.then_with_output(&judge_until_break, current_context);
-                    let next_draft = round.then_with_output(&revise, current_draft);
-                    let next_context = round.then_with_output(&bump, current_context);
-                    (next_draft, next_context)
-                },
-            );
+            let out_refs = flow.iter_output((draft, context), 5, |round| {
+                let (current_draft, current_context) = round.current::<(Draft, Context)>();
+                round.then_with_output(&judge_until_break, current_context);
+                let next_draft = round.then_with_output(&revise, current_draft);
+                let next_context = round.then_with_output(&bump, current_context);
+                round.next_with((next_draft, next_context));
+            });
             flow.output_with(out_refs);
         },
         (Draft(0), Context(0)),

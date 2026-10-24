@@ -142,9 +142,11 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let budget: Budget = runtime
         .execute(
             |flow, budget: Ref<Budget>| {
-                let out_refs = flow.iter(budget, 5, |current, round| {
+                let out_refs = flow.iter_output(budget, 5, |round| {
+                    let current = round.current::<Budget>();
                     round.then_with_output(stop_after_three, current);
-                    round.then_with_output(spend, current)
+                    let next = round.then_with_output(spend, current);
+                    round.next_with(next);
                 });
                 flow.output_with(out_refs);
             },

@@ -17,9 +17,9 @@ fn main() {
     let runtime = Runtime::new();
     let _ = runtime.execute::<_, (), _>(
         |flow: &mut Flow<'_>, ()| {
-            flow.iter((), 3, |(), round| {
+            flow.iter((), 3, |round| {
                 let _ = round;
-                ()
+                round.next_with(());
             });
             flow.output_with(());
         },

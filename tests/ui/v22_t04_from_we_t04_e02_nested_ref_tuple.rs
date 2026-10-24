@@ -23,7 +23,9 @@ fn probe<'n>(flow: &mut Flow<'n>, nested: Nested, item: Ref<Item>) {
         _attempt.output_with(out_refs);
     });
     // 期望诊断：E0277——嵌套 Ref tuple 未实现 StateShape（Iter 状态）。
-    let _ = flow.iter(nested, 3, |current, _round| current);
+    let _ = flow.iter(nested, 3, |round| {
+        let _ = round;
+    });
 }
 
 fn main() {

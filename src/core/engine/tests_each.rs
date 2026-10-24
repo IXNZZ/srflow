@@ -341,8 +341,10 @@ fn full_item_flow<'n>(
             attempt.output_with(out_refs);
         });
         // 5) iter：固定初始状态逐轮推进，第 5 轮以 IterBreak 交付 current。
-        let iter_done = each.iter(seed, 5, |current, round| {
-            round.then_with_output(&step_toward_four, current)
+        let iter_done = each.iter_output(seed, 5, |round| {
+            let current = round.current::<Score>();
+            let next = round.then_with_output(&step_toward_four, current);
+            round.next_with(next);
         });
         let total = each.then_with_output(&combine, (retried, iter_done));
         // 6) 嵌套 each：对独立内层集合逐项执行，输出再交给普通节点。
@@ -710,9 +712,10 @@ fn p03_each_is_a_unified_step_with_a_full_body_and_a_single_plan() {
                 let _: () = attempt.then_with_output(&count_unit, item);
                 attempt.output::<()>();
             });
-            each.iter(item, 2, |current, round| {
+            each.iter(item, 2, |round| {
+                let current = round.current::<Mark>();
                 round.then_with_output(&count_unit, current);
-                current
+                round.next_with(current);
             });
             each.each(items, |nested| {
                 let nested_item = nested.ref_of::<Mark>();

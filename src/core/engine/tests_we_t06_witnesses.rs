@@ -739,11 +739,12 @@ fn runtime_export_rejection(iter: bool, hop: u8) {
     let result = if iter {
         block_on(Runtime::new().execute::<_, (u32, u32), _>(
             |flow, input| {
-                let output = flow.iter(input, 3, |(a, b), round| {
+                let output = flow.iter_output(input, 3, |round| {
+                    let (a, b) = round.current::<(u32, u32)>();
                     let x = round.then_with_output(plus, a);
                     let y = round.then_with_output(plus, b);
                     round.then_with_output(break_now, a);
-                    (x, y)
+                    round.next_with((x, y));
                 });
                 flow.then_with_output(later, output);
                 let out_refs = output;
@@ -1002,8 +1003,10 @@ fn distinct_budget_diagnostics(iter: bool) {
     let result = if iter {
         block_on(Runtime::new().execute::<_, u32, _>(
             |flow, (_unused, seed)| {
-                let out_refs = flow.iter(seed, 1, |current, round| {
-                    round.then_with_output(plus, current)
+                let out_refs = flow.iter_output(seed, 1, |round| {
+                    let current = round.current::<u32>();
+                    let next = round.then_with_output(plus, current);
+                    round.next_with(next);
                 });
                 flow.output_with(out_refs);
             },

@@ -323,13 +323,15 @@ macro_rules! iter_arity_case {
             let outcome = block_on(runtime.execute::<_, (u32, $($t,)+), _>(
                 |flow: &mut Flow<'_>, refs| {
                     let ($s0, $($slot,)+) = refs;
-                    let out_refs = flow.iter(($s0, $($slot,)+), 5, |current, round| {
-                        let ($s0, $($slot,)+) = current;
+                    let out_refs = flow.iter_output(($s0, $($slot,)+), 5, |round| {
+                        let ($s0, $($slot,)+) = round.current::<(u32, $($t,)+)>();
                         let _: () = round.then_with_output(&judge_break_after_first_round, $s0);
-                        (
+                        // 先逐槽求值，再统一声明 Next（避免对 round 的二次可变借用）。
+                        let next = (
                             round.then_with_output(bump::<u32>, $s0),
                             $(round.then_with_output(bump::<$t>, $slot),)+
-                        )
+                        );
+                        round.next_with(next);
                     });
                     flow.output_with(out_refs);
                 },
@@ -352,9 +354,11 @@ fn iter_single_ref_state_advances_then_breaks() {
     let runtime = Runtime::new();
     let outcome = block_on(runtime.execute::<_, u32, _>(
         |flow: &mut Flow<'_>, seed: Ref<u32>| {
-            let out_refs = flow.iter(seed, 5, |current, round| {
+            let out_refs = flow.iter_output(seed, 5, |round| {
+                let current = round.current::<u32>();
                 let _: () = round.then_with_output(&judge_break_after_first_round, current);
-                round.then_with_output(bump::<u32>, current)
+                let next = round.then_with_output(bump::<u32>, current);
+                round.next_with(next);
             });
             flow.output_with(out_refs);
         },

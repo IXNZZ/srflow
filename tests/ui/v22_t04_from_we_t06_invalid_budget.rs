@@ -56,7 +56,11 @@ fn main() {
     // 场景 2：Iter 零轮。
     let iter_error = block_on(runtime.execute::<_, Amount, _>(
         |flow: &mut Flow<'_>, amount: Ref<Amount>| {
-            let out_refs = flow.iter(amount, 0, |current, round| round.then_with_output(&bump, current));
+            let out_refs = flow.iter_output(amount, 0, |round| {
+                let current = round.current::<Amount>();
+                let next = round.then_with_output(&bump, current);
+                round.next_with(next);
+            });
             flow.output_with(out_refs);
         },
         Amount(1),

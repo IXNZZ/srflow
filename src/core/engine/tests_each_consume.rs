@@ -1250,9 +1250,11 @@ fn p17_item_cap_survives_the_iter_state_import_path() {
                 let item = sub.ref_of::<Item>();
 
                 let initial = sub.then_with_output(score, item);
-                let delivered = sub.iter(initial, 2, |current, round| {
+                let delivered = sub.iter_output(initial, 2, |round| {
+                    let current = round.current::<Out>();
                     let blended = round.then_with_output(blend, (item, current));
-                    round.then_with_output(break_now, blended)
+                    let next = round.then_with_output(break_now, blended);
+                    round.next_with(next);
                 });
                 let out_refs = sub.then_with_output(rescore, delivered);
                 sub.output_with(out_refs);

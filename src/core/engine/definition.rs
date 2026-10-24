@@ -737,6 +737,18 @@ impl EachBridge {
             finish: <R as EachCollect>::finish_collectors,
         }
     }
+
+    /// 冻结的声明槽类型（`Ref<A>` 等）；结构画像据此逐槽核对 typed 能力。
+    #[allow(dead_code)] // 由定向测试与结构检查使用
+    pub(crate) fn declared(&self) -> &[TypeDesc] {
+        &self.declared
+    }
+
+    /// 冻结的聚合槽类型（`Vec<A>` 等）。
+    #[allow(dead_code)] // 由定向测试与结构检查使用
+    pub(crate) fn collected(&self) -> &[TypeDesc] {
+        &self.collected
+    }
 }
 
 /// 某 Body 当前 Output 声明的只读视图（冻结槽位与首次尝试/成功/失败标志）。
@@ -1064,6 +1076,12 @@ impl PositionRecord {
         self.published_order
     }
 
+    /// 分配时点；结构画像在统一时点比较真实登记顺序。
+    #[allow(dead_code)] // 由定向测试与结构检查使用
+    pub(crate) fn created_order(&self) -> u64 {
+        self.created_order
+    }
+
     /// 生产登记是否已失效。
     #[allow(dead_code)] // 由定向测试与结构检查使用
     pub(crate) fn is_tainted(&self) -> bool {
@@ -1155,6 +1173,13 @@ pub(crate) struct Builder<'n> {
     bodies: Vec<Body<'n>>,
     positions: Vec<PositionRecord>,
     errors: Vec<BuildErrorDetail>,
+    /// **未写入即时错误列表**的已知失败次数。
+    ///
+    /// 两类：① 延后到 finish 分类的未登记/前向来源失败（使用点无法区分“稍后分配的
+    /// 合法位置”与“永不存在的未知位置”）；② 为保留更早首因而**不重复记录**的派生失败
+    /// （子声明选中了已失效来源）。两者都已使本次构建失败，因此发布判定不能用
+    /// 即时错误条数代替完整失败状态。
+    unrecorded_failures: u64,
     /// Root 期望输出 Shape；`None` 表示本次构建不核对（仅内部测试直接构造 Builder 时）。
     root_expectation: Option<Vec<TypeDesc>>,
     /// Choose 分支契约的轻量视图；由 finish 统一比较。
@@ -1172,6 +1197,7 @@ impl<'n> Builder<'n> {
             bodies: Vec::new(),
             positions: Vec::new(),
             errors: Vec::new(),
+            unrecorded_failures: 0,
             root_expectation: None,
             choose_contracts: Vec::new(),
         }
@@ -1288,6 +1314,15 @@ impl<'n> Builder<'n> {
     #[allow(dead_code)] // 由内部测试/下游诊断使用
     pub(crate) fn errors(&self) -> &[BuildErrorDetail] {
         &self.errors
+    }
+
+    /// 已知失败标记：即时入列的错误条数 + 未写入错误列表的已知失败次数。
+    ///
+    /// 控制器发布判定必须比较本标记的增量，不能用 `errors()` 条数代替：延后分类的
+    /// 未登记/前向来源失败与「为保留更早首因而不重复记录」的派生失败都已使本次构建
+    /// 失败（`taint` 已发生、`finish` 会给出分类或更早首因），只是当时不进入错误列表。
+    pub(crate) fn failure_marker(&self) -> (usize, u64) {
+        (self.errors.len(), self.unrecorded_failures)
     }
 
     /// 分配位置；`publish` 为假时保持“已分配但未发布”，供 Choose 父输出预分配使用。
@@ -1490,7 +1525,11 @@ impl<'n> Builder<'n> {
     ) -> Option<BuildErrorDetail> {
         if let Some(error) = self.availability_error(body, step, desc, order) {
             let unregistered = self.position(desc.handle).is_none();
-            if !Self::defer_unregistered(error, unregistered) {
+            if Self::defer_unregistered(error, unregistered) {
+                // 延后分类的失败同样是“已知失败”：登记控制器必须能看见它，否则
+                // 一个仍然合法的 Next 会让失败的 Round 发布合法父来源。
+                self.unrecorded_failures = self.unrecorded_failures.saturating_add(1);
+            } else {
                 self.errors.push(error);
             }
             return Some(error);
@@ -1635,7 +1674,13 @@ impl<'n> Builder<'n> {
                     // tainted 是上游失败派生出的后果；等 finish 先检查更早的输入/来源。
                     // NotPublished 是本次声明自身选择了未发布位置，属于首因，必须保留。
                     let derived = matches!(error, BuildErrorDetail::TaintedSource { .. });
-                    if !derived && !Self::defer_unregistered(error, unregistered) {
+                    if derived || Self::defer_unregistered(error, unregistered) {
+                        // 已知失败，但**不在此时写入诊断**：派生失败由更早的来源先解释，
+                        // 未登记/前向来源延后到 finish 分类。两者都必须进入失败标记：
+                        // 否则上游错误发生在 Round 之前时，本轮新发生的声明失败会被漏掉，
+                        // 失败的 Round 仍会发布合法父来源。
+                        self.unrecorded_failures = self.unrecorded_failures.saturating_add(1);
+                    } else {
                         self.errors.push(error);
                         failure_recorded = true;
                     }
@@ -1718,7 +1763,8 @@ impl<'n> Builder<'n> {
         self.declare(body, DeclarationKind::Output, slots, order, false)
     }
 
-    /// 声明 Iter Round 的 Next。
+    /// 声明 Iter Round 的 Next（低层直接登记；公开路径统一经 `Flow::next`／`next_with`）。
+    #[allow(dead_code)] // 由低层 Builder 定向测试直接使用
     pub(crate) fn declare_next(
         &mut self,
         body: BodyId,
@@ -2288,75 +2334,155 @@ impl<'n> Builder<'n> {
             .collect()
     }
 
-    #[allow(clippy::too_many_arguments)] // 静态登记需逐项显式给出声明组与逐槽类型化操作
-    /// 登记 Iter Step：初始状态使用、预算校验、round 声明输出与 parent 输出槽。
+    /// 解析直接 Round 的 formal Current 槽（G06 审定能力，SPEC §8.5）。
     ///
-    /// `initial` 是 parent 内声明的初始状态（作为该 Step 的静态输入参与统一验证）；
-    /// `declared` 是 round Body 声明的 next 输出（同 StateShape）；每个 parent 输出槽
-    /// 同时得到一个 round 本地最终出口（Break 交付 current 时绑定）。
+    /// 只允许直接 Round Body：普通 Body 记录 `CurrentOutsideRound` 并返回 `None`。请求 Shape
+    /// 必须与该 Round 的 formal Current 完全一致（槽数 + 逐槽类型），不做“最近来源”选择、
+    /// 不接受子 Shape 部分查询。失败记录目标诊断并返回 `None`，由调用方构造受控失败形状。
+    /// 查询不登记 Step/Data/声明，也不改变任何位置的可用性。
+    pub(crate) fn resolve_iter_current(
+        &mut self,
+        body: BodyId,
+        wanted: &[TypeDesc],
+    ) -> Option<Vec<PositionHandle>> {
+        if self.bodies[body.index()].role != BodyRole::Round {
+            self.errors
+                .push(BuildErrorDetail::CurrentOutsideRound { body });
+            return None;
+        }
+        let mut slots: Vec<(u16, PositionHandle, TypeDesc)> = self
+            .positions
+            .iter()
+            .filter(|record| {
+                record.owner == body && matches!(record.source, PositionSource::IterCurrent { .. })
+            })
+            .map(|record| {
+                let slot = match record.source {
+                    PositionSource::IterCurrent { slot, .. } => slot,
+                    _ => 0,
+                };
+                (slot, record.handle, record.type_desc)
+            })
+            .collect();
+        slots.sort_by_key(|(slot, _, _)| *slot);
+        if slots.len() != wanted.len() {
+            self.errors.push(BuildErrorDetail::CurrentArityMismatch {
+                body,
+                expected: slots.len() as u16,
+                found: wanted.len() as u16,
+            });
+            return None;
+        }
+        for (slot, (_, _, actual)) in slots.iter().enumerate() {
+            if *actual != wanted[slot] {
+                self.errors.push(BuildErrorDetail::CurrentShapeMismatch {
+                    body,
+                    slot: slot as u16,
+                    expected: *actual,
+                    found: wanted[slot],
+                });
+                return None;
+            }
+        }
+        Some(slots.into_iter().map(|(_, handle, _)| handle).collect())
+    }
+
+    #[allow(clippy::too_many_arguments)] // 静态登记需逐项显式给出声明组与逐槽类型化操作
+    /// 登记 Iter Step：消费 Round Body **已冻结**的 Next 声明并登记 parent 输出槽。
+    ///
+    /// 不补声明、不改声明时点、不重解析最近来源：唯一 Next 由 `Flow::next`／`next_with` 在
+    /// Round Body 内声明（含与 `round_initial` 的 arity/逐槽类型比较），这里只消费它。
+    /// `initial` 是 parent 内声明的初始状态（作为该 Step 的静态输入参与统一验证），其
+    /// 使用/imports 记录使用 `entry_order`——入口时点，确保 Round 内新增来源不能反向成为
+    /// initial 的合法来源。每个 parent 输出槽同时得到一个 Round 本地最终出口（Break 交付
+    /// current 时绑定）。
+    ///
+    /// 失败隔离：声明缺失/失败、initial 不可用、Shape 不符、预算为 0、任一槽来源不成立，或
+    /// Round 及其后代在本轮**已知失败**（`round_clean == false`，含 current 查询错误、child
+    /// Body 错误、延后到 finish 分类的未登记/前向来源失败，以及为保留更早首因而未重复记录的
+    /// 派生失败）时，parent 输出一律**不发布**（不作为合法来源、不作为可运行依赖），只保持
+    /// 槽位对齐；返回 `false` 供 `iter_output` 构造受控失败形状。父结果发布使用独立时点。
     pub(crate) fn register_iter(
         &mut self,
         parent: BodyId,
         round: BodyId,
         step: usize,
+        entry_order: u64,
         initial: Vec<PositionDesc>,
-        declared: Vec<PositionDesc>,
         current: Vec<PositionHandle>,
         max_iterations: usize,
+        round_clean: bool,
         register_states: RegisterStatesFn,
         state_import_slots: StateImportSlotsFn,
-    ) -> Vec<PositionHandle> {
-        // 定义顺序在 round 闭包之后取得：声明输出必须早于该顺序登记（后向来源）。
-        let order = self.next_order();
+    ) -> (Vec<PositionHandle>, bool) {
         if max_iterations == 0 {
             self.errors.push(BuildErrorDetail::IterZeroRounds {
                 body: parent,
                 step: Some(step),
             });
         }
-        let next_ok = self.declare_next(round, declared.clone(), order);
+        // 消费同一份冻结声明：首因已由 Declaration 记录（派生失败延后到 finish），
+        // 这里不叠加二次诊断，只按 `usable` 决定是否发布合法父输出。
+        let declaration = self.bodies[round.index()].next.clone();
+        // 缺失 Next 是登记路径自身的首因：必须早于它派生的失败形状使用错误留下。
+        if !declaration.attempted {
+            self.errors.push(BuildErrorDetail::MissingDeclaration {
+                body: round,
+                kind: DeclarationKind::Next,
+            });
+        }
+        let declared_ok = declaration.declared && !declaration.failed;
+        let declared = declaration.slots.clone();
+        let declare_order = declaration.order;
         let mut initial_ok = true;
         for desc in &initial {
             if self
-                .record_use_at(parent, Some(step), *desc, order)
+                .record_use_at(parent, Some(step), *desc, entry_order)
                 .is_some()
             {
                 initial_ok = false;
             }
         }
+        // Shape 比较只在声明本身成立时进行：声明失败的 arity/类型诊断已由 declare 记录，
+        // 不被这里的二次错误盖过。
         let mut shape_ok = initial.len() == declared.len();
-        if shape_ok {
-            for (slot, (expected, declared)) in initial.iter().zip(declared.iter()).enumerate() {
-                if expected.type_desc != declared.type_desc {
-                    shape_ok = false;
-                    self.errors
-                        .push(BuildErrorDetail::DeclarationShapeMismatch {
-                            body: round,
-                            kind: DeclarationKind::Next,
-                            slot: slot as u16,
-                            expected: expected.type_desc,
-                            found: Some(declared.type_desc),
-                        });
+        if declared_ok {
+            if shape_ok {
+                for (slot, (expected, declared)) in initial.iter().zip(declared.iter()).enumerate()
+                {
+                    if expected.type_desc != declared.type_desc {
+                        shape_ok = false;
+                        self.errors
+                            .push(BuildErrorDetail::DeclarationShapeMismatch {
+                                body: round,
+                                kind: DeclarationKind::Next,
+                                slot: slot as u16,
+                                expected: expected.type_desc,
+                                found: Some(declared.type_desc),
+                            });
+                    }
                 }
+            } else {
+                self.errors
+                    .push(BuildErrorDetail::DeclarationArityMismatch {
+                        body: round,
+                        kind: DeclarationKind::Next,
+                        slot: 0,
+                        expected: initial.len() as u16,
+                        found: declared.len() as u16,
+                    });
             }
-        } else {
-            self.errors
-                .push(BuildErrorDetail::DeclarationArityMismatch {
-                    body: round,
-                    kind: DeclarationKind::Next,
-                    slot: 0,
-                    expected: initial.len() as u16,
-                    found: declared.len() as u16,
-                });
         }
         let mut slots = Vec::with_capacity(declared.len());
         let mut outputs = Vec::with_capacity(declared.len());
         let mut bridges = Vec::with_capacity(declared.len());
         for (slot, desc) in declared.into_iter().enumerate() {
-            let source_ok = next_ok
+            let source_ok = declared_ok
                 && initial_ok
                 && shape_ok
-                && self.availability_error(round, None, desc, order).is_none();
+                && self
+                    .availability_error(round, None, desc, declare_order)
+                    .is_none();
             let mut source = if source_ok {
                 self.position(desc.handle).map(|record| record.core.clone())
             } else {
@@ -2373,13 +2499,15 @@ impl<'n> Builder<'n> {
                 },
                 desc.type_desc,
             );
-            let output = self.allocate(
+            // 父输出预分配但**不发布**：整个 Round 完整验证通过后才按统一时点公开。
+            let output = self.allocate_with_publication(
                 parent,
                 PositionSource::IterOutput {
                     step,
                     slot: slot as u16,
                 },
                 desc.type_desc,
+                false,
             );
             let bridge = self.allocate(
                 parent,
@@ -2410,6 +2538,20 @@ impl<'n> Builder<'n> {
             }
             outputs.push(output);
         }
+        // 只有整轮验证全部成立才发布合法父输出；失败槽保持“已分配但未发布”。
+        let ok = max_iterations != 0
+            && declared_ok
+            && initial_ok
+            && shape_ok
+            && slots.len() == outputs.len()
+            && round_clean;
+        // 父结果发布使用独立时点：入口 order、Next 声明 order 与发布 order 分开记录。
+        let step_order = self.next_order();
+        if ok {
+            for output in &outputs {
+                self.mark_published(*output, step_order);
+            }
+        }
         self.bodies[parent.index()].steps.push(Box::new(IterStep {
             child: round,
             max_iterations,
@@ -2418,11 +2560,11 @@ impl<'n> Builder<'n> {
             slots,
             bridges,
             outputs: outputs.iter().map(|handle| handle.position).collect(),
-            order,
+            order: step_order,
             register_states,
             state_import_slots,
         }));
-        outputs
+        (outputs, ok)
     }
 
     /// 为 Each Step 分配形式 item 位置：owner 是 item Body，每次 Item 复用同一逻辑位置。

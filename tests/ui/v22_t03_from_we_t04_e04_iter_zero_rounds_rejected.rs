@@ -48,9 +48,10 @@ fn main() {
 
     let error = block_on(runtime.execute::<_, Context, _>(
         |flow: &mut srflow::Flow<'_>, context: Ref<Context>| {
-            let out_refs = flow.iter(context, 0, |current, round| {
+            let out_refs = flow.iter_output(context, 0, |round| {
+                let current = round.current::<Context>();
                 let _ = round.then_with_output(&judge, current);
-                current
+                round.next_with(current);
             });
             flow.output_with(out_refs);
         },

@@ -390,11 +390,12 @@ async fn scheme_b(
                         writing.then_with_output(&nodes.write, (plan, characters, facts, boundary));
                     writing.output_with(out_refs);
                 });
-                let out_refs = flow.iter(draft, limit, |current, round| {
+                let out_refs: srflow::Ref<Prose> = flow.iter_output(draft, limit, |round| {
+                    let current = round.current::<Prose>();
                     let diagnosis = round.then_with_output(&nodes.diagnose, (current, basis));
                     round.then_with_output(&nodes.stop, diagnosis);
                     let action = round.then_with_output(&nodes.choose, diagnosis);
-                    round.choose_with_output(action, |choice| {
+                    let next: srflow::Ref<Prose> = round.choose_with_output(action, |choice| {
                         choice.case(RevisionAction::Reduce, |branch| {
                             let out_refs = branch
                                 .then_with_output(&nodes.reduce, (current, diagnosis, boundary));
@@ -414,7 +415,8 @@ async fn scheme_b(
                             );
                             branch.output_with(out_refs);
                         });
-                    })
+                    });
+                    round.next_with(next);
                 });
                 flow.output_with(out_refs);
             },

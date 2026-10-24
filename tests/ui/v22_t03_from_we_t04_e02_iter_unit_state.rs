@@ -20,8 +20,9 @@ async fn produce(query: Query<&Amount>) -> Result<Amount, BodyError> {
 #[allow(dead_code)] // 定义体在类型检查阶段即产生目标诊断，与是否被调用无关
 fn probe<'n>(flow: &mut Flow<'n>, amount: Ref<Amount>) {
     // 期望主诊断：E0277——`()` 不实现 Iter 的 StateShape。
-    flow.iter((), 3, |(), round| {
+    flow.iter((), 3, |round| {
         let _ = round.then_with_output(&produce, amount);
+        round.next_with(());
     });
 }
 

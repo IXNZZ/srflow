@@ -244,6 +244,21 @@ pub(crate) enum BuildErrorDetail {
     RetryBudgetUnrepresentable { body: BodyId, step: Option<usize> },
     /// Iter 预算：`max_iterations = 0`，至少需要一轮（SPEC §11）。
     IterZeroRounds { body: BodyId, step: Option<usize> },
+    /// Iter Current 查询：`current` 只允许在直接 Round Body 内使用（SPEC §8.5 G06）。
+    CurrentOutsideRound { body: BodyId },
+    /// Iter Current 查询：请求 Shape 的槽数与该 Round 的 formal Current 不一致。
+    CurrentArityMismatch {
+        body: BodyId,
+        expected: u16,
+        found: u16,
+    },
+    /// Iter Current 查询：请求 Shape 的逐槽类型与该 Round 的 formal Current 不一致。
+    CurrentShapeMismatch {
+        body: BodyId,
+        slot: u16,
+        expected: TypeDesc,
+        found: TypeDesc,
+    },
     /// Core 位置分配（checked 序列）失败。
     PositionAllocationFailed,
     /// 当前使用点没有可见、已发布、未失效的同类型业务来源。
@@ -424,6 +439,29 @@ impl fmt::Display for BuildErrorDetail {
                 f,
                 "iter at body {body:?} step {step:?} declares max_iterations = 0; at least \
                  one round is required"
+            ),
+            Self::CurrentOutsideRound { body } => write!(
+                f,
+                "current at body {body:?} is only available inside a direct Iter round body"
+            ),
+            Self::CurrentArityMismatch {
+                body,
+                expected,
+                found,
+            } => write!(
+                f,
+                "current at body {body:?} requests {found} state slots, but this round \
+                 declares {expected}"
+            ),
+            Self::CurrentShapeMismatch {
+                body,
+                slot,
+                expected,
+                found,
+            } => write!(
+                f,
+                "current at body {body:?} slot {slot} requests {found}, but this round \
+                 declares {expected}"
             ),
             Self::PositionAllocationFailed => {
                 f.write_str("core RefId allocation failed (identity space exhausted)")

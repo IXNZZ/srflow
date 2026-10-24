@@ -185,10 +185,11 @@ fn e13_produced_next_is_discarded_and_entry_current_is_delivered() {
     let runtime = Runtime::new();
     let delivered = block_on(runtime.execute::<_, Parcel, _>(
         |flow: &mut crate::core::engine::flow::Flow<'_>, state: Ref<Parcel>| {
-            let out_refs = flow.iter(state, 5, |current, round| {
+            let out_refs = flow.iter_output(state, 5, |round| {
+                let current = round.current::<Parcel>();
                 let next = round.then_with_output(&advance, current);
                 round.then_with_output(&judge_break_at, current);
-                next
+                round.next_with(next);
             });
             flow.output_with(out_refs);
         },
@@ -309,10 +310,11 @@ fn e16_imported_initial_survives_and_loop_owned_old_value_is_recycled() {
     let runtime = Runtime::new();
     let delivered = block_on(runtime.execute::<_, Parcel, _>(
         |flow: &mut crate::core::engine::flow::Flow<'_>, state: Ref<Parcel>| {
-            let out_refs = flow.iter(state, 6, |current, round| {
+            let out_refs = flow.iter_output(state, 6, |round| {
+                let current = round.current::<Parcel>();
                 let next = round.then_with_output(&advance, current);
                 round.then_with_output(&judge_break_at, current);
-                next
+                round.next_with(next);
             });
             flow.output_with(out_refs);
         },
@@ -397,9 +399,10 @@ fn e17_same_target_next_survives_a_normal_promote_without_copying_or_reowning() 
     let runtime = Runtime::new();
     let delivered = block_on(runtime.execute::<_, Parcel, _>(
         |flow: &mut crate::core::engine::flow::Flow<'_>, state: Ref<Parcel>| {
-            let out_refs = flow.iter(state, 5, |current, round| {
+            let out_refs = flow.iter_output(state, 5, |round| {
+                let current = round.current::<Parcel>();
                 round.then_with_output(&judge_break_on_call, current);
-                current
+                round.next_with(current);
             });
             flow.output_with(out_refs);
         },
@@ -464,10 +467,11 @@ fn e19_shared_target_keeps_independent_states_and_single_responsibility() {
     let delivered = block_on(runtime.execute::<_, Parcel, _>(
         |flow: &mut crate::core::engine::flow::Flow<'_>, refs: (Ref<Parcel>, Ref<Parcel>)| {
             let out_refs = flow
-                .iter(refs, 5, |(left, _right), round| {
+                .iter_output(refs, 5, |round| {
+                    let (left, _right) = round.current::<(Parcel, Parcel)>();
                     let shared = round.then_with_output(&produce_shared, left);
                     round.then_with_output(&judge_break_at, left);
-                    (shared, shared)
+                    round.next_with((shared, shared));
                 })
                 .0;
             flow.output_with(out_refs);
@@ -528,9 +532,10 @@ fn e20_cross_slot_swap_and_retention_never_recycle_shared_values() {
     let delivered = block_on(runtime.execute::<_, (Parcel, Parcel, Parcel), _>(
         |flow: &mut crate::core::engine::flow::Flow<'_>,
          refs: (Ref<Parcel>, Ref<Parcel>, Ref<Parcel>)| {
-            let out_refs = flow.iter(refs, 5, |(x, y, z), round| {
+            let out_refs = flow.iter_output(refs, 5, |round| {
+                let (x, y, z) = round.current::<(Parcel, Parcel, Parcel)>();
                 round.then_with_output(&judge_break_at, x);
-                (y, x, z)
+                round.next_with((y, x, z));
             });
             flow.output_with(out_refs);
         },

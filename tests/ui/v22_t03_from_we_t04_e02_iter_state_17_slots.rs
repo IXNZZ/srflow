@@ -20,7 +20,10 @@ type Tuple17 = (
 
 #[allow(dead_code)] // 定义体在类型检查阶段即产生目标诊断，与是否被调用无关
 fn probe<'n>(flow: &mut Flow<'n>, t: Tuple17) {
-    let _ = flow.iter(t, 3, |current, _round| current);
+    let _ = flow.iter(t, 3, |round| {
+        // 17 元 State 在 `iter` 调用点即被拒绝（S 不满足 StateShape）；Body 形态不改变该判定。
+        let _ = round;
+    });
 }
 
 fn main() {

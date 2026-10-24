@@ -147,10 +147,11 @@ fn e05_controllers_expose_real_frames_callers_and_distinct_rounds() {
     let outcome = block_on(runtime.execute::<_, (), _>(
         |flow: &mut Flow<'_>, state: Ref<Tracked>| {
             let () = flow.retry_output(1, |attempt| {
-                let inner = attempt.iter(state, 3, |current, round| {
+                let inner = attempt.iter_output(state, 3, |round| {
+                    let current = round.current::<Tracked>();
                     let next = round.then_with_output(&bump_ctx, current);
                     round.then_with_output(&break_after_first, current);
-                    next
+                    round.next_with(next);
                 });
                 let _: () = attempt.then_with_output(&consume_ctx, inner);
                 attempt.output::<()>();
@@ -280,10 +281,11 @@ fn e06_deep_ordinary_capture_and_state_import_meet_at_the_direct_caller() {
     let outcome = block_on(runtime.execute::<_, Tracked, _>(
         |flow: &mut Flow<'_>, (state, anchor): (Ref<Tracked>, Ref<Anchor>)| {
             let out_refs: Ref<Tracked> = flow.chain_output(|sub| {
-                let out_refs = sub.iter(state, 3, |current, round| {
+                let out_refs = sub.iter_output(state, 3, |round| {
+                    let current = round.current::<Tracked>();
                     let next = round.then_with_output(&combine, (current, anchor));
                     round.then_with_output(&break_after_first, current);
-                    next
+                    round.next_with(next);
                 });
                 sub.output_with(out_refs);
             });
@@ -859,17 +861,14 @@ fn e28_iter_break_delivery_late_destination_occupied_rejects_without_partial_exp
     let log = Rc::new(RefCell::new(Vec::new()));
     let definition =
         build_definition::<(Tracked, Tracked), (Tracked, Tracked), _>(|flow, (draft, context)| {
-            let out_refs = flow.iter(
-                (draft, context),
-                3,
-                |(current_draft, current_context), round| {
-                    // 本轮已产生但未被接受的 next，随后发出 IterBreak。
-                    let next_draft = round.then_with_output(&bump_ctx, current_draft);
-                    let next_context = round.then_with_output(&bump_ctx, current_context);
-                    round.then_with_output(&break_tracked_now, current_context);
-                    (next_draft, next_context)
-                },
-            );
+            let out_refs = flow.iter_output((draft, context), 3, |round| {
+                let (current_draft, current_context) = round.current::<(Tracked, Tracked)>();
+                // 本轮已产生但未被接受的 next，随后发出 IterBreak。
+                let next_draft = round.then_with_output(&bump_ctx, current_draft);
+                let next_context = round.then_with_output(&bump_ctx, current_context);
+                round.then_with_output(&break_tracked_now, current_context);
+                round.next_with((next_draft, next_context));
+            });
             flow.output_with(out_refs);
         })
         .expect("the iter definition builds");
@@ -1162,10 +1161,11 @@ fn e24_outer_retry_restarts_the_inner_iter_from_the_original_state() {
     let delivered = block_on(runtime.execute::<_, Tracked, _>(
         |flow: &mut Flow<'_>, state: Ref<Tracked>| {
             let out_refs: Ref<Tracked> = flow.retry_output(1, |attempt| {
-                let iterated = attempt.iter(state, 3, |current, round| {
+                let iterated = attempt.iter_output(state, 3, |round| {
+                    let current = round.current::<Tracked>();
                     let next = round.then_with_output(&bump_ctx, current);
                     round.then_with_output(&break_after_first, current);
-                    next
+                    round.next_with(next);
                 });
                 let out_refs = attempt.then_with_output(&judge_retry_once, iterated);
                 attempt.output_with(out_refs);
@@ -1274,10 +1274,11 @@ fn e03_child_local_round_position_used_in_parent_step_is_rejected() {
     let runtime = Runtime::new();
     let outcome = block_on(runtime.execute::<_, (), _>(
         |flow: &mut Flow<'_>, initial: Ref<u32>| {
-            let _output = flow.iter(initial, 1, |current, round| {
+            let _output = flow.iter(initial, 1, |round| {
+                let current = round.current::<u32>();
                 let produced = round.then_with_output(&produce_u32, current);
                 escaped = Some(produced);
-                current
+                round.next_with(current);
             });
             let () = flow.then_with_output(&sink_u32, escaped.expect("captured round-local ref"));
             flow.output_with(());
@@ -1302,10 +1303,11 @@ fn e03_child_local_round_position_as_root_output_is_rejected() {
     let runtime = Runtime::new();
     let outcome = block_on(runtime.execute::<_, u32, _>(
         |flow: &mut Flow<'_>, initial: Ref<u32>| {
-            let _output = flow.iter(initial, 1, |current, round| {
+            let _output = flow.iter(initial, 1, |round| {
+                let current = round.current::<u32>();
                 let produced = round.then_with_output(&produce_u32, current);
                 escaped = Some(produced);
-                current
+                round.next_with(current);
             });
             let out_refs = escaped.expect("captured round-local ref");
             flow.output_with(out_refs);
@@ -1351,9 +1353,10 @@ fn e03_unselected_branch_position_as_iter_initial_is_rejected() {
                 });
             });
             let initial = forged.expect("captured forged ref");
-            let out_refs = flow.iter(initial, 1, |current, round| {
+            let out_refs = flow.iter_output(initial, 1, |round| {
+                let current = round.current::<u32>();
                 round.then_with_output(&break_now, current);
-                current
+                round.next_with(current);
             });
             flow.output_with(out_refs);
         },
@@ -1474,9 +1477,10 @@ fn e04_iter_max_budget_first_round_break_is_legal() {
     let runtime = Runtime::new();
     let delivered = block_on(runtime.execute::<_, u32, _>(
         |flow: &mut Flow<'_>, initial: Ref<u32>| {
-            let out_refs = flow.iter(initial, usize::MAX, |current, round| {
+            let out_refs = flow.iter_output(initial, usize::MAX, |round| {
+                let current = round.current::<u32>();
                 round.then_with_output(&break_now, current);
-                current
+                round.next_with(current);
             });
             flow.output_with(out_refs);
         },

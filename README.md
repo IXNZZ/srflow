@@ -4,7 +4,7 @@ System Runtime Workflow（SRFlow）是面向强类型业务流程的 Rust 执行
 
 ## 当前设计与实现
 
-**v2.2 设计基线已审定，T01～T05 已各自限定范围验收。公开 Node/Factory、新 Root、Chain/Retry 与 Choose/Each 已接入。** [T05 最终独立复审 R2](docs/implementation_tasks_v2.2/V22_T05_REVIEW_R2_v0.1.md)关闭 R01～R05；[验收指纹](docs/implementation_tasks_v2.2/V22_T05_ACCEPTED_SOURCE_SHA256.json)覆盖 467 项。Iter 新门面和完整回归收口仍由 T06/T07 推进，尚未实施。
+**v2.2 设计基线已审定，T01～T06 已各自限定范围验收；T07 尚未编写/启动。** 公开 Node/Factory、新 Root、Chain/Retry、Choose/Each 与 Iter 新门面均已接入。[T06 最终独立复审 R3](docs/implementation_tasks_v2.2/V22_T06_REVIEW_R3_v0.1.md)关闭 R01～R05，[492 项验收指纹](docs/implementation_tasks_v2.2/V22_T06_ACCEPTED_SOURCE_SHA256.json)作为后续基线。T05 源码已提交 a027205，T06 验收实现尚未提交；完整 v2.2 回归收口与最终验收仍由 T07 承担。
 
 - [v2.2 总设计](docs/SRFlow_Design_v2.2.md)
 - [v2.2 Public API SPEC](docs/SRFlow_v2.2_Public_API_SPEC_v0.1.md)
@@ -14,7 +14,7 @@ System Runtime Workflow（SRFlow）是面向强类型业务流程的 Rust 执行
 
 v2.2 目标是定义期自动依赖、链式调用、运行期同步 Factory 和显式 output/next。Root 继续使用 Runtime::execute；不引入实验性公开 Workflow 或 Flow::build。自动连接最终形成固定 Ref 关系，运行期不按类型搜索 Data。
 
-当前 Root 使用 `Runtime::execute` 的双参数 unit 定义闭包，通过 `flow.output` / `output_with` 声明输出，由调用方期望 owned Out 类型。`then` / `then_output` 自动解析输入，`then_with` / `then_with_output` 保留显式 Ref；`provide` / `provide_output` 与 `ref_of` 已公开。Chain/Retry、Choose 的分支和 Each Item Body 使用单参数 unit 构建闭包，以 `output` / `output_with` 声明输出；普通形式返回 Flow，取输出形式返回父域 RefShape。Iter 暂保留旧 Current/Next 返回协议；`next` / `next_with` 仍内部，留待 T06。Scope/Container 及执行算法保持原语义。
+当前 Root 使用 `Runtime::execute` 的双参数 unit 定义闭包，通过 `flow.output` / `output_with` 声明输出，由调用方期望 owned Out 类型。`then` / `then_output` 自动解析输入，`then_with` / `then_with_output` 保留显式 Ref；`provide` / `provide_output` 与 `ref_of` 已公开。Chain/Retry、Choose 的分支和 Each Item Body 使用单参数 unit 构建闭包，以 `output` / `output_with` 声明输出；普通形式返回 Flow，取输出形式返回父域 RefShape。Iter Round 同样使用单参数 unit 构建闭包，以 `next` / `next_with` 声明推进及最终状态契约；`iter` 返回 Flow，`iter_output` 返回最终父域 RefShape，`current::<T>()` 在直接 Round 中取得完整有序 formal Current。Scope/Container 及执行算法保持原语义。
 
 [WE-T01～WE-T06](docs/workflow_engine_tasks/README.md) 已按各任务最新报告完成限定范围验收；原 V21/G21 历史记录保留其适用范围。旧 FlowBuilder/Match/Loop 门面和早期“从空工程重写”是历史过程，不是 v2.2 再次重写 Core 的路线。
 
@@ -34,7 +34,7 @@ SPEC 是目标契约，Probe 是证据，源码是当前实现。任何材料中
 
 ## v2.2 实施状态
 
-[实施规划 v0.1](docs/SRFlow_v2.2_Implementation_Plan_v0.1.md) 已评审通过，保留 V22-T01～T07 顺序。[V22-T01](docs/implementation_tasks_v2.2/V22_T01_Definition_Sources_And_Declarations_v0.1.md) R1.2 已独立复审验收通过，R01～R04 均关闭，登记 COMPLETED，限定 Definition 基础范围；[复审 R1](docs/implementation_tasks_v2.2/V22_T01_REVIEW_R1_v0.1.md)记录独立验证及边界，[HANDOVER](docs/implementation_tasks_v2.2/V22_T01_HANDOVER_v0.1.md)保留实施记录，[任务入口](docs/implementation_tasks_v2.2/README.md)维护状态。T01 实现已入库 312cbe7；T02 R1.3 已限定范围验收通过并提交为 271a0d7；T03 已按[最终复审 R2](docs/implementation_tasks_v2.2/V22_T03_REVIEW_R2_v0.1.md)验收并登记 COMPLETED，已提交为 071cd43；T04 验收实现已提交为 cc0a315；T05 验收实现仍在工作区，未提交/推送/发布。
+[实施规划 v0.1](docs/SRFlow_v2.2_Implementation_Plan_v0.1.md) 已评审通过，保留 V22-T01～T07 顺序。[V22-T01](docs/implementation_tasks_v2.2/V22_T01_Definition_Sources_And_Declarations_v0.1.md) R1.2 已独立复审验收通过，R01～R04 均关闭，登记 COMPLETED，限定 Definition 基础范围；[复审 R1](docs/implementation_tasks_v2.2/V22_T01_REVIEW_R1_v0.1.md)记录独立验证及边界，[HANDOVER](docs/implementation_tasks_v2.2/V22_T01_HANDOVER_v0.1.md)保留实施记录，[任务入口](docs/implementation_tasks_v2.2/README.md)维护状态。T01 实现已入库 312cbe7；T02 R1.3 已限定范围验收通过并提交为 271a0d7；T03 已按[最终复审 R2](docs/implementation_tasks_v2.2/V22_T03_REVIEW_R2_v0.1.md)验收并登记 COMPLETED，已提交为 071cd43；T04 验收实现已提交为 cc0a315；T05 验收实现已提交 a027205；T06 已限定范围验收，尚未提交/推送/发布。
 
 [V22-T02 详细任务书](docs/implementation_tasks_v2.2/V22_T02_Node_And_Factory_Internal_Integration_v0.1.md) 已登记 COMPLETED · R1.3，[独立验收](docs/implementation_tasks_v2.2/V22_T02_REVIEW_R2_v0.1.md)确认 R01～R03 全部关闭；[HANDOVER](docs/implementation_tasks_v2.2/V22_T02_HANDOVER_v0.1.md)保留实施记录。T02 完成内部接入；其后 T03 已完成公开 then/Runtime 切换，限定范围独立验收通过。
 
@@ -42,7 +42,7 @@ SPEC 是目标契约，Probe 是证据，源码是当前实现。任何材料中
 
 ## 开发入口
 
-先阅读 [AGENTS](AGENTS.md) 和当前已审定任务；T01～T05 已各自限定范围验收通过；T06/T07 尚未实施，不自动获得开工授权。
+先阅读 [AGENTS](AGENTS.md) 和当前已审定任务；T01～T06 已各自限定范围验收通过（T05 源码已提交 a027205，T06 源码未提交）；T07 尚未编写/实施、不自动获得开工授权。
 
 现有工程工具链基线 Rust 1.97、edition 2024，常用离线检查：
 
@@ -62,4 +62,4 @@ cargo run --offline --example node_chain_runtime
 - `docs/` 下新增设计与验收文档沿用本地管理，不整体纳入 Git；正式代码验证所需的脚本/清单可单独跟踪（当前为 T02 UI 驱动及两个清单），历史已跟踪文档保持原状。
 - 每个任务完成后，对该任务的代码变更统一提交一次；提交、推送与发布仍须按用户明确授权和 AGENTS 执行。
 
-当前 T01 的 Definition 内部支撑已验收并入库 312cbe7；T02 R1.3 已限定范围验收并提交为 271a0d7（含原有根包 0.2.2 版本变更）。本轮随后只编写 T03 文档，没有修改 Rust 或测试，不推送/发布；v2.1 历史文档和 Probe 原始证据继续保留。
+历史记录（T03 准备时点）：T01 的 Definition 内部支撑已验收并入库 312cbe7；T02 R1.3 已限定范围验收并提交为 271a0d7（含原有根包 0.2.2 版本变更）。本轮随后只编写 T03 文档，没有修改 Rust 或测试，不推送/发布；v2.1 历史文档和 Probe 原始证据继续保留。
